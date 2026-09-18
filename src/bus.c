@@ -483,6 +483,13 @@ static void dev_write_word(uint32_t w, uint32_t v)
             case 8:  g_crom_bank = ((b >> 1) & 7u) * 0x800000u; break;
             case 9:  g_crom_bank = ((b >> 1) & 3u) * 0x800000u; break;
             case 10: g_crom_bank = (((~b) >> 1) & 7u) * 0x800000u; break;
+            case 11: {   /* sweep: bank = ((b >> S) ^ X) & 7 */
+                const char *es = getenv("M3_BANK_S"), *ex = getenv("M3_BANK_X");
+                unsigned sh = es ? (unsigned)strtoul(es, NULL, 0) : 0u;
+                unsigned xr = ex ? (unsigned)strtoul(ex, NULL, 0) : 0u;
+                g_crom_bank = (((b >> sh) ^ xr) & 7u) * 0x800000u;
+                break;
+            }
             /* What this has always done, kept as the default until the
              * right reading is known: the value shifted into a byte offset.
              * For most of the values The Lost World writes -- 0xF7 above all
