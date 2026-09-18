@@ -24,6 +24,7 @@ own premise. See docs/technical/execution-model.md.
 
 import argparse
 import os
+import math
 import struct
 import sys
 from collections import Counter
@@ -59,7 +60,7 @@ class Machine:
         self.backup = bytearray(0x20000)
 
         self.r = [0] * 32
-        self.f = [0.0] * 32
+        self.f = [0] * 32       # FPRs, held as raw 64-bit patterns
         self.lr = self.ctr = self.xer = self.cr = self.fpscr = 0
         self.msr = 0x40 | 0x1000             # IP | ME, the 603e reset state
         self.sr = [0] * 16
@@ -81,6 +82,7 @@ class Machine:
         self.scsi_trace = False
         self.scsi_int = False
         self.scsi_moves = []
+        self.scsi_skipped = []
         self.io_log_f = None       # matches src/bus.c's M3_TRACE_IO format
         self.io_budget = 0
         self.dcache = {}                     # decoded-instruction cache
@@ -90,6 +92,9 @@ class Machine:
         self.watch_hits = []
         self.hist = []          # ring of recent taken branches
         self.hist_max = 0
+        self.brk = {}           # pc -> [hits, first icount, first field]
+        self.pci_addr = 0       # PCI CONFIG_ADDRESS latch
+        self.r3d_ping = 0       # Real3D status, bit 1 is the frame ping
         self.ram_writes = 0
         self.ram_lo = RAM_SIZE
         self.ram_hi = 0
@@ -133,7 +138,7 @@ class Machine:
         a &= M
         v &= (1 << (8 * n)) - 1
         if a in self.watch:
-            self.watch_hits.append((self.pc, a, v))
+            self.watch_hits.append((self.pc, a, v, self.icount, self.fields))
         reg = self._region(a)
         if reg is not None:
             buf, off = reg
@@ -168,6 +173,24 @@ class Machine:
             if dsp:
                 self.scsi_run(dsp)
 
+    @staticmethod
+    def dma_mapped(a, n):
+        """Somewhere sane to move data to or from -- mirrors mapped() in
+        src/scsi.c. Without this a malformed script walks the address space a
+        byte at a time; the boot's register test writes a pattern over DSP, so
+        garbage programs are routine and one of them zeroes work RAM."""
+        end = a + n
+        if end < a:                       return False   # wrapped
+        if end <= 0x00800000:             return True    # work RAM
+        if a >= 0xFF000000:               return True    # CROM
+        if 0x8C000000 <= a and end <= 0x8C400000: return True   # culling lo
+        if 0x8E000000 <= a and end <= 0x8E100000: return True   # culling hi
+        if 0x98000000 <= a and end <= 0x98400000: return True   # polygon RAM
+        if 0xF1000000 <= a and end <= 0xF1120000: return True   # tilegen
+        if 0x88000000 <= a and end <= 0x88000100: return True   # R3D trigger
+        if 0x9C000000 <= a and end <= 0x9D000000: return True   # R3D texture
+        return False
+
     def scsi_run(self, dsp):
         """Minimal 53C810 SCRIPTS engine: memory moves and transfer control.
 
@@ -183,10 +206,17 @@ class Machine:
                 cnt = d0 & 0xFFFFFF
                 src, dst = d1, swap32(self.read(dsp + 8, 4))
                 dsp += 12
-                if cnt and cnt <= 0x400000:
-                    self.scsi_moves.append((src, dst, cnt))
-                    for k in range(cnt):
-                        self.write(dst + k, 1, self.read(src + k, 1))
+                if not cnt or cnt > 0x400000:
+                    continue
+                if not (self.dma_mapped(src, cnt) and
+                        self.dma_mapped(dst, cnt)):
+                    # Skip the move but let the program run on, so its INT
+                    # still signals completion -- same as src/scsi.c.
+                    self.scsi_skipped.append((src, dst, cnt))
+                    continue
+                self.scsi_moves.append((src, dst, cnt))
+                for k in range(cnt):
+                    self.write(dst + k, 1, self.read(src + k, 1))
                 continue
             if (cmd & 0xC0) == 0x80:                 # transfer control
                 op = (cmd >> 3) & 7
@@ -259,8 +289,20 @@ class Machine:
             if o == 0x08:
                 return (self.bank >> 20) << 24
             return 0
+        # Real3D status block. The boot copies nine dwords of this into RAM
+        # with stwbrx -- the chip is on the PCI side, so the cached copy is
+        # byte-reversed -- and then waits for bit 0x02000000 of that copy to
+        # flip. Byte-reversed, that is bit 1 of the register here.
+        # ponytail: toggled per read rather than driven by the renderer, which
+        # is all the wait needs. Upgrade path: flip it when the Real3D
+        # actually retires a frame, once there is a renderer to retire one.
         if (w & 0xFF000000) == 0x84000000:
-            return 0                        # Real3D: never busy
+            if w == 0x84000000 and side_effects:
+                self.r3d_ping ^= 0x00000002
+            return self.r3d_ping if w == 0x84000000 else 0
+        # PCI CONFIG_DATA. The guest uses lwbrx, so hand back byte-reversed.
+        if w == 0xF0C00CFC:
+            return bswap32(pci_config(self.pci_addr))
         if (w & 0xFFFFFFC0) == 0xF0040000:
             o = w & 0x3C
             if o == 0x00:
@@ -285,6 +327,12 @@ class Machine:
             return
         if (w & 0xFFFF0000) == 0xF1180000 and (w & 0xFC) == 0x10:
             self.irq_pending &= ~v & M
+            return
+        # PCI CONFIG_ADDRESS. Written with stwbrx, so un-reverse it. Config
+        # writes (BARs, command words) are dropped: the board's memory map is
+        # fixed, so there is nothing for the guest to relocate.
+        if w == 0xF0800CF8:
+            self.pci_addr = bswap32(v)
             return
 
     # ---- condition register ----------------------------------------------
@@ -381,6 +429,74 @@ def maybe_interrupt(m):
     m.pc = (0xFFF00000 if (m.msr & 0x40) else 0x00000000) + 0x500
 
 
+# PCI configuration space. The game refuses to come up until it finds these
+# two devices by ID; everything else reads as absent. See dev_read_word.
+PCI_IDS = {
+    0x0D: 0x16C311DB,   # Sega 315-5828 Real3D  (vendor 0x11DB, device 0x16C3)
+    0x0E: 0x00011000,   # LSI 53C810 SCSI       (vendor 0x1000, device 0x0001)
+}
+
+
+def bswap32(v):
+    return ((v & 0xFF) << 24) | ((v & 0xFF00) << 8) |            ((v >> 8) & 0xFF00) | ((v >> 24) & 0xFF)
+
+
+FMASK = (1 << 64) - 1
+
+
+def f_val(bits):
+    """Raw 64-bit pattern -> Python double."""
+    return struct.unpack(">d", struct.pack(">Q", bits & FMASK))[0]
+
+
+def f_bits(x):
+    """Python double -> raw 64-bit pattern."""
+    return struct.unpack(">Q", struct.pack(">d", x))[0]
+
+
+def f_single(x):
+    """Round a double to single precision, saturating like the hardware."""
+    try:
+        return struct.unpack(">f", struct.pack(">f", x))[0]
+    except (OverflowError, ValueError):
+        return math.copysign(math.inf, x) if x == x else math.nan
+
+
+def f_arith(op, a, b, c=None):
+    """One FP operation, with the hardware's answers for the edge cases
+    Python raises on: x/0 is a signed infinity, 0/0 and inf-inf are NaN."""
+    try:
+        if op == "add":  return a + b
+        if op == "sub":  return a - b
+        if op == "mul":  return a * b
+        if op == "div":  return a / b
+        if op == "madd": return a * c + b
+        if op == "msub": return a * c - b
+        if op == "sqrt": return math.sqrt(a)
+        if op == "re":   return 1.0 / a
+        if op == "rsqrte":
+            return 1.0 / math.sqrt(a)
+    except ZeroDivisionError:
+        # a/0: signed infinity, or NaN when the numerator is zero too.
+        num = a if op in ("div", "madd", "msub") else 1.0
+        if num == 0.0 or num != num:
+            return math.nan
+        return math.copysign(math.inf, num) * math.copysign(1.0, b)
+    except (ValueError, OverflowError):
+        return math.nan
+    raise NotImplementedError(op)
+
+
+def pci_config(addr):
+    """Config dword for a CONFIG_ADDRESS value, host byte order."""
+    if not (addr & 0x80000000):
+        return 0
+    dev = (addr >> 11) & 0x1F
+    if (addr & 0xFC) == 0 and dev in PCI_IDS:
+        return PCI_IDS[dev]
+    return 0                            # every other register reads zero
+
+
 def run(m, entry, max_insns, stop_in_ram, trace=0, trace_at=None):
     m.pc = entry
     traced = 0
@@ -395,6 +511,11 @@ def run(m, entry, max_insns, stop_in_ram, trace=0, trace_at=None):
         if trace_at is not None and pc == trace_at:
             armed = True
             tracing = True
+        if pc in m.brk:
+            e = m.brk[pc]
+            if not e[0]:
+                e[1], e[2] = m.icount, m.fields
+            e[0] += 1
         maybe_interrupt(m)
         if m.pc != pc:
             continue
@@ -720,17 +841,88 @@ def step(m, i, mn, rd, ra, rb):
         for k in range(0, 32, 4):
             m.write((a + k) & M, 4, 0)
 
-    # --- floating point (stored as raw bits; the boot path only moves them) ---
-    elif mn in ("lfs", "lfd", "stfs", "stfd", "lfsx", "lfdx", "stfsx", "stfdx"):
+    # --- floating point ------------------------------------------------------
+    #
+    # FPRs are held as their raw 64-bit patterns, not as Python floats, so
+    # that the block copies in the boot path -- which move data through lfd
+    # and stfd without caring what it means -- stay bit-exact. Arithmetic
+    # converts at the edges.
+    elif mn in ("lfs", "lfsu", "lfd", "lfdu", "stfs", "stfsu", "stfd", "stfdu",
+                "lfsx", "lfsux", "lfdx", "lfdux",
+                "stfsx", "stfsux", "stfdx", "stfdux"):
         idx = "x" in mn
-        a = (((r[ra] if ra else 0) + (r[rb] if idx else simm))) & M
-        n = 8 if "fd" in mn else 4
+        base = r[ra] if ra else 0
+        a = (base + (r[rb] if idx else simm)) & M
+        dbl = "fd" in mn
         if mn.startswith("l"):
-            m.f[rd] = m.read(a, n)
+            if dbl:
+                m.f[rd] = m.read(a, 8)
+            else:
+                # Single in memory widens to double in the register.
+                v = struct.unpack(">f", m.read(a, 4).to_bytes(4, "big"))[0]
+                m.f[rd] = f_bits(v)
         else:
-            m.write(a, n, int(m.f[rd]) if isinstance(m.f[rd], int) else 0)
+            if dbl:
+                m.write(a, 8, m.f[rd])
+            else:
+                try:
+                    b4 = struct.pack(">f", f_val(m.f[rd]))
+                except (OverflowError, ValueError):
+                    # Saturate to +INF, the hardware's answer.
+                    b4 = (0x7F800000).to_bytes(4, "big")
+                m.write(a, 4, int.from_bytes(b4, "big"))
+        if mn.endswith("u") or mn.endswith("ux"):
+            if ra:
+                r[ra] = a
+    elif mn == "stfiwx":
+        a = ((r[ra] if ra else 0) + r[rb]) & M
+        m.write(a, 4, m.f[rd] & 0xFFFFFFFF)
     elif mn == "fmr":
         m.f[rd] = m.f[rb]
+    elif mn == "fneg":
+        m.f[rd] = m.f[rb] ^ (1 << 63)
+    elif mn == "fabs":
+        m.f[rd] = m.f[rb] & ~(1 << 63)
+    elif mn == "fnabs":
+        m.f[rd] = m.f[rb] | (1 << 63)
+    elif mn == "frsp":
+        m.f[rd] = f_bits(f_single(f_val(m.f[rb])))
+    elif mn in ("fctiw", "fctiwz"):
+        x = f_val(m.f[rb])
+        if x != x:                          # NaN converts to the low bound
+            n32 = -0x80000000
+        else:
+            n32 = int(x) if mn == "fctiwz" else int(round(x))
+            n32 = max(-0x80000000, min(0x7FFFFFFF, n32))
+        m.f[rd] = n32 & 0xFFFFFFFF
+    elif mn == "fsel":
+        a = f_val(m.f[ra])
+        m.f[rd] = m.f[i.rc_reg] if (a >= 0.0 and a == a) else m.f[rb]
+    elif mn in ("fadd", "fadds", "fsub", "fsubs", "fmul", "fmuls",
+                "fdiv", "fdivs", "fmadd", "fmadds", "fmsub", "fmsubs",
+                "fnmadd", "fnmadds", "fnmsub", "fnmsubs",
+                "fres", "frsqrte", "fsqrt", "fsqrts"):
+        single = mn.endswith("s") and mn not in ("fabs", "fnabs")
+        base = mn[:-1] if single else mn
+        fa, fb, fc = f_val(m.f[ra]), f_val(m.f[rb]), f_val(m.f[i.rc_reg])
+        if base == "fadd":     x = f_arith("add", fa, fb)
+        elif base == "fsub":   x = f_arith("sub", fa, fb)
+        elif base == "fmul":   x = f_arith("mul", fa, fc)   # frC, not frB
+        elif base == "fdiv":   x = f_arith("div", fa, fb)
+        elif base == "fmadd":  x = f_arith("madd", fa, fb, fc)
+        elif base == "fmsub":  x = f_arith("msub", fa, fb, fc)
+        elif base == "fnmadd": x = -f_arith("madd", fa, fb, fc)
+        elif base == "fnmsub": x = -f_arith("msub", fa, fb, fc)
+        elif base == "fres":   x = f_arith("re", fb, 0.0)
+        elif base == "frsqrte": x = f_arith("rsqrte", fb, 0.0)
+        else:                  x = f_arith("sqrt", fb, 0.0)
+        m.f[rd] = f_bits(f_single(x) if single else x)
+    elif mn in ("fcmpu", "fcmpo"):
+        fa, fb = f_val(m.f[ra]), f_val(m.f[rb])
+        if fa != fa or fb != fb:
+            m.cr_set(i.crfd, 1)             # unordered
+        else:
+            m.cr_set(i.crfd, 8 if fa < fb else (4 if fa > fb else 2))
 
     # --- CR ---
     elif mn == "mfcr":
@@ -782,7 +974,7 @@ def step(m, i, mn, rd, ra, rb):
     elif mn in ("sync", "isync", "eieio", "icbi", "dcbi", "dcbf", "dcbst",
                 "dcbt", "dcbtst", "tlbie", "tlbsync", "tlbld", "tlbli",
                 "tw", "twi", "sc", "mtfsf", "mtfsb0", "mtfsb1", "mffs",
-                "mtfsfi", "mcrfs", "stfiwx"):
+                "mtfsfi", "mcrfs"):
         pass
     else:
         raise NotImplementedError(mn)
@@ -813,6 +1005,9 @@ def main():
                     help="log 53C810 register traffic")
     ap.add_argument("--history", type=int, default=0,
                     help="record the last N taken branches and print them")
+    ap.add_argument("--break-at", action="append", default=[],
+                    help="report whether execution ever reaches this pc "
+                         "(repeatable); does not stop the run")
     a = ap.parse_args()
 
     crom = open(a.image, "rb").read()
@@ -820,6 +1015,7 @@ def main():
     m = Machine(crom, int(a.base, 0), bank)
     m.watch = {int(x, 0) for x in a.watch}
     m.hist_max = a.history
+    m.brk = {int(x, 0): [0, 0, 0] for x in a.break_at}
     if a.trace_io:
         m.io_log_f = open(a.trace_io, "w")
         m.io_budget = a.trace_io_max
@@ -848,6 +1044,10 @@ def main():
     print("distinct hw writes: %d" % len(m.hw_writes))
     for addr, n in m.hw_writes.most_common(12):
         print("    W %08X x%d" % (addr, n))
+    if m.scsi_skipped:
+        print("SCRIPTS moves rejected as out of range: %d" % len(m.scsi_skipped))
+        for src, dst, cnt in m.scsi_skipped[:6]:
+            print("    %08X -> %08X  %d bytes" % (src, dst, cnt))
     if m.scsi_moves:
         print("SCRIPTS memory moves: %d" % len(m.scsi_moves))
         for src, dst, cnt in m.scsi_moves[:12]:
@@ -875,10 +1075,20 @@ def main():
         print("last taken branches:")
         for frm, to, kind in m.hist:
             print("    %08X  %-5s -> %08X" % (frm, kind, to))
+    if m.brk:
+        print("break points    :")
+        for addr in sorted(m.brk):
+            hits, first, fld = m.brk[addr]
+            if hits:
+                print("    %08X reached x%d, first at insn %d (field %d)"
+                      % (addr, hits, first, fld))
+            else:
+                print("    %08X NOT REACHED" % addr)
     if m.watch_hits:
         print("watch hits      :")
-        for pc, addr, v in m.watch_hits[:20]:
-            print("    %08X wrote %08X = %08X" % (pc, addr, v))
+        for pc, addr, v, ic, fld in m.watch_hits[:40]:
+            print("    %08X wrote %08X = %08X   (insn %d, field %d)"
+                  % (pc, addr, v, ic, fld))
 
     if a.dump_vram:
         open(a.dump_vram, "wb").write(m.vram)

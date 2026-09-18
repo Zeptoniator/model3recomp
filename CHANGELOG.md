@@ -6,7 +6,36 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Real3D status at `0x84000000` was a constant.** The boot copies nine dwords
+  of it into RAM with `stwbrx` — the chip is on the PCI side, so the cached
+  copy is byte-reversed — and then waits for bit `0x02000000` of that copy to
+  change. Byte-reversed that is bit 1 of the register, and a constant never
+  changes, so the guest never left the wait. Toggled per read now.
+- **`tools/ppc_interp.py` performed SCRIPTS memory moves that `src/scsi.c`
+  already rejected.** The runtime had a `mapped()` guard on both source and
+  destination; the interpreter had only a size check, so the two disagreed
+  about what a malformed script does. A garbage DSP value is routine — the
+  register image is written a word at a time and one word lands on offset
+  `0x2C` — and one resulting move zeroed 8 KB of a guest's work RAM. The guard
+  is now the same on both sides.
+
 ### Added
+- **PCI configuration space** (`src/bus.c`, `tools/ppc_interp.py`): the MPC105
+  port pair at `0xF0800CF8` / `0xF0C00CFC`, answering for the Real3D at device
+  13 (`0x16C311DB`) and the 53C810 at device 14 (`0x00011000`). A game that
+  probes for these will not finish booting without them. Config writes are
+  dropped: both devices are at fixed addresses in this memory map, so there is
+  nothing to relocate.
+- **Floating point in the boot interpreter**: loads, stores, arithmetic,
+  compares and conversions. FPRs stay raw 64-bit patterns so the boot path's
+  `lfd`/`stfd` block copies remain bit-exact, and arithmetic converts at the
+  edges. `tests/test_fp.py` covers the round trip and the cases where the
+  hardware answers with an infinity and Python would raise.
+- `tools/ppc_interp.py --break-at ADDR`: report whether execution ever reaches
+  an address, without stopping the run. Repeatable, so one run answers a whole
+  call chain — which is how the boot stalls above were located. Watch hits now
+  carry an instruction count and field number.
 - **Boot interpreter** (`tools/ppc_interp.py`): runs the reset path against the
   same memory map as the runtime, recovers the CROM-to-RAM segment table, and
   snapshots RAM for the lifter. Also the conformance oracle.

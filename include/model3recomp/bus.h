@@ -33,6 +33,9 @@ extern "C" {
 #define M3_SOUND_BASE      0xF0080000u   /* 68000 sound board comms         */
 #define M3_BACKUP_BASE     0xF00C0000u   /* battery-backed SRAM (128 KB)    */
 #define M3_SYSCTL_BASE     0xF0100000u   /* system control + IRQ            */
+
+#define M3_PCI_CONFIG_ADDR 0xF0800CF8u   /* MPC105 PCI CONFIG_ADDRESS       */
+#define M3_PCI_CONFIG_DATA 0xF0C00CFCu   /* MPC105 PCI CONFIG_DATA          */
 #define M3_RTC_BASE        0xF0140000u   /* 72421 real-time clock           */
 #define M3_SECURITY_BASE   0xF0180000u   /* security board                  */
 #define M3_TILEGEN_VRAM    0xF1000000u   /* tilemap VRAM + palette (1.2 MB) */

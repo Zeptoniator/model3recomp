@@ -42,6 +42,8 @@ static uint32_t  g_crom_bank;       /* which 8 MB of CROM0..3 is at 0xFF000000 *
  * never exits. */
 static uint32_t  g_io_ctrl;
 static uint32_t  g_io_ready;        /* see the serial-handshake note below */
+static uint32_t  g_pci_addr;        /* PCI CONFIG_ADDRESS latch            */
+static uint32_t  g_r3d_ping;        /* Real3D status, bit 1 is the ping    */
 
 /* Tilegen VRAM is 0xF1000000..0xF111FFFF: 1 MB of tile/name data followed by
  * 128 KB of palette. One allocation, since the guest addresses it as one. */
@@ -72,6 +74,8 @@ void bus_init(const m3_roms_t *roms)
     g_crom_bank = 0;
     g_io_ctrl = 0;
     g_io_ready = 0;
+    g_pci_addr = 0;
+    g_r3d_ping = 0;
     scsi_init();
 }
 
@@ -259,6 +263,44 @@ counted:
  * Getting this wrong does not glitch anything: the boot writes a bank, reads
  * back a value that never matches, and spins on 0xF0100008 forever.
  */
+/* ---- PCI configuration space -------------------------------------------
+ *
+ * The game will not finish booting until it finds two devices by ID. It walks
+ * them through the MPC105's CONFIG_ADDRESS/CONFIG_DATA port pair:
+ *
+ *     addr = 0x80000000 | (device << 11) | offset
+ *     stwbrx addr -> 0xF0800CF8 ; lwbrx  data <- 0xF0C00CFC
+ *
+ * and compares dword 0 against a literal. Device 13 must answer as the Real3D
+ * and device 14 as the 53C810; miss either and the guest spins on a readiness
+ * flag that the matching arm is what sets. Both already live at fixed
+ * addresses in this board's memory map, so the BAR writes that follow are
+ * dropped -- there is nothing here for the guest to relocate.
+ */
+#define PCI_ID_REAL3D  0x16C311DBu   /* vendor 0x11DB Sega, device 0x16C3 */
+#define PCI_ID_53C810  0x00011000u   /* vendor 0x1000 LSI,  device 0x0001 */
+
+static uint32_t bswap32(uint32_t v)
+{
+    return (v >> 24) | ((v >> 8) & 0xFF00u) |
+           ((v << 8) & 0xFF0000u) | (v << 24);
+}
+
+static uint32_t pci_config(uint32_t addr)
+{
+    uint32_t dev;
+
+    if (!(addr & 0x80000000u))
+        return 0;
+    if ((addr & 0xFCu) != 0)
+        return 0;                    /* every other register reads zero */
+
+    dev = (addr >> 11) & 0x1Fu;
+    if (dev == 13) return PCI_ID_REAL3D;
+    if (dev == 14) return PCI_ID_53C810;
+    return 0;                        /* absent */
+}
+
 static uint32_t dev_read_word(uint32_t w, int side_effects);
 
 static uint32_t dev_read_word(uint32_t w, int side_effects)
@@ -277,10 +319,27 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
         }
     }
 
-    /* Real3D status. Bit 1 low means "not busy"; the boot code polls it. */
-    /* Real3D status. Bit 1 low means "not busy"; the boot code polls it. */
-    if ((w & 0xFF000000u) == M3_R3D_STATUS)
-        return 0;
+    /* Real3D status block. The boot copies nine dwords of this into RAM with
+     * stwbrx -- the chip is on the PCI side, so the cached copy is
+     * byte-reversed -- and then waits for bit 0x02000000 of that copy to
+     * flip. Byte-reversed, that is bit 1 of the register here.
+     *
+     * ponytail: the ping is toggled per read rather than driven by the
+     * renderer, which is all the wait needs. Upgrade path: flip it when the
+     * Real3D actually retires a frame, once there is a renderer to retire
+     * one. */
+    if ((w & 0xFF000000u) == M3_R3D_STATUS) {
+        if (w != M3_R3D_STATUS)
+            return 0;
+        if (side_effects)
+            g_r3d_ping ^= 0x00000002u;
+        return g_r3d_ping;
+    }
+
+    /* PCI CONFIG_DATA. The guest reads it with lwbrx, so hand it back
+     * byte-reversed. */
+    if (w == M3_PCI_CONFIG_DATA)
+        return bswap32(pci_config(g_pci_addr));
 
     if ((w & 0xFFFFFFC0u) == M3_INPUTS_BASE) {
         if ((w & 0x3Cu) == 0x00u)
@@ -323,6 +382,12 @@ static void dev_write_word(uint32_t w, uint32_t v)
 
     if ((w & 0xFFFFFFC0u) == M3_INPUTS_BASE) {
         if ((w & 0x3Cu) == 0x00u) g_io_ctrl = v;
+        return;
+    }
+
+    /* PCI CONFIG_ADDRESS. Written with stwbrx, so un-reverse it. */
+    if (w == M3_PCI_CONFIG_ADDR) {
+        g_pci_addr = bswap32(v);
         return;
     }
 
