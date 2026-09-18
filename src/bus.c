@@ -51,6 +51,13 @@ static uint32_t  g_r3d_ping;        /* Real3D status, bit 1 is the ping    */
 #define TILEGEN_VRAM_SIZE 0x120000u
 static uint8_t *g_vram;
 
+/* The tilegen's own register file, 0xF1180000..0xF11800FF. Only the ack at
+ * 0x10 has a side effect; the rest is state the renderer reads back -- layer
+ * enables and the per-layer scroll. */
+static uint32_t g_tilegen_regs[64];
+
+const uint32_t *bus_tilegen_regs(void) { return g_tilegen_regs; }
+
 /* The Real3D's upload FIFO at 0x94000000.
  *
  * The guest streams a thousand bytes a frame into this one address, and until
@@ -560,6 +567,7 @@ static void dev_write_word(uint32_t w, uint32_t v)
      * 0xF0100018 until it clears -- miss this and the game never leaves its
      * interrupt handler. */
     if ((w & 0xFFFF0000u) == (M3_TILEGEN_REGS & 0xFFFF0000u)) {
+        g_tilegen_regs[(w >> 2) & 0x3Fu] = v;
         if ((w & 0xFC) == 0x10) irq_ack(v);
         return;
     }

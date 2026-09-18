@@ -82,6 +82,9 @@ extern uint8_t *m3_ram_base;
  * addressed by the guest as one block at 0xF1000000. */
 uint8_t *bus_vram(size_t *size);
 
+/* The tilegen register file as the guest last wrote it, 64 words. */
+const uint32_t *bus_tilegen_regs(void);
+
 /* Real3D scene memory. Nothing renders these yet, but the guest fills them
  * every frame, so they are the evidence that it is drawing at all. */
 uint8_t *bus_cull_lo(size_t *size);

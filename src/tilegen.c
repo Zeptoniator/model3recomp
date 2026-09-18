@@ -28,6 +28,7 @@
 #include "model3recomp/tilegen.h"
 #include "model3recomp/bus.h"
 #include "model3recomp/platform.h"
+#include "model3recomp/model3recomp.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -49,6 +50,38 @@ void tilegen_enable_layer(int layer, int on)
 {
     if (layer >= 0 && layer < LAYERS)
         g_enable_layer[layer] = on;
+}
+
+/* A layer the guest has switched off.
+ *
+ * The tilegen's registers are on the PCI side, so a word read back here is
+ * reversed from the way the guest stored it -- 0x7F010000 written is 0x17F
+ * seen, which is 383, the last scanline of a 384-line display. That is what
+ * fixes the byte order; the rest of this follows from it.
+ *
+ * Reversed, register 0x20 carries four enable bits at bit 9. That position is
+ * derived, not documented: across a whole attract cycle the register takes
+ * exactly four values, layer 0 is displayed under all of them and layer 2
+ * under none, and bit 9 is the only base for four consecutive bits where
+ * layer 0's is always set and layer 2's never is.
+ *
+ * It is worth being clear about how weak that is. The field does not change
+ * once during the run, so this is fitted to a single observation -- "layers 0
+ * and 3, always" -- and any game state that switches a layer on will either
+ * confirm the position or move it. What it is not is a guess: every other
+ * position is ruled out by the values the register actually takes.
+ *
+ * Getting it wrong is not subtle, which is the one piece of luck here. Layer
+ * 2 spends attract mode holding a solid full-screen rectangle -- one tile of
+ * flat colour, repeated 2492 times -- and a renderer that draws it paints
+ * that rectangle over the entire picture.
+ */
+static int layer_enabled(int layer)
+{
+    uint32_t r20 = bus_tilegen_regs()[0x20 / 4];
+    r20 = ((r20 & 0xFFu) << 24) | ((r20 & 0xFF00u) << 8) |
+          ((r20 >> 8) & 0xFF00u) | ((r20 >> 24) & 0xFFu);
+    return (r20 >> (9 + layer)) & 1u;
 }
 
 /* A name-table entry. Two of them share each 32-bit word, and the whole word
@@ -134,6 +167,36 @@ static void draw_tile(uint32_t *fb, int fbw, int fbh,
     }
 }
 
+#ifdef M3_TILEGEN_DUMP
+/* The registers and the layer occupancy, printed whenever register 0x20
+ * changes. Printing it per field is useless -- it changes four times in an
+ * attract cycle, and it was reading it on change that showed the enable bits
+ * do not move at all. */
+static void dump_state(const uint8_t *v)
+{
+    const uint32_t *rg = bus_tilegen_regs();
+    unsigned i, L;
+    fprintf(stderr, "[tilegen] f=%llu r20=%08X r40=%08X r44=%08X "
+                    "scroll=%08X/%08X/%08X/%08X",
+            (unsigned long long)model3recomp_frame_count(),
+            rg[0x20/4], rg[0x40/4], rg[0x44/4],
+            rg[0x60/4], rg[0x64/4], rg[0x68/4], rg[0x6C/4]);
+    (void)i;
+    for (L = 0; L < LAYERS; L++) {
+        uint32_t b = VRAM_NAME_BASE + L * LAYER_STRIDE;
+        unsigned nz = 0, first = 0xFFFFu, last = 0;
+        for (i = 0; i < LAYER_STRIDE / 2u; i++)
+            if (name_entry(v, b, i)) {
+                nz++; if (first == 0xFFFFu) first = i; last = i;
+            }
+        if (nz)
+            fprintf(stderr, "  L%u=%u(r%u-%u)", L, nz, first / MAP_W, last / MAP_W);
+    }
+    fprintf(stderr, "%s", "\n");
+    fflush(stderr);
+}
+#endif
+
 void tilegen_render(void)
 {
     int fbw = 0, fbh = 0;
@@ -145,6 +208,15 @@ void tilegen_render(void)
         return;
 
     memset(fb, 0, (size_t)fbw * (size_t)fbh * sizeof(uint32_t));
+
+#ifdef M3_TILEGEN_DUMP
+    {
+        static uint32_t last = 0xFFFFFFFFu;
+        uint32_t r20 = bus_tilegen_regs()[0x20 / 4];
+        if (r20 != last) { last = r20; dump_state(v); }
+    }
+#endif
+
 
 #ifdef M3_LOOP_GUARD
     /* What the renderer is actually handed, every so often. A black screen is
@@ -174,7 +246,7 @@ void tilegen_render(void)
         uint32_t nt = VRAM_NAME_BASE + (uint32_t)layer * LAYER_STRIDE;
         int ty, tx;
 
-        if (!g_enable_layer[layer])
+        if (!g_enable_layer[layer] || !layer_enabled(layer))
             continue;
 
         for (ty = 0; ty * TILE < fbh; ty++) {

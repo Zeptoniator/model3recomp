@@ -35,6 +35,22 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rather than none.
 
 ### Fixed
+- **Honour the tilegen's per-layer enable.** Layer 2 spends attract mode
+  holding a solid full-screen rectangle -- one flat-colour tile repeated 2492
+  times -- and the game simply stops displaying the layer rather than clearing
+  it. Drawing every layer that has something in it painted that rectangle over
+  the whole picture, and earlier, while the rectangle was still being
+  uploaded, left a small grey artifact in the corner that looked like a stray
+  blit.
+
+  The enable bits are at bit 9 of register 0x20 read PCI-side. That position
+  is derived rather than documented, and the derivation is weak: see the
+  comment in `src/tilegen.c`, which says so.
+
+### Added
+- `M3_TILEGEN_DUMP`: prints the tilegen registers and per-layer occupancy
+  whenever register 0x20 changes. Per field it is noise; on change it is four
+  lines for a whole attract cycle.
 - **A name-table entry is little-endian too, and it has a palette field.**
   Reading the two entries in a word in the right order but each entry's bytes
   in the wrong one still drew legible text, because it only scrambled bits
