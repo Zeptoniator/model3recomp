@@ -90,6 +90,9 @@ static void dec_dispatch(void)
         return;
     if (!(m3_ctx.msr & MSR_EE))
         return;
+    { static int once; if (!once) { once = 1;
+        fprintf(stderr, "[dec] first dispatch: guest r1=%08X (counter lives at "
+                        "001C10D0; frame spans r1-0x100 .. r1)\n", m3_ctx.r[1]); } }
 
     vec_base = (m3_ctx.msr & MSR_IP) ? 0xFFF00000u : 0x00000000u;
     saved_msr = m3_ctx.msr;

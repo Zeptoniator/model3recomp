@@ -125,6 +125,7 @@ static inline double m3_sqrt(double d)  { return sqrt(d); }
 static inline double m3_round(double d) { return nearbyint(d); }
 
 uint32_t m3_timebase(unsigned spr);
+void     m3_timebase_set(unsigned spr, uint32_t v);
 
 /* Indirect control transfer. Every target the lifter could not resolve
  * statically lands here and is looked up at runtime. */

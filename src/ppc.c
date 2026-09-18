@@ -33,14 +33,52 @@ void ppc_reset(void)
     m3_ctx.msr = MSR_IP | MSR_ME;
 }
 
-/* The time base counts at the bus clock / 4. Nothing in the attract path
- * depends on its absolute rate, only that it advances monotonically. */
-static uint64_t g_tb;
+/* The time base counts at the bus clock over four -- about 16.5 MHz on this
+ * board, or some 275,000 ticks in a field.
+ *
+ * It used to advance one tick per read, which is not a clock: it makes the
+ * value depend on how often a guest looks at it rather than on how much time
+ * has passed. A guest that only wants monotonicity does not notice. One that
+ * *measures* with it gets nonsense, and The Lost World measures with it --
+ * it times a known interval and divides to get a decrementer period. Reading
+ * one tick per read, it computed a period of -26 where the hardware gives
+ * 26,926, so its decrementer never fired again and the main loop waited
+ * forever on a counter only that interrupt writes.
+ *
+ * So it runs off m3_work, the same clock the field and the decrementer run
+ * off, scaled to match: a field is M3_FIELD_WORK units and about 275,000
+ * ticks, which is the 16 below, and the decrementer counts down at the same
+ * rate. The two agree now, which is the part that matters -- a guest timing
+ * one against the other gets a self-consistent answer. */
+#define TB_PER_WORK 16u
+
+static uint64_t g_tb_origin;    /* m3_work when the time base was last set */
+static uint64_t g_tb_value;     /* what it was set to */
+
+static uint64_t tb_now(void)
+{
+    return g_tb_value + (m3_work - g_tb_origin) * (uint64_t)TB_PER_WORK;
+}
 
 uint32_t m3_timebase(unsigned spr)
 {
-    g_tb += 1;
-    return (spr == 269) ? (uint32_t)(g_tb >> 32) : (uint32_t)g_tb;
+    uint64_t tb = tb_now();
+    return (spr == 269) ? (uint32_t)(tb >> 32) : (uint32_t)tb;
+}
+
+/* Writing TBL or TBU re-bases the clock. A guest that times an interval does
+ * it by zeroing the time base, waiting, and reading it back; drop the write
+ * and the interval it measures is however long the machine has been on, which
+ * is not what it asked for and not a number it can divide by. */
+void m3_timebase_set(unsigned spr, uint32_t v)
+{
+    uint64_t tb = tb_now();
+    if (spr == 285)
+        tb = ((uint64_t)v << 32) | (uint32_t)tb;
+    else
+        tb = (tb & 0xFFFFFFFF00000000ull) | v;
+    g_tb_value = tb;
+    g_tb_origin = m3_work;
 }
 
 #ifdef M3_WATCH

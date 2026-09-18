@@ -609,6 +609,9 @@ class Emitter:
 
     def i_mtspr(self, i):
         s = self._SPR.get(i.spr)
+        if i.spr in (284, 285):
+            # Writing the time base re-bases it; see m3_timebase_set().
+            return "m3_timebase_set(%d, %s);" % (i.spr, R(i.rd))
         return ("%s = %s;" % (s, R(i.rd)) if s
                 else "m3_ctx.spr[%d] = %s;" % (i.spr, R(i.rd)))
 

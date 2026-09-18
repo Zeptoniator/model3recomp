@@ -412,9 +412,20 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
     if ((w & 0xFF000000u) == M3_R3D_STATUS) {
         if (w != M3_R3D_STATUS)
             return 0;
-        if (side_effects)
-            g_r3d_ping ^= 0x00000002u;
-        return g_r3d_ping;
+        /* One flip per field, because a guest measures time with this.
+         *
+         * Toggling it per read satisfies a guest that only waits for the bit
+         * to change, and that is what this did. But The Lost World times the
+         * interval between two flips against the time base and divides to get
+         * its decrementer period: flipping on demand makes that interval
+         * nothing, and it computed a period of -26 where the hardware gives
+         * 26,926. Its decrementer then never fired, its main loop waited
+         * forever on a counter only that interrupt writes, and it never ran a
+         * single one of its own state handlers.
+         *
+         * So the ping is what it is on hardware -- a frame flag -- and the
+         * wait for it ends when a field does. */
+        return (model3recomp_frame_count() & 1u) ? 0x00000002u : 0u;
     }
 
     /* PCI CONFIG_DATA. The guest reads it with lwbrx, so hand it back
