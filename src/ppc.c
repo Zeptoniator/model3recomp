@@ -43,6 +43,19 @@ uint32_t m3_timebase(unsigned spr)
     return (spr == 269) ? (uint32_t)(g_tb >> 32) : (uint32_t)g_tb;
 }
 
+#ifdef M3_WATCH
+/* Reported with the guest function that did the write, which is the part that
+ * matters: the address alone says a word changed, not who changed it. */
+void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size)
+{
+    fprintf(stderr, "[model3recomp] watch %08X = %08X (size %u) from guest "
+                    "function %08X, field %llu\n",
+            addr, val, size, m3_fn_now,
+            (unsigned long long)model3recomp_frame_count());
+    fflush(stderr);
+}
+#endif
+
 /* See M3_LOOPED in lift.h. Credits the guest with the work its loop did and
  * lets the field clock run, so a wait on an interrupt-set RAM word ends. */
 uint32_t m3_loop_n;

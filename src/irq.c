@@ -25,6 +25,7 @@
 #include "model3recomp/model3recomp.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #define MSR_EE 0x00008000u
 #define MSR_IP 0x00000040u
@@ -59,10 +60,76 @@ void irq_enable_write(uint32_t v)  { g_enable = v; }
  * Our own lifted code keeps its temporaries in C locals on the host stack,
  * which the guest cannot touch.
  */
+/* ---- The decrementer ----------------------------------------------------
+ *
+ * SPR 22 counts down, and the 0 -> -1 transition takes an exception at vector
+ * 0x900. It is a separate exception from the external interrupt at 0x500 and
+ * is gated only by MSR[EE], not by the interrupt controller's enable mask.
+ *
+ * The Lost World needs it. Its timing calibration at 0x00118340 unmasks a
+ * source, then waits for a counter at RAM 0x001C10D0 to change; the only code
+ * that writes that counter is the handler the game installs at 0x900, and the
+ * pointer to it appears nowhere in RAM because the processor, not the game,
+ * is what calls it. Without a decrementer the wait cannot ever end, and both
+ * the interpreter and the recompiled binary sit in it forever.
+ *
+ * ponytail: the countdown runs off m3_work, the same clock the field runs
+ * off, scaled so a field is about the right number of ticks. Real hardware
+ * counts at the bus clock over four. Upgrade path: drive the time base from
+ * m3_work too, so a guest that measures one against the other gets a
+ * self-consistent answer rather than two unrelated clocks. */
+#define DEC_PER_WORK 16u
+
+static uint64_t g_dec_work;
+
+static void dec_dispatch(void)
+{
+    uint32_t vec_base, saved_msr;
+
+    if (g_in_dispatch)
+        return;
+    if (!(m3_ctx.msr & MSR_EE))
+        return;
+
+    vec_base = (m3_ctx.msr & MSR_IP) ? 0xFFF00000u : 0x00000000u;
+    saved_msr = m3_ctx.msr;
+    m3_ctx.spr[26] = 0;                /* SRR0 */
+    m3_ctx.spr[27] = saved_msr;        /* SRR1 */
+    m3_ctx.msr &= ~MSR_EE;
+
+    g_in_dispatch = 1;
+    func_table_call(vec_base + 0x900u);
+    g_in_dispatch = 0;
+
+    m3_ctx.msr = saved_msr;
+}
+
+static void dec_tick(void)
+{
+    uint64_t now = m3_work;
+    uint32_t before, after;
+    uint64_t elapsed;
+
+    if (now <= g_dec_work)
+        return;
+    elapsed = (now - g_dec_work) * DEC_PER_WORK;
+    g_dec_work = now;
+
+    before = m3_ctx.spr[M3_SPR_DEC];
+    after  = before - (uint32_t)elapsed;
+    m3_ctx.spr[M3_SPR_DEC] = after;
+
+    /* Only the 0 -> -1 crossing. Once it has gone negative it stays there
+     * until the handler reloads it, which is what the hardware does too. */
+    if (!(before & 0x80000000u) && (after & 0x80000000u))
+        dec_dispatch();
+}
+
 void irq_tick(void)
 {
     if (g_in_dispatch)
         return;
+    dec_tick();
     if (!model3recomp_field_due())
         return;
 

@@ -49,6 +49,18 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   is now the same on both sides.
 
 ### Added
+- **The decrementer** (`src/irq.c`). SPR 22 counts down and its 0 -> -1
+  crossing takes an exception at vector 0x900 -- a separate exception from
+  the external interrupt at 0x500, gated only by MSR[EE]. The Lost World's
+  timing calibration waits on a counter that only the handler it installs
+  there ever writes, and the pointer to that handler appears nowhere in RAM
+  because the processor calls it, not the game. Without this the wait cannot
+  end, and the interpreter and the recompiled binary sat in it alike.
+- **A watch on a guest RAM address** (`M3_WATCH`). `tools/ppc_interp.py` has
+  `--watch` and the runtime had no equivalent, because lifted code writes work
+  RAM through the inline path in `lift.h` without the bus ever seeing it. Set
+  it to an address at build time and every write is reported with the guest
+  function that made it. Compiles to nothing otherwise.
 - **`model3recomp_dump_scene()`** (`src/scenedump.c`): writes Real3D culling
   and polygon RAM, tilemap VRAM and work RAM to files from the frame hook, so
   a renderer can be written against what a game really put there.

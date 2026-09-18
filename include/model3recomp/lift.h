@@ -46,8 +46,23 @@ static inline uint32_t m3_ld8(uint32_t a)
     return bus_read8(a);
 }
 
+/* Watching a guest RAM address.
+ *
+ * tools/ppc_interp.py has --watch, and the runtime had no equivalent: lifted
+ * code writes work RAM through the inline path below without the bus ever
+ * seeing it, so "what wrote this word?" had no answer on the native side.
+ * Set M3_WATCH to an address at build time and every write to it is reported
+ * with the guest function that did it. Compiles to nothing otherwise. */
+#ifdef M3_WATCH
+void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size);
+#define M3_WATCH_NOTE(a, v, n)                                              do { if ((uint32_t)(a) == (uint32_t)(M3_WATCH))                                  m3_watch_hit((uint32_t)(a), (uint32_t)(v), (n)); } while (0)
+#else
+#define M3_WATCH_NOTE(a, v, n) ((void)0)
+#endif
+
 static inline void m3_st32(uint32_t a, uint32_t v)
 {
+    M3_WATCH_NOTE(a, v, 4);
     if (a < M3_RAM_SIZE - 3u) {
         uint8_t *p = m3_ram_base + a;
         p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
@@ -59,6 +74,7 @@ static inline void m3_st32(uint32_t a, uint32_t v)
 
 static inline void m3_st16(uint32_t a, uint32_t v)
 {
+    M3_WATCH_NOTE(a, v, 2);
     if (a < M3_RAM_SIZE - 1u) {
         uint8_t *p = m3_ram_base + a;
         p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v;
@@ -69,6 +85,7 @@ static inline void m3_st16(uint32_t a, uint32_t v)
 
 static inline void m3_st8(uint32_t a, uint32_t v)
 {
+    M3_WATCH_NOTE(a, v, 1);
     if (a < M3_RAM_SIZE) { m3_ram_base[a] = (uint8_t)v; return; }
     bus_write8(a, (uint8_t)v);
 }
