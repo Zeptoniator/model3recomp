@@ -112,7 +112,16 @@ static void dec_tick(void)
 
     if (now <= g_dec_work)
         return;
-    elapsed = (now - g_dec_work) * DEC_PER_WORK;
+    {
+        static int probed;
+        static uint32_t rate;
+        if (!probed) {
+            const char *e = getenv("M3_DEC_RATE");
+            probed = 1;
+            rate = e ? (uint32_t)strtoul(e, NULL, 0) : DEC_PER_WORK;
+        }
+        elapsed = (now - g_dec_work) * (uint64_t)rate;
+    }
     g_dec_work = now;
 
     before = m3_ctx.spr[M3_SPR_DEC];

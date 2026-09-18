@@ -7,6 +7,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Known issues
+- **A guest can spin with interrupts disabled waiting on an interrupt-set
+  word.** The Lost World's main loop calls a routine that waits at
+  `0x0011837C` for RAM `0x001C10D0` to change, and only the decrementer
+  handler writes it. The decrementer now exists and that handler does run, but
+  the wait still takes about 13 million iterations per tick, and changing the
+  decrementer's rate over four orders of magnitude does not move it at all --
+  so what gates it is not the rate. `M3_DEC_RATE` tunes that rate for whoever
+  looks next. The hottest backward branch in a 3,000-field run is that one,
+  568 million times.
+
 - **The CROM bank mapping is wrong, so a guest reads zeros for its data.** The
   banked window is 8 MB of a 32 MB image, so at most two bits of the register
   can be the bank; the current reading shifts the whole byte, and The Lost
