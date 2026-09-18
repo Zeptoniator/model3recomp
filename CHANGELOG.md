@@ -6,6 +6,24 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Known issues
+- **The CROM bank mapping is wrong, so a guest reads zeros for its data.** The
+  banked window is 8 MB of a 32 MB image, so at most two bits of the register
+  can be the bank; the current reading shifts the whole byte, and The Lost
+  World writes 0xF7 for most of its run, landing at offset 0xF700000 -- far
+  outside the image. Every read through the window then returns zero: 299,984
+  of them in a 2,500-field run, about 1.2 MB of the guest's own data.
+  `tools/rom_loader.py` warns of exactly this in a comment, and the symptom is
+  what it says -- the game boots and then has nothing to show.
+
+  The right mapping is not yet known, so the default is unchanged rather than
+  replaced by a guess. `M3_CROM_BANK` selects between candidate readings and
+  `M3_TRACE_BANK` reports which window offsets a guest reads under which
+  register value: The Lost World reads `0x000000`, `0x010000`, `0x120000`,
+  `0x150000` and `0x400000` under `F1`, `F2`, `F3` and `F5`. Every candidate
+  tried leaves it worse off than zeros do, which says it finds wrong data
+  rather than none.
+
 ### Fixed
 - **A frame was presented before the guest drew it.** `irq_tick()` rendered and
   presented and then ran the guest's VBlank handler, so what reached the
