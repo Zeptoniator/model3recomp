@@ -35,6 +35,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rather than none.
 
 ### Fixed
+- **The time base was not a clock.** `mftb` advanced one tick per *read*, so
+  its value depended on how often a guest looked at it rather than on how much
+  time had passed. A guest that only wants monotonicity does not notice; one
+  that *measures* with it gets nonsense. The Lost World times an interval and
+  divides to get its decrementer period, and computed -26 where the hardware
+  gives 26,926 -- so its decrementer never fired again, its main loop waited
+  forever on a counter only that interrupt writes, and it ran its own state
+  handler once instead of once a field. It now runs off `m3_work`, and writes
+  to TBL/TBU re-base it, because timing an interval means zeroing it, waiting,
+  and reading back.
+- **The Real3D frame flag flipped per read instead of per frame.** The other
+  end of the same measurement: the guest times the interval between two flips
+  of bit 1 at `0x84000000`, and flipping on demand makes that interval
+  nothing. The shortcut was deliberate and marked "upgrade path: flip it when
+  the Real3D actually retires a frame"; this is that upgrade.
 - **A frame was presented before the guest drew it.** `irq_tick()` rendered and
   presented and then ran the guest's VBlank handler, so what reached the
   screen was the state before that field's drawing -- and a guest that clears
