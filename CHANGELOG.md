@@ -7,6 +7,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **The sound board never reported itself ready.** A guest's command loop
+  waits on bit `0x01000000` of `0xF0080004` before writing each byte, and that
+  loop runs inside the VBlank handler. A board that is never ready therefore
+  did not merely lose sound: `irq_tick()` will not re-enter while a dispatch
+  is in progress, so no further field ever fell due and the machine wedged.
+  With no 68000 to be busy, the board now answers "always ready to accept,
+  never anything to say" -- the second bit, `0x02000000`, stays clear so the
+  reply poll returns "no data" rather than reading a byte that is not there.
 - **Real3D status at `0x84000000` was a constant.** The boot copies nine dwords
   of it into RAM with `stwbrx` — the chip is on the PCI side, so the cached
   copy is byte-reversed — and then waits for bit `0x02000000` of that copy to

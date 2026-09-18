@@ -303,6 +303,11 @@ class Machine:
         # PCI CONFIG_DATA. The guest uses lwbrx, so hand back byte-reversed.
         if w == 0xF0C00CFC:
             return bswap32(pci_config(self.pci_addr))
+        # Sound board handshake -- see the note in src/bus.c. Bit 0x01000000
+        # is "ready for a command", 0x02000000 is "a reply is waiting"; with
+        # no 68000 the board is always ready and never answers.
+        if (w & 0xFFFFFFFC) == 0xF0080004:
+            return 0x01000000
         if (w & 0xFFFFFFC0) == 0xF0040000:
             o = w & 0x3C
             if o == 0x00:

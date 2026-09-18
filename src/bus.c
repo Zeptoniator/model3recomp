@@ -341,6 +341,23 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
     if (w == M3_PCI_CONFIG_DATA)
         return bswap32(pci_config(g_pci_addr));
 
+    /* Sound board handshake. The guest reads this with lwbrx and tests two
+     * bits of the byte-reversed word: bit 0 is "ready for a command" and bit
+     * 1 is "a reply byte is waiting". Byte-reversed those are 0x01000000 and
+     * 0x02000000 here.
+     *
+     * The command loop at 0x00118854 spins until ready, and it runs inside
+     * the VBlank handler -- so a board that is never ready does not merely
+     * lose sound, it wedges the machine, because irq_tick() will not re-enter
+     * while a dispatch is in progress and no further field ever falls due.
+     *
+     * ponytail: with no 68000 to be busy, always ready and never answering is
+     * the honest model -- the guest's commands go nowhere and it never waits
+     * on a reply. Upgrade path: a real 68000 and SCSPs, at which point both
+     * bits come from the board instead. */
+    if ((w & 0xFFFFFFFCu) == (M3_SOUND_BASE + 4u))
+        return 0x01000000u;
+
     if ((w & 0xFFFFFFC0u) == M3_INPUTS_BASE) {
         if ((w & 0x3Cu) == 0x00u)
             return g_io_ctrl;        /* the strobe latch reads back */
