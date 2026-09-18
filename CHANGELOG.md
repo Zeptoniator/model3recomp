@@ -7,6 +7,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **A frame was presented before the guest drew it.** `irq_tick()` rendered and
+  presented and then ran the guest's VBlank handler, so what reached the
+  screen was the state before that field's drawing -- and a guest that clears
+  its tilemap and then prints into it was caught in the gap. Hardware scans
+  the tilemap out continuously and the guest draws during blanking precisely
+  so the picture is whole when it is not; one render per field belongs after
+  the drawing, and now is.
 - **The tilemap renderer drew one tile over the whole screen.** It read the
   name table from 0x0F6000, which is a scroll table, not a map -- a guest
   fills it with a single entry and the result is a screen of that one tile
@@ -49,6 +56,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   is now the same on both sides.
 
 ### Added
+- **The Real3D's upload FIFO at 0x94000000** (`src/bus.c`, `src/scsi.c`). It is
+  one port rather than a window, so the DMA guard's range check threw every
+  transfer to it away as out of range -- 464 of them in a two-thousand-field
+  run of The Lost World, which is most of what that guest sends its graphics
+  processor. The bytes are now kept in arrival order and `bus_texfifo()` hands
+  them to whatever comes to render them. (In this title they turn out to be a
+  gamma ramp rather than geometry, but they were being discarded unseen, and
+  "discarded unseen" is the part that mattered.)
+- **A guest function-entry histogram** and **a device-write watch**, both under
+  `M3_LOOP_GUARD`. `M3_TRACE_CALLS` only sees indirect dispatch, so a frame
+  task's whole call tree was invisible; counting every function entry is the
+  difference between "the frame task ran" and "here is what it did". The
+  device watch names the guest function behind a register write, which the RAM
+  watch cannot see because device writes leave the inline path.
 - **The decrementer** (`src/irq.c`). SPR 22 counts down and its 0 -> -1
   crossing takes an exception at vector 0x900 -- a separate exception from
   the external interrupt at 0x500, gated only by MSR[EE]. The Lost World's

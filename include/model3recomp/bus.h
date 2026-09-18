@@ -25,6 +25,7 @@ extern "C" {
 #define M3_R3D_CULL_HI     0x8E000000u   /* culling RAM high  (1 MB)        */
 #define M3_R3D_POLY        0x98000000u   /* polygon RAM       (4 MB)        */
 #define M3_R3D_TEXPORT     0x9C000000u   /* texture upload FIFO             */
+#define M3_R3D_TEXFIFO     0x94000000u   /* Real3D upload FIFO, one port    */
 
 #define M3_SCSI_BASE       0xC0000000u   /* 53C810, Step 1.x                */
 #define M3_SCSI_MIRROR     0xC1000000u
@@ -91,6 +92,12 @@ uint8_t *bus_poly(size_t *size);
  * the CPU's address map -- on hardware only the graphics processor reads it --
  * so the renderer gets at it through here. */
 const uint8_t *bus_vrom(size_t *size);
+
+/* What the guest streamed into the Real3D's FIFO at 0x94000000. It is one
+ * port rather than a window, so this is the order the bytes arrived in, not
+ * an address space. */
+uint8_t *bus_texfifo(size_t *used, size_t *capacity);
+void     bus_texfifo_reset(void);
 void     bus_dma_copy(uint32_t dst, uint32_t src, uint32_t len);
 
 #ifdef __cplusplus

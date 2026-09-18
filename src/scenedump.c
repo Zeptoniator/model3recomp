@@ -38,5 +38,7 @@ int model3recomp_dump_scene(const char *prefix)
     p = bus_poly(&n);    ok &= dump_one(prefix, "poly",    p, n);
     p = bus_vram(&n);    ok &= dump_one(prefix, "vram",    p, n);
     p = bus_ram();       ok &= dump_one(prefix, "ram", p, 0x00800000u);
+    { size_t used = 0; p = bus_texfifo(&used, NULL);
+      if (used) ok &= dump_one(prefix, "texfifo", p, used); }
     return ok;
 }

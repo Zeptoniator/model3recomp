@@ -30,6 +30,7 @@
 #include "model3recomp/platform.h"
 
 #include <string.h>
+#include <stdio.h>
 
 #define VRAM_PATTERN      0x000000u
 #define VRAM_NAME_BASE    0x0F8000u
@@ -139,6 +140,27 @@ void tilegen_render(void)
         return;
 
     memset(fb, 0, (size_t)fbw * (size_t)fbh * sizeof(uint32_t));
+
+#ifdef M3_LOOP_GUARD
+    /* What the renderer is actually handed, every so often. A black screen is
+     * either an empty map or a decode that drops everything, and the two look
+     * identical from the outside. */
+    {
+        static unsigned n;
+        if ((n++ & 0x3Fu) == 0) {
+            int L;
+            fprintf(stderr, "[model3recomp] tilegen:");
+            for (L = 0; L < LAYERS; L++) {
+                uint32_t b = VRAM_NAME_BASE + (uint32_t)L * LAYER_STRIDE;
+                unsigned nz = 0, i;
+                for (i = 0; i < LAYER_STRIDE / 2u; i++)
+                    if (name_entry(v, b, i)) nz++;
+                fprintf(stderr, "  L%d=%u", L, nz);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+#endif
 
     /* Back to front. Transparency comes from the palette rather than from
      * "index 0 on any layer but the bottom", so the bottom layer is not a

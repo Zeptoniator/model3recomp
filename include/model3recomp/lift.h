@@ -146,7 +146,10 @@ uint32_t m3_timebase(unsigned spr);
 #ifdef M3_LOOP_GUARD
 extern uint32_t m3_fn_now;
 void m3_loop_guard(uint32_t branch_at);
-#define M3_FN(a)        (m3_fn_now = (uint32_t)(a))
+void m3_fn_count(uint32_t addr);
+void m3_fn_report(unsigned top);
+extern uint32_t m3_fn_prev;
+#define M3_FN(a)        (m3_fn_prev = m3_fn_now, m3_fn_now = (uint32_t)(a), m3_fn_count((uint32_t)(a)))
 #define M3_LOOP_NOTE(a) m3_loop_guard((uint32_t)(a))
 #else
 #define M3_FN(a)        ((void)0)

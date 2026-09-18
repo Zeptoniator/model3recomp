@@ -16,6 +16,7 @@
 #include "model3recomp/bus.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Register offsets that matter. */
@@ -76,9 +77,28 @@ static int mapped(uint32_t a, uint32_t len)
      * Rejecting it meant the completion interrupt never fired and the guest
      * polled ISTAT twenty million times. */
     if (a >= 0x88000000u && end <= 0x88000100u) return 1;   /* R3D trigger */
+    /* The upload FIFO is one port, so a transfer of any length to it is
+     * in range by definition -- the address never advances. */
+    if ((a & 0xFF000000u) == M3_R3D_TEXFIFO) return 1;
     if (a >= 0x9C000000u && end <= 0x9D000000u) return 1;   /* R3D texture */
     return 0;
 }
+
+#ifdef M3_LOOP_GUARD
+/* Every SCRIPTS move, taken or not. A scene that never arrives and a scene
+ * that arrives and is thrown away look the same from the outside. */
+static void dma_log(const char *what, uint32_t src, uint32_t dst, uint32_t cnt)
+{
+    static int probed, on;
+    if (!probed) { probed = 1; on = getenv("M3_TRACE_DMA") != NULL; }
+    if (on)
+        fprintf(stderr, "[model3recomp] SCRIPTS %s %08X -> %08X  %u bytes\n",
+                what, src, dst, cnt);
+}
+#define DMA_LOG(w, s, d, c) dma_log((w), (s), (d), (c))
+#else
+#define DMA_LOG(w, s, d, c) ((void)0)
+#endif
 
 static void scsi_run(uint32_t dsp)
 {
@@ -107,6 +127,7 @@ static void scsi_run(uint32_t dsp)
                                     "range: %08X -> %08X, %u bytes "
                                     "(further reports silenced)\n",
                             src, dst, cnt);
+                DMA_LOG("reject", src, dst, cnt);
                 /* Skip the move but let the program run on, so its INT
                  * still signals completion and the guest is not left
                  * polling ISTAT forever. */
@@ -118,6 +139,7 @@ static void scsi_run(uint32_t dsp)
                                 "stopping\n");
                 return;
             }
+            DMA_LOG("accept", src, dst, cnt);
             bus_dma_copy(dst, src, cnt);
             continue;
         }

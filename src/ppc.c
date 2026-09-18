@@ -70,6 +70,46 @@ void m3_loop_tick(void)
  * it. Only compiled into a build that defines M3_LOOP_GUARD; see lift.h. */
 #ifdef M3_LOOP_GUARD
 uint32_t m3_fn_now;
+uint32_t m3_fn_prev;
+
+/* Which guest functions ran, and how often.
+ *
+ * M3_TRACE_CALLS only sees indirect dispatch, so a frame task's whole call
+ * tree -- every direct call the lifter resolved statically -- is invisible to
+ * it. This counts every function entry instead, which is the difference
+ * between "the frame task ran" and "the frame task ran and here is what it
+ * did". Open addressing, no allocation, no ordering: it runs on every call.
+ */
+#define FN_SLOTS 8192u
+static uint32_t g_fn_addr[FN_SLOTS];
+static uint32_t g_fn_hits[FN_SLOTS];
+
+void m3_fn_count(uint32_t addr)
+{
+    uint32_t i = (addr * 2654435761u) & (FN_SLOTS - 1u);
+    uint32_t probes = 0;
+    for (; probes < 64u; probes++) {
+        if (g_fn_addr[i] == addr) { g_fn_hits[i]++; return; }
+        if (!g_fn_hits[i]) { g_fn_addr[i] = addr; g_fn_hits[i] = 1; return; }
+        i = (i + 1u) & (FN_SLOTS - 1u);
+    }
+}
+
+void m3_fn_report(unsigned top)
+{
+    unsigned n;
+    fprintf(stderr, "[model3recomp] guest functions entered, most first:\n");
+    for (n = 0; n < top; n++) {
+        uint32_t best = 0, bi = FN_SLOTS;
+        uint32_t i;
+        for (i = 0; i < FN_SLOTS; i++)
+            if (g_fn_hits[i] > best) { best = g_fn_hits[i]; bi = i; }
+        if (bi == FN_SLOTS) break;
+        fprintf(stderr, "    %08X  x%u\n", g_fn_addr[bi], g_fn_hits[bi]);
+        g_fn_hits[bi] = 0;
+    }
+    fflush(stderr);
+}
 
 void m3_loop_guard(uint32_t branch_at)
 {

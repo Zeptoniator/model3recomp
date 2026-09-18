@@ -134,7 +134,6 @@ void irq_tick(void)
         return;
 
     g_field++;
-    model3recomp_end_frame();          /* render and present */
 
     /* Only the start-of-VBlank line is raised. Raising the end line in the
      * same tick as well -- which this did at first -- leaves the guest seeing
@@ -143,6 +142,20 @@ void irq_tick(void)
      * The differential trace against tools/ppc_interp.py caught it. */
     irq_raise(M3_IRQ_VBLANK_START);
     irq_dispatch();
+
+    /* Render after the guest's handler, not before it.
+     *
+     * A game draws its frame from inside the VBlank handler, and this one
+     * clears the tilemap first and prints into it second. Presenting before
+     * the handler runs therefore catches the buffer in the gap between the
+     * clear and the print, and the screen is black however correct the
+     * renderer is -- the console's own cursor had advanced through 887
+     * characters that were never once seen.
+     *
+     * On hardware the tilemap is scanned out continuously and the guest draws
+     * during blanking precisely so the picture is whole when it is not. One
+     * render per field belongs at the same place: after the drawing. */
+    model3recomp_end_frame();          /* render and present */
     model3recomp_begin_frame();
 }
 

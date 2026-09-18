@@ -50,6 +50,17 @@ static uint32_t  g_r3d_ping;        /* Real3D status, bit 1 is the ping    */
 #define TILEGEN_VRAM_SIZE 0x120000u
 static uint8_t *g_vram;
 
+/* The Real3D's upload FIFO at 0x94000000.
+ *
+ * The guest streams a thousand bytes a frame into this one address, and until
+ * it was named the DMA guard threw every transfer away as out of range -- 464
+ * of them in a two-thousand-field run, which is most of what the guest sends
+ * the graphics processor. Kept in arrival order, because a FIFO has no
+ * addresses. */
+#define TEXFIFO_CAP 0x400000u
+static uint8_t *g_texfifo;
+static size_t   g_texfifo_used;
+
 /* Real3D culling and polygon RAM. Not yet consumed by a renderer, but the
  * guest writes them constantly and reads back what it wrote. */
 #define CULL_LO_SIZE 0x400000u
@@ -63,6 +74,7 @@ void bus_init(const m3_roms_t *roms)
     g_ram     = calloc(1, M3_RAM_SIZE);
     g_backup  = calloc(1, 0x20000);
     g_vram    = calloc(1, TILEGEN_VRAM_SIZE);
+    g_texfifo = calloc(1, TEXFIFO_CAP);
     g_cull_lo = calloc(1, CULL_LO_SIZE);
     g_cull_hi = calloc(1, CULL_HI_SIZE);
     g_poly    = calloc(1, POLY_SIZE);
@@ -81,13 +93,23 @@ void bus_init(const m3_roms_t *roms)
 
 void bus_shutdown(void)
 {
-    free(g_ram); free(g_backup); free(g_vram);
+    free(g_ram); free(g_backup); free(g_vram); free(g_texfifo);
     free(g_cull_lo); free(g_cull_hi); free(g_poly);
     g_ram = g_backup = g_vram = g_cull_lo = g_cull_hi = g_poly = NULL;
+    g_texfifo = NULL; g_texfifo_used = 0;
     m3_ram_base = NULL;
 }
 
 uint8_t *bus_ram(void) { return g_ram; }
+
+uint8_t *bus_texfifo(size_t *used, size_t *capacity)
+{
+    if (used) *used = g_texfifo_used;
+    if (capacity) *capacity = TEXFIFO_CAP;
+    return g_texfifo;
+}
+
+void bus_texfifo_reset(void) { g_texfifo_used = 0; }
 
 uint8_t *bus_vram(size_t *size)
 {
@@ -453,8 +475,45 @@ static uint32_t dev_read(uint32_t a, unsigned size)
     return word;
 }
 
+#ifdef M3_LOOP_GUARD
+/* Which guest function wrote a device register. The RAM watch in lift.h
+ * cannot see these: a device write leaves the inline path and comes here. */
+extern uint32_t m3_fn_now;
+extern uint32_t m3_fn_prev;
+static void dev_watch(uint32_t a, uint32_t v, unsigned size)
+{
+    static int probed;
+    static uint32_t want;
+    if (!probed) {
+        const char *e = getenv("M3_WATCH_DEV");
+        probed = 1;
+        want = e ? (uint32_t)strtoul(e, NULL, 0) : 0u;
+    }
+    if (want && (a & 0xFFFFF000u) == (want & 0xFFFFF000u))
+        fprintf(stderr, "[model3recomp] dev W %08X = %08X (%u) from guest "
+                        "function %08X (called from %08X)\n", a, v, size, m3_fn_now, m3_fn_prev);
+}
+#define DEV_WATCH(a, v, n) dev_watch((a), (v), (n))
+#else
+#define DEV_WATCH(a, v, n) ((void)0)
+#endif
+
 static void dev_write(uint32_t a, uint32_t v, unsigned size)
 {
+    DEV_WATCH(a, v, size);
+
+    /* The upload FIFO. One port, so the address does not advance and what
+     * matters is the order the bytes arrived in. */
+    if ((a & 0xFF000000u) == M3_R3D_TEXFIFO) {
+        unsigned i;
+        for (i = 0; i < size; i++) {
+            if (g_texfifo_used >= TEXFIFO_CAP)
+                break;
+            g_texfifo[g_texfifo_used++] =
+                (uint8_t)(v >> (8u * (size - 1u - i)));
+        }
+        return;
+    }
     uint32_t w = a & ~3u, cur, mask;
     unsigned sh;
     spin_note(a, 1);
