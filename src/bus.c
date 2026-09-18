@@ -74,6 +74,22 @@ void bus_init(const m3_roms_t *roms)
     g_roms = *roms;
     g_ram     = calloc(1, M3_RAM_SIZE);
     g_backup  = calloc(1, 0x20000);
+    /* Battery-backed settings. A machine that has been switched on before has
+     * these; a freshly allocated block of zeros is a machine that never has,
+     * and a game that checks them for its own signature behaves accordingly.
+     * M3_BACKUP loads a saved image, which is what the battery is for. */
+    if (g_backup) {
+        const char *bk = getenv("M3_BACKUP");
+        if (bk) {
+            FILE *bf = fopen(bk, "rb");
+            if (bf) {
+                size_t got = fread(g_backup, 1, 0x20000, bf);
+                fclose(bf);
+                fprintf(stderr, "[model3recomp] backup RAM: %u bytes from %s\n",
+                        (unsigned)got, bk);
+            }
+        }
+    }
     g_vram    = calloc(1, TILEGEN_VRAM_SIZE);
     g_texfifo = calloc(1, TEXFIFO_CAP);
     g_cull_lo = calloc(1, CULL_LO_SIZE);
