@@ -35,6 +35,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rather than none.
 
 ### Fixed
+- **A name-table entry is little-endian too, and it has a palette field.**
+  Reading the two entries in a word in the right order but each entry's bytes
+  in the wrong one still drew legible text, because it only scrambled bits
+  that the previous tile-number formula happened to put back. What it did
+  lose was the colour: bits 14..4 of the entry are the top eleven bits of the
+  colour index, and dropping them pinned everything to palette 0.
+
+  The boot report is the wrong thing to check this against -- all of its
+  entries carry palette 0x20, so losing the field entirely still renders the
+  report in one flat colour that looks deliberate.
+- **The palette's 1-5-5-5 fields are blue, green, red from the top**, not red,
+  green, blue. Reversed, the only thing that changes is red against blue, so
+  greys and the boot report's white are identical either way and the picture
+  always looks plausible. Attract mode's text came out `0x00A5FF` where MAME
+  has `0xFFA500`, which is the same three bytes backwards.
 - **A tilemap tile number is ten bits, not nine, and they are not
   contiguous.** The low nine are the entry's top nine; the tenth is the
   entry's *bit 0*. The boot report hid this completely -- its entries are a

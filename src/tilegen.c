@@ -51,17 +51,16 @@ void tilegen_enable_layer(int layer, int on)
         g_enable_layer[layer] = on;
 }
 
-/* A name-table entry. Two of them share each 32-bit word, and the word holds
- * them in little-endian order -- so the tile drawn first is the one in the
- * second halfword. Each entry is itself big-endian, which is why this is a
- * halfword swap and not a bswap32. Read it the other way round and every pair
- * of characters on screen trades places: "THE LOST WORLD" comes out as
+/* A name-table entry. Two of them share each 32-bit word, and the whole word
+ * is little-endian -- so the tile drawn first is the one in the second
+ * halfword, and the halfword itself is byte-swapped too. Get the pair order
+ * wrong and every two characters trade places: "THE LOST WORLD" comes out as
  * "T.EHL SO TOWLR.D", which is legible enough to look like a font problem.
  */
 static inline unsigned name_entry(const uint8_t *v, uint32_t base, unsigned i)
 {
     uint32_t off = base + (uint32_t)(i ^ 1u) * 2u;
-    return ((unsigned)v[off] << 8) | v[off + 1];
+    return ((unsigned)v[off + 1] << 8) | v[off];
 }
 
 /* Palette entry: a little-endian 32-bit word whose low 16 bits are the
@@ -82,9 +81,15 @@ static uint32_t palette_argb(const uint8_t *v, unsigned index, int *transparent)
         return 0;
     *transparent = 0;
 
-    r = (c >> 10) & 0x1Fu;
+    /* Blue is the top field and red the bottom, not the other way round. A
+     * palette read the wrong way round still produces a picture in plausible
+     * colours -- it only ever swaps red and blue, so greys and the boot
+     * report's flat white come out identical either way, and the attract
+     * screen's orange text comes out as the exact same blue every time.
+     * 0x00A5FF reversed is 0xFFA500, which is how this was caught. */
+    b = (c >> 10) & 0x1Fu;
     g = (c >> 5) & 0x1Fu;
-    b = c & 0x1Fu;
+    r = c & 0x1Fu;
     /* 5 bits to 8, replicating the high bits so 0x1F maps to 0xFF. */
     r = (r << 3) | (r >> 2);
     g = (g << 3) | (g >> 2);
@@ -179,21 +184,18 @@ void tilegen_render(void)
                 unsigned pal;
                 if (!e)
                     continue;
-                /* The tile number is ten bits and they are not contiguous:
-                 * the low nine are the entry's top nine, and the tenth is the
-                 * entry's bit 0.
+                /* Bits 14..1 are the tile number, and bit 15 is its low
+                 * bit -- the number wraps around the top of the entry rather
+                 * than running off it. Bits 14..4 are also the top eleven bits
+                 * of the colour index, whose low four come from the pixel.
                  *
-                 * The boot report hid that, because its entries are a
-                 * character's ASCII code shifted up by seven with bit 0 clear
-                 * -- nine bits are enough for it and the tenth never moves.
-                 * The credits line is drawn from a second, double-height font
-                 * higher up in the pattern area, and every one of its entries
-                 * sets bit 0: entry 0x3081 is tile 0x261, not 0x61, and read
-                 * as nine bits it comes out as the letter "a" instead of the
-                 * top half of a "C". */
-                tile = (uint32_t)(e >> 7) | ((uint32_t)(e & 1u) << 9);
+                 * The palette field is why the boot report is the wrong thing
+                 * to check a decode against: its entries all carry palette
+                 * 0x20, so a decode that loses the field entirely still draws
+                 * the report in one flat colour that looks deliberate. */
+                tile = ((uint32_t)(e & 0x3FFFu) << 1) | (uint32_t)((e >> 15) & 1u);
                 pattern = tile * TILE_BYTES;
-                pal = ((e >> 1) & 0x3Fu) * 16u;
+                pal = e & 0x7FF0u;
                 draw_tile(fb, fbw, fbh, v, pattern, pal, tx * TILE, ty * TILE);
             }
         }
