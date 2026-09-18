@@ -175,20 +175,25 @@ void tilegen_render(void)
         for (ty = 0; ty * TILE < fbh; ty++) {
             for (tx = 0; tx * TILE < fbw; tx++) {
                 unsigned e = name_entry(v, nt, (unsigned)(ty * MAP_W + tx));
-                uint32_t pattern;
+                uint32_t pattern, tile;
                 unsigned pal;
                 if (!e)
                     continue;
-                /* Tile number is the top nine bits: the boot report's entries
-                 * are the character's ASCII code shifted up by seven, and the
-                 * font is laid out so tile N is character N.
+                /* The tile number is ten bits and they are not contiguous:
+                 * the low nine are the entry's top nine, and the tenth is the
+                 * entry's bit 0.
                  *
-                 * ponytail: the low seven bits are taken as the palette
-                 * block, which every entry seen so far leaves at zero, so it
-                 * is the natural reading rather than a verified one. Upgrade
-                 * path: a screen that uses more than one palette block. */
-                pattern = (uint32_t)(e >> 7) * TILE_BYTES;
-                pal = (e & 0x7Fu) * 16u;
+                 * The boot report hid that, because its entries are a
+                 * character's ASCII code shifted up by seven with bit 0 clear
+                 * -- nine bits are enough for it and the tenth never moves.
+                 * The credits line is drawn from a second, double-height font
+                 * higher up in the pattern area, and every one of its entries
+                 * sets bit 0: entry 0x3081 is tile 0x261, not 0x61, and read
+                 * as nine bits it comes out as the letter "a" instead of the
+                 * top half of a "C". */
+                tile = (uint32_t)(e >> 7) | ((uint32_t)(e & 1u) << 9);
+                pattern = tile * TILE_BYTES;
+                pal = ((e >> 1) & 0x3Fu) * 16u;
                 draw_tile(fb, fbw, fbh, v, pattern, pal, tx * TILE, ty * TILE);
             }
         }

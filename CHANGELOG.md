@@ -35,6 +35,18 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rather than none.
 
 ### Fixed
+- **A tilemap tile number is ten bits, not nine, and they are not
+  contiguous.** The low nine are the entry's top nine; the tenth is the
+  entry's *bit 0*. The boot report hid this completely -- its entries are a
+  character's ASCII code shifted up by seven with bit 0 clear, so nine bits
+  are enough and the tenth never moves. Attract mode draws its credit line
+  from a second, double-height font higher up in the pattern area and sets
+  bit 0 on every entry: `0x3081` is tile `0x261`, and read as nine bits it
+  renders the letter "a" where the top half of a "C" belongs.
+
+  Which is what it did: the credit line came out as `abcdef` / `ghijkl` in
+  the right place, in the right colours' worth of pixels, looking enough like
+  a font problem to be mistaken for one.
 - **The time base was not a clock.** `mftb` advanced one tick per *read*, so
   its value depended on how often a guest looked at it rather than on how much
   time had passed. A guest that only wants monotonicity does not notice; one
