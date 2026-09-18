@@ -113,6 +113,60 @@ uint32_t m3_timebase(unsigned spr);
  * statically lands here and is looked up at runtime. */
 #define CALL(a)       func_table_call((uint32_t)(a))
 
+/* Finding a guest that is looping.
+ *
+ * A recompiled game has no program counter to inspect: once lifted code is
+ * running, nothing outside it knows where "there" is. When a guest wedges in
+ * a loop that touches no device and dispatches through no pointer, even the
+ * bus-level spin report sees nothing, because nothing reaches the runtime at
+ * all.
+ *
+ * So the lifter marks two things: the guest address of every function it
+ * enters, and every backward branch. Both compile to nothing unless the build
+ * defines M3_LOOP_GUARD, so a normal build is unchanged; with it, a guest
+ * that spins says which of its own functions it is spinning in.
+ */
+#ifdef M3_LOOP_GUARD
+extern uint32_t m3_fn_now;
+void m3_loop_guard(uint32_t branch_at);
+#define M3_FN(a)        (m3_fn_now = (uint32_t)(a))
+#define M3_LOOP_NOTE(a) m3_loop_guard((uint32_t)(a))
+#else
+#define M3_FN(a)        ((void)0)
+#define M3_LOOP_NOTE(a) ((void)0)
+#endif
+
+/* The third place the runtime gets control.
+ *
+ * func_table_call() and dev_read() were the other two, and between them they
+ * miss the case that matters most: a guest waiting on a RAM word that only an
+ * interrupt handler writes. That loop dispatches through no pointer and reads
+ * no device, so the field clock stops, so the interrupt never arrives, so the
+ * word never changes. The Lost World waits exactly like that at 0x0011837C
+ * and would sit there forever.
+ *
+ * A backward branch is one iteration of a loop, so counting those is counting
+ * guest work. Doing it every iteration would cost more than it is worth, so
+ * the runtime gets a turn every M3_LOOP_PERIOD of them and is credited for
+ * all of them at once.
+ *
+ * The credit is a calibration knob and the numbers behind it are these: a
+ * 66 MHz 603e retires about 1.1 M instructions in a field, and a field is
+ * 17385 units, so a unit is roughly 64 instructions. A tight wait loop is a
+ * handful of instructions per iteration, so crediting one unit per iteration
+ * -- the rate a device access gets -- ages a spinning guest about sixteen
+ * times too fast, and the symptom is not subtle: fields tick by in their
+ * thousands, the guest takes an interrupt on each, and its main loop never
+ * runs between them.
+ *
+ * ponytail: one unit per sixteen iterations, flat. Upgrade path: weight it by
+ * the size of the loop body, which the lifter knows and this does not. */
+#define M3_LOOP_PERIOD 1024u
+#define M3_LOOP_CREDIT (M3_LOOP_PERIOD / 16u)
+extern uint32_t m3_loop_n;
+void m3_loop_tick(void);
+#define M3_LOOPED(a)                                                       do {                                                                       M3_LOOP_NOTE(a);                                                       if (!(++m3_loop_n & (M3_LOOP_PERIOD - 1u))) m3_loop_tick();        } while (0)
+
 /* An instruction the lifter does not translate. Greppable and countable --
  * never a silent wrong answer. See tools/ppc_lifter.py --stats. */
 void m3_unimplemented(uint32_t addr, uint32_t raw, const char *mn);

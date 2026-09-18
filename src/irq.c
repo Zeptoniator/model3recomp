@@ -42,6 +42,7 @@ void irq_init(void)
     g_in_dispatch = 0;
 }
 
+int irq_in_dispatch(void)          { return g_in_dispatch; }
 void irq_raise(uint32_t bits)      { g_pending |= bits; }
 void irq_ack(uint32_t bits)        { g_pending &= ~bits; }
 uint32_t irq_pending(void)         { return g_pending; }

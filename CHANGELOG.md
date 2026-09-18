@@ -7,6 +7,26 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **The tilemap renderer drew one tile over the whole screen.** It read the
+  name table from 0x0F6000, which is a scroll table, not a map -- a guest
+  fills it with a single entry and the result is a screen of that one tile
+  forever. The four name tables are at 0x0F8000 and 0x2000 apart. Two more
+  orderings were wrong with it, and neither announces itself: the two 16-bit
+  entries in each 32-bit word are stored low half first, so every pair of
+  characters traded places, and a pattern row is a little-endian word with the
+  leftmost pixel in the top nibble, so every glyph came out mirrored -- which
+  is invisible on T, H, O and X. The whole graphics side is little-endian,
+  being on the PCI side of the board, and all three follow from that.
+
+  The decode is checked against text whose wording is known before it is
+  rendered rather than against a document, which is the only way to tell a
+  right answer from a plausible one here.
+- **The field clock stopped for a guest looping in pure lifted code.** The
+  runtime took its turn at `func_table_call()` and at a device access, and a
+  loop that waits on a RAM word written only by an interrupt handler does
+  neither -- so no field fell due, so no interrupt arrived, so the word never
+  changed. The lifter now marks backward branches and the runtime gets a turn
+  every 1024 of them.
 - **The sound board never reported itself ready.** A guest's command loop
   waits on bit `0x01000000` of `0xF0080004` before writing each byte, and that
   loop runs inside the VBlank handler. A board that is never ready therefore
@@ -29,6 +49,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   is now the same on both sides.
 
 ### Added
+- **`model3recomp_dump_scene()`** (`src/scenedump.c`): writes Real3D culling
+  and polygon RAM, tilemap VRAM and work RAM to files from the frame hook, so
+  a renderer can be written against what a game really put there.
+- **A loop guard for locating a spinning guest** (`M3_LOOP_GUARD`). A
+  recompiled game has no program counter to inspect; when one wedges in a
+  loop that touches no device and dispatches through no pointer, nothing
+  outside it knows where "there" is. Built with this defined, the lifter's
+  marks let the runtime name the guest address it is looping at and the
+  function it entered to get there. Compiles to nothing otherwise.
 - **PCI configuration space** (`src/bus.c`, `tools/ppc_interp.py`): the MPC105
   port pair at `0xF0800CF8` / `0xF0C00CFC`, answering for the Real3D at device
   13 (`0x16C311DB`) and the 53C810 at device 14 (`0x00011000`). A game that

@@ -60,6 +60,11 @@ void model3recomp_set_frame_hook(void (*hook)(void));
 /* Write the current framebuffer to a binary PPM. Returns 0 on failure. */
 int  model3recomp_screenshot(const char *path);
 
+/* Write Real3D scene memory and tilemap VRAM to <prefix>_cull_lo.bin and
+ * friends. The renderer is developed against these, so that what it parses is
+ * what a game really wrote rather than what a document claims. */
+int  model3recomp_dump_scene(const char *prefix);
+
 /* A monotonically increasing measure of how much work the guest has done:
  * dispatched calls and device accesses. The headless platform paces fields
  * off it, because there is no wall clock to pace against and lifted code has

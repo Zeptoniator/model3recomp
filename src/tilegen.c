@@ -1,19 +1,29 @@
 /* model3recomp -- Model 3 tilemap generator.
  *
  * Four scrolling 8x8 tile layers over a 496x384 display. This draws the 2D
- * half of the picture: the service menu, the HUD, and the flat parts of
- * attract mode.
+ * half of the picture: the service menu, the boot report, and the flat parts
+ * of attract mode.
  *
- * VRAM is one block at 0xF1000000, and the split below was read off a live
- * dump of the game rather than taken from a document:
+ * VRAM is one block at 0xF1000000 and the layout below was read off a live
+ * dump, then checked by rendering text whose wording is known in advance --
+ * the boot report reads "THE LOST WORLD / Copyright (c) 1997 SEGA Enterprises
+ * CO.,LTD". A decode that produces those words is right; one that produces
+ * plausible-looking noise is not, and several did.
  *
  *     0x000000..0x0F5FFF   tile pattern data
- *     0x0F6000..0x0FFFFF   name tables
+ *     0x0F6000..0x0F7FFF   scroll tables
+ *     0x0F8000..0x0FFFFF   four name tables, 0x2000 each
  *     0x100000..0x11FFFF   palette, 32768 entries of 32 bits
  *
- * The exact name-table base and the bit layout of a name-table entry are the
- * parts still being pinned down against real content -- see TILEGEN_NAME_BASE
- * below. Everything else here is structural and does not depend on that.
+ * The scroll tables are not name tables, which is what the previous version
+ * of this file assumed. The boot fills 0x0F6000 with the entry 0x0080 and
+ * 0x0F7000 with 0xFFFF -- visible as two of the memsets it issues -- so
+ * reading them as a map draws one tile over the whole screen, forever.
+ *
+ * Everything the graphics side reads is little-endian, because the Real3D and
+ * its tile generator sit on the PCI side of the board; the PowerPC is not.
+ * That one fact explains all three of the orderings below, and getting any of
+ * them wrong still produces a picture, just not the right one.
  */
 #include "model3recomp/tilegen.h"
 #include "model3recomp/bus.h"
@@ -21,18 +31,16 @@
 
 #include <string.h>
 
-#define VRAM_PATTERN     0x000000u
-/* Read off a live dump rather than assumed: the game's name-table writes land
- * at 0x0F6000, not the 0x0F8000 that four 0x2000 layers below 0x100000 would
- * suggest. One 64x64 layer of 16-bit entries is 0x2000 bytes. */
-#define TILEGEN_NAME_BASE 0x0F6000u
-#define VRAM_PALETTE     0x100000u
+#define VRAM_PATTERN      0x000000u
+#define VRAM_NAME_BASE    0x0F8000u
+#define VRAM_PALETTE      0x100000u
+#define VRAM_END          0x120000u
 
-#define LAYERS      4
+#define LAYERS       4
 #define LAYER_STRIDE 0x2000u          /* 64 x 64 entries of 16 bits */
-#define MAP_W       64
-#define MAP_H       64
-#define TILE        8
+#define MAP_W        64
+#define TILE         8
+#define TILE_BYTES   32u              /* 8x8 at 4bpp */
 
 static int g_enable_layer[LAYERS] = {1, 1, 1, 1};
 
@@ -42,23 +50,36 @@ void tilegen_enable_layer(int layer, int on)
         g_enable_layer[layer] = on;
 }
 
-static inline uint16_t vram16(const uint8_t *v, uint32_t off)
+/* A name-table entry. Two of them share each 32-bit word, and the word holds
+ * them in little-endian order -- so the tile drawn first is the one in the
+ * second halfword. Each entry is itself big-endian, which is why this is a
+ * halfword swap and not a bswap32. Read it the other way round and every pair
+ * of characters on screen trades places: "THE LOST WORLD" comes out as
+ * "T.EHL SO TOWLR.D", which is legible enough to look like a font problem.
+ */
+static inline unsigned name_entry(const uint8_t *v, uint32_t base, unsigned i)
 {
-    return (uint16_t)(((uint32_t)v[off] << 8) | v[off + 1]);
+    uint32_t off = base + (uint32_t)(i ^ 1u) * 2u;
+    return ((unsigned)v[off] << 8) | v[off + 1];
 }
 
-/* Palette entries are 32 bits with the colour in the upper half, as the
- * game's own writes show: 0x0080 0000, 0x3967 0000, 0x9452 0000. The colour
- * itself is 1-5-5-5. */
-static uint32_t palette_argb(const uint8_t *v, unsigned index)
+/* Palette entry: a little-endian 32-bit word whose low 16 bits are the
+ * colour, 1-5-5-5 with bit 15 meaning transparent. */
+static uint32_t palette_argb(const uint8_t *v, unsigned index, int *transparent)
 {
     uint32_t off = VRAM_PALETTE + index * 4u;
-    uint16_t c;
+    unsigned c;
     uint32_t r, g, b;
 
-    if (off + 4u > 0x120000u)
-        return 0xFF000000u;
-    c = vram16(v, off);
+    *transparent = 1;
+    if (off + 4u > VRAM_END)
+        return 0;
+
+    /* Bytes 0 and 1 of the big-endian word are the low half once reversed. */
+    c = ((unsigned)v[off + 1] << 8) | v[off];
+    if (c & 0x8000u)
+        return 0;
+    *transparent = 0;
 
     r = (c >> 10) & 0x1Fu;
     g = (c >> 5) & 0x1Fu;
@@ -70,15 +91,19 @@ static uint32_t palette_argb(const uint8_t *v, unsigned index)
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
-/* One 8x8 4bpp tile: 32 bytes, two pixels per byte. Colour index 0 is
- * transparent in every layer but the bottom one. */
+/* One 8x8 4bpp tile. A row is four bytes read as one little-endian word with
+ * the leftmost pixel in the top nibble, so the byte the leftmost pixel lives
+ * in is the last of the four. Read the row the other way round and every
+ * glyph comes out mirrored -- which is invisible on T, H, O and X, and is why
+ * this was worth checking against letters that are not symmetric.
+ */
 static void draw_tile(uint32_t *fb, int fbw, int fbh,
                       const uint8_t *v, uint32_t pattern,
-                      unsigned pal_base, int px, int py, int opaque)
+                      unsigned pal_base, int px, int py)
 {
     int row, col;
 
-    if (pattern + 32u > TILEGEN_NAME_BASE)
+    if (pattern + TILE_BYTES > VRAM_NAME_BASE)
         return;
 
     for (row = 0; row < TILE; row++) {
@@ -89,13 +114,16 @@ static void draw_tile(uint32_t *fb, int fbw, int fbh,
             int x = px + col;
             uint8_t byte;
             unsigned idx;
+            uint32_t argb;
+            int transparent;
             if (x < 0 || x >= fbw)
                 continue;
-            byte = v[pattern + row * 4u + (unsigned)(col >> 1)];
+            byte = v[pattern + (uint32_t)row * 4u + (uint32_t)(3 - (col >> 1))];
             idx = (col & 1) ? (byte & 0x0Fu) : (byte >> 4);
-            if (!idx && !opaque)
+            argb = palette_argb(v, pal_base + idx, &transparent);
+            if (transparent)
                 continue;
-            fb[y * fbw + x] = palette_argb(v, pal_base + idx);
+            fb[y * fbw + x] = argb;
         }
     }
 }
@@ -110,41 +138,36 @@ void tilegen_render(void)
     if (!fb || !v)
         return;
 
-    /* Layers draw back to front; the bottom one is opaque so the frame is
-     * fully covered even where nothing wrote a tile. */
     memset(fb, 0, (size_t)fbw * (size_t)fbh * sizeof(uint32_t));
 
+    /* Back to front. Transparency comes from the palette rather than from
+     * "index 0 on any layer but the bottom", so the bottom layer is not a
+     * special case and a screen nothing wrote to stays black. */
     for (layer = LAYERS - 1; layer >= 0; layer--) {
-        uint32_t nt = TILEGEN_NAME_BASE + (uint32_t)layer * LAYER_STRIDE;
+        uint32_t nt = VRAM_NAME_BASE + (uint32_t)layer * LAYER_STRIDE;
         int ty, tx;
 
         if (!g_enable_layer[layer])
             continue;
 
-        for (ty = 0; ty < MAP_H; ty++) {
-            if (ty * TILE >= fbh)
-                break;
-            for (tx = 0; tx < MAP_W; tx++) {
-                uint16_t e;
+        for (ty = 0; ty * TILE < fbh; ty++) {
+            for (tx = 0; tx * TILE < fbw; tx++) {
+                unsigned e = name_entry(v, nt, (unsigned)(ty * MAP_W + tx));
                 uint32_t pattern;
                 unsigned pal;
-                if (tx * TILE >= fbw)
-                    break;
-                e = vram16(v, nt + (uint32_t)(ty * MAP_W + tx) * 2u);
                 if (!e)
                     continue;
-                /* The pattern address is the entry times 16, not times 32:
-                 * name entry 0x0080 in a live dump resolves to byte 0x800,
-                 * where there is a real glyph, while 0x0080 * 32 = 0x1000 is
-                 * blank. So the entry's low bit is an attribute and the tile
-                 * number sits above it. */
-                /* 15 bits of tile index: 0xFFFF * 16 would run off the end
-                 * of the pattern area, and the game does fill unused rows
-                 * with 0xFFFF. */
-                pattern = ((uint32_t)e & 0x7FFFu) * 16u;
-                pal = (unsigned)((e >> 14) & 0x3u) * 16u;
-                draw_tile(fb, fbw, fbh, v, pattern, pal,
-                          tx * TILE, ty * TILE, layer == LAYERS - 1);
+                /* Tile number is the top nine bits: the boot report's entries
+                 * are the character's ASCII code shifted up by seven, and the
+                 * font is laid out so tile N is character N.
+                 *
+                 * ponytail: the low seven bits are taken as the palette
+                 * block, which every entry seen so far leaves at zero, so it
+                 * is the natural reading rather than a verified one. Upgrade
+                 * path: a screen that uses more than one palette block. */
+                pattern = (uint32_t)(e >> 7) * TILE_BYTES;
+                pal = (e & 0x7Fu) * 16u;
+                draw_tile(fb, fbw, fbh, v, pattern, pal, tx * TILE, ty * TILE);
             }
         }
     }

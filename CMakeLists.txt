@@ -16,6 +16,7 @@ set(M3_SOURCES
     src/irq.c
     src/scsi.c
     src/screenshot.c
+    src/scenedump.c
     src/tilegen.c
 )
 if(SDL2_FOUND)

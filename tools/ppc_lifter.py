@@ -937,7 +937,8 @@ def emit_function(em, fn, prefix, entries):
     out = ["/* %s: function at 0x%08X (%d instructions) */"
            % (fname(prefix, fn.entry), fn.entry, len(fn.insns)),
            "void %s(void)" % fname(prefix, fn.entry),
-           "{"]
+           "{",
+           "    M3_FN(0x%08Xu);" % fn.entry]
 
     # `blr` is ambiguous. Usually it is a return, and the C call stack mirrors
     # the guest's, so `return;` is right. But PowerPC also uses mtlr+blr as a
@@ -985,7 +986,11 @@ def emit_function(em, fn, prefix, entries):
         if i.mn == "b" and not i.lk:
             t = i.target
             if t in fn.labels:
-                c = "goto L_%08X;" % t
+                # Backward branch: one iteration of a loop. See M3_LOOPED in
+                # lift.h -- it is how a guest spinning in pure lifted code,
+                # touching nothing the runtime can see, is located at all.
+                c = ("{ M3_LOOPED(0x%08Xu); goto L_%08X; }" % (addr, t) if t <= addr
+                     else "goto L_%08X;" % t)
             elif t in entries:
                 c = "%s(); return; /* tail call */" % fname(prefix, t)
             else:
@@ -1000,7 +1005,8 @@ def emit_function(em, fn, prefix, entries):
             if i.lk:
                 act = "{ PPC_LR = %s; CALL(0x%08Xu); }" % (ret, t)
             elif t in fn.labels:
-                act = "goto L_%08X;" % t
+                act = ("{ M3_LOOPED(0x%08Xu); goto L_%08X; }" % (addr, t) if t <= addr
+                       else "goto L_%08X;" % t)
             elif t in entries:
                 act = "{ %s(); return; }" % fname(prefix, t)
             else:
