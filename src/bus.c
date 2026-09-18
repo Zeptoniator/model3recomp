@@ -22,7 +22,8 @@ static uint8_t  *g_ram;
 uint8_t *m3_ram_base;           /* mirrors g_ram, for lift.h's fast path */
 static m3_roms_t g_roms;
 static uint8_t  *g_backup;          /* 128 KB battery-backed SRAM */
-static uint32_t  g_crom_bank;       /* which 8 MB of CROM0..3 is at 0xFF000000 */
+static uint32_t  g_crom_bank;       /* byte offset of the window into the image */
+static uint32_t  g_crom_bank_reg;   /* what was written, which reads back verbatim */
 
 /* I/O board control register at 0xF0040000. It is a latch: the boot strobes a
  * bit, reads the register back, and waits for the bit to mirror -- first for
@@ -84,6 +85,7 @@ void bus_init(const m3_roms_t *roms)
     }
     m3_ram_base = g_ram;
     g_crom_bank = 0;
+    g_crom_bank_reg = 0;
     g_io_ctrl = 0;
     g_io_ready = 0;
     g_pci_addr = 0;
@@ -195,6 +197,28 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
         }
         /* Banked CROM window. */
         if (a >= M3_CROM_BANKED && a < M3_CROM_FIXED && g_roms.crom_bank) {
+#ifdef M3_LOOP_GUARD
+            /* Which window offsets the guest reads, under which bank value.
+             * Pinning the bank mapping down needs the guest's own access
+             * pattern, not a guess at what the register bits mean. */
+            {
+                static int probed, on;
+                static uint32_t seen[64];
+                static unsigned nseen;
+                if (!probed) { probed = 1; on = getenv("M3_TRACE_BANK") != NULL; }
+                if (on) {
+                    uint32_t key = (g_crom_bank_reg << 24) |
+                                   ((a - M3_CROM_BANKED) >> 16);
+                    unsigned i;
+                    for (i = 0; i < nseen; i++) if (seen[i] == key) break;
+                    if (i == nseen && nseen < 64) {
+                        seen[nseen++] = key;
+                        fprintf(stderr, "[bank] reg=%02X window+0x%06X\n",
+                                g_crom_bank_reg, (a - M3_CROM_BANKED) & ~0xFFFFu);
+                    }
+                }
+            }
+#endif
             uint32_t off = (a - M3_CROM_BANKED) + g_crom_bank;
             if (off < g_roms.crom_bank_size)
                 return (uint8_t *)g_roms.crom_bank + off;
@@ -336,7 +360,11 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
          * is the read half of a read-modify-write on a byte store. */
         case 0x18: return side_effects ? irq_status_read() : irq_pending();
         /* Byte register in the most-significant lane of its word. */
-        case 0x08: return (g_crom_bank >> 20) << 24;
+        /* Reads back exactly what was written. The boot writes a bank and
+         * spins here until it matches, so this cannot be derived from the
+         * offset below -- the moment the mapping is anything but a shift,
+         * the two stop agreeing and the guest never leaves the loop. */
+        case 0x08: return g_crom_bank_reg << 24;
         default:   return 0;
         }
     }
@@ -403,6 +431,22 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
             g_io_ready ^= 0x20000000u;
             return 0xFFFFFFFFu ^ g_io_ready;
         }
+        /* Inputs are active low, so all ones is "nothing pressed". A game
+         * also reads cabinet straps and DIP switches through here, and for
+         * those all ones is a value like any other -- M3_INPUTS overrides it
+         * so what the guest does with a different one can be asked. */
+        {
+            static int probed;
+            static uint32_t forced;
+            static int have;
+            if (!probed) {
+                const char *e = getenv("M3_INPUTS");
+                probed = 1;
+                if (e) { forced = (uint32_t)strtoul(e, NULL, 0); have = 1; }
+            }
+            if (have)
+                return forced;
+        }
         return 0xFFFFFFFFu;          /* inputs are active low: nothing pressed */
     }
 
@@ -414,7 +458,35 @@ static void dev_write_word(uint32_t w, uint32_t v)
     if ((w & 0xFFFFFFC0u) == M3_SYSCTL_BASE) {
         switch (w & 0x3C) {
         case 0x14: irq_enable_write(v); return;
-        case 0x08: g_crom_bank = ((v >> 24) & 0xFFu) << 20; return;
+        case 0x08: {
+            /* CROM bank select. The banked window is 8 MB of a 32 MB image,
+             * so only a couple of bits of this can be the bank; the rest is
+             * something else. M3_CROM_BANK picks the reading while it is
+             * being pinned down against what the guest then finds there. */
+            static int probed;
+            static unsigned mode;
+            uint32_t b = (v >> 24) & 0xFFu;
+            g_crom_bank_reg = b;
+            if (!probed) {
+                const char *e = getenv("M3_CROM_BANK");
+                probed = 1;
+                mode = e ? (unsigned)strtoul(e, NULL, 0) : 0u;
+            }
+            switch (mode) {
+            case 1:  g_crom_bank = (b & 3u) * 0x800000u; break;
+            case 2:  g_crom_bank = ((~b) & 3u) * 0x800000u; break;
+            case 3:  g_crom_bank = (b & 7u) * 0x400000u; break;
+            case 4:  g_crom_bank = ((~b) & 7u) * 0x400000u; break;
+            case 5:  g_crom_bank = ((b >> 4) & 3u) * 0x800000u; break;
+            /* What this has always done, kept as the default until the
+             * right reading is known: the value shifted into a byte offset.
+             * For most of the values The Lost World writes -- 0xF7 above all
+             * -- that lands far outside the image, every read through the
+             * window returns zero, and the guest quietly gets nothing. */
+            default: g_crom_bank = b << 20; break;
+            }
+            return;
+        }
         default: return;
         }
     }
