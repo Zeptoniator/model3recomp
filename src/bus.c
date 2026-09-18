@@ -193,6 +193,21 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
             uint32_t top = 0xFFFFFFFFu - (uint32_t)g_roms.crom_size + 1u;
             if (a >= top)
                 return (uint8_t *)g_roms.crom + (a - top);
+            /* Below the program and above 0xFF800000 is the data ROM, and it
+             * is not banked: the whole span is the front of the image, which
+             * is where a game's tables and models actually live.
+             *
+             * This used to read as nothing at all, and a guest asking for its
+             * own data got zeros -- The Lost World reads 0xFFA18DEC, where
+             * the image has an "M3"-tagged record, and found none. Checked
+             * against MAME: 0xFF800000 is offset 0 of this image, 0xFFC00000
+             * is 0x400000 and so on, one for one to 0xFFDFFFFF, and driving
+             * the bank register through all 256 values moves none of it. */
+            if (g_roms.crom_bank) {
+                uint32_t off = a - M3_CROM_FIXED;
+                if (off < g_roms.crom_bank_size)
+                    return (uint8_t *)g_roms.crom_bank + off;
+            }
             return NULL;
         }
         /* Banked CROM window. */
