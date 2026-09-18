@@ -87,8 +87,22 @@ def interleave_n(bufs, lanes, word=2):
     return bytes(out)
 
 
-def build_region(files, names, lanes, out_path, label):
-    """Assemble `names` (a multiple of `lanes`) into one interleaved image."""
+def swap_pairs(g):
+    """(a, b, c, d, ...) -> (b, a, d, c, ...)"""
+    out = list(g)
+    for i in range(0, len(out) - 1, 2):
+        out[i], out[i + 1] = out[i + 1], out[i]
+    return out
+
+
+def build_region(files, names, lanes, out_path, label, group_order=None):
+    """Assemble `names` (a multiple of `lanes`) into one interleaved image.
+
+    `group_order` reorders each group of `lanes` chips before interleaving.
+    Chip numbers do not run in lane order on this board, and the image comes
+    out the right size either way, so this is not something a size check
+    catches.
+    """
     if len(names) % lanes:
         # The SCSP sample ROMs are the same size as the VROM chips and sort
         # after them, so trim to a whole number of lanes rather than refusing.
@@ -102,7 +116,10 @@ def build_region(files, names, lanes, out_path, label):
         names = names[:keep]
     parts = []
     for g in range(0, len(names), lanes):
-        parts.append(interleave_n([files[n] for n in names[g:g + lanes]], lanes))
+        group = names[g:g + lanes]
+        if group_order:
+            group = group_order(group)
+        parts.append(interleave_n([files[n] for n in group], lanes))
     img = b"".join(parts)
     with open(out_path, "wb") as f:
         f.write(img)
@@ -163,13 +180,29 @@ def main():
     # The banked CROM holds the bulk of the game's data and the VROM its
     # models and textures. A game whose banked CROM reads as zero boots and
     # then has nothing to show.
+    #
+    # Which chips are which is not a matter of taste, and the obvious reading
+    # is the wrong one. The bigger parts are the banked CROM and the smaller
+    # ones the VROM -- the reverse of what "more data means more textures"
+    # suggests -- and the order inside each interleaved group is not the order
+    # the chip numbers come in:
+    #
+    #     banked CROM   4 chips per group, group reversed   (n+3, n+2, n+1, n)
+    #     VROM          8 chips per group, adjacent swapped (n+1, n, n+3, n+2)
+    #
+    # Getting either wrong still produces an image of the right size, and a
+    # game reading it finds plausible-looking nonsense rather than nothing --
+    # which is worse, because it gets further before it goes wrong.
     if a.banked:
         names = sorted(n for n, b in files.items()
-                       if len(b) == 0x200000 and n not in order)
-        build_region(files, names, 4, a.banked, "banked CROM")
+                       if len(b) == 0x400000 and n not in order)
+        build_region(files, names, 4, a.banked, "banked CROM",
+                     group_order=lambda g: list(reversed(g)))
     if a.vrom:
-        names = sorted(n for n, b in files.items() if len(b) == 0x400000)
-        build_region(files, names, 16, a.vrom, "VROM")
+        names = sorted(n for n, b in files.items()
+                       if len(b) == 0x200000 and n not in order)
+        build_region(files, names, 8, a.vrom, "VROM",
+                     group_order=swap_pairs)
     return 0
 
 

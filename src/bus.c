@@ -478,6 +478,11 @@ static void dev_write_word(uint32_t w, uint32_t v)
             case 3:  g_crom_bank = (b & 7u) * 0x400000u; break;
             case 4:  g_crom_bank = ((~b) & 7u) * 0x400000u; break;
             case 5:  g_crom_bank = ((b >> 4) & 3u) * 0x800000u; break;
+            case 6:  g_crom_bank = (b & 7u) * 0x800000u; break;
+            case 7:  g_crom_bank = ((~b) & 7u) * 0x800000u; break;
+            case 8:  g_crom_bank = ((b >> 1) & 7u) * 0x800000u; break;
+            case 9:  g_crom_bank = ((b >> 1) & 3u) * 0x800000u; break;
+            case 10: g_crom_bank = (((~b) >> 1) & 7u) * 0x800000u; break;
             /* What this has always done, kept as the default until the
              * right reading is known: the value shifted into a byte offset.
              * For most of the values The Lost World writes -- 0xF7 above all
