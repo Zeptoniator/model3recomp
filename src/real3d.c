@@ -58,6 +58,7 @@
 
 #define MAX_TRIS   40000u
 #define MAX_DEPTH  24
+#define AMBIENT    0.20f
 
 /* The vertex fixed-point scale: the 24-bit coordinate field over 256.
  *
@@ -195,7 +196,8 @@ static void mat_dir(const mat_t *m, const float *p, float *o)
 /* ---- the triangle queue ------------------------------------------------ */
 typedef struct {
     float v[3][3];          /* view space */
-    float n[3];
+    float n[3];             /* the polygon's own normal, from the header */
+    float vn[3][3];         /* per-vertex normals, for Gouraud */
     uint8_t r, g, b;
 } tri_t;
 
@@ -203,7 +205,8 @@ static tri_t *g_tris;
 static unsigned g_ntris;
 
 static void emit(const float a[3], const float b[3], const float c[3],
-                 const float n[3], uint32_t rgb)
+                 const float n[3], uint32_t rgb,
+                 const float na[3], const float nb[3], const float nc[3])
 {
     tri_t *t;
     if (g_ntris >= MAX_TRIS) return;
@@ -212,6 +215,9 @@ static void emit(const float a[3], const float b[3], const float c[3],
     memcpy(t->v[1], b, sizeof t->v[1]);
     memcpy(t->v[2], c, sizeof t->v[2]);
     memcpy(t->n, n, sizeof t->n);
+    memcpy(t->vn[0], na, sizeof t->vn[0]);
+    memcpy(t->vn[1], nb, sizeof t->vn[1]);
+    memcpy(t->vn[2], nc, sizeof t->vn[2]);
     t->r = (uint8_t)((rgb >> 16) & 0xFF);
     t->g = (uint8_t)((rgb >> 8) & 0xFF);
     t->b = (uint8_t)(rgb & 0xFF);
@@ -224,7 +230,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
     size_t n = 0;
     uint32_t (*rd)(const uint8_t *);
     size_t i;
-    float prev[4][3];
+    float prev[4][3], prevn[4][3];
     unsigned nprev = 0;
     unsigned guard;
 
@@ -241,7 +247,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
 
     for (guard = 0; guard < 20000u; guard++) {
         uint32_t ph[7];
-        float nrm[3], vs[4][3];
+        float nrm[3], vs[4][3], vn[4][3];
         unsigned nv, nnew, k, j, slot;
         uint32_t rgb;
         float len;
@@ -263,6 +269,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
         for (k = 0; k < 4; k++)             /* bits 0..3: reuse from previous */
             if (((ph[0] >> k) & 1u) && k < nprev && slot < 4) {
                 memcpy(vs[slot], prev[k], sizeof vs[slot]);
+                memcpy(vn[slot], prevn[k], sizeof vn[slot]);
                 slot++;
             }
         if (slot > nv) return;
@@ -271,23 +278,40 @@ static void draw_model(uint32_t addr, const mat_t *m)
 
         for (k = 0; k < nnew && slot < 4; k++, slot++) {
             size_t o = i + (7u + 4u * k) * 4u;
-            vs[slot][0] = (float)sx24(rd(mem + o))      / g_vertex_scale;
-            vs[slot][1] = (float)sx24(rd(mem + o + 4))  / g_vertex_scale;
-            vs[slot][2] = (float)sx24(rd(mem + o + 8))  / g_vertex_scale;
+            uint32_t wx = rd(mem + o), wy = rd(mem + o + 4),
+                     wz = rd(mem + o + 8);
+            vs[slot][0] = (float)sx24(wx) / g_vertex_scale;
+            vs[slot][1] = (float)sx24(wy) / g_vertex_scale;
+            vs[slot][2] = (float)sx24(wz) / g_vertex_scale;
+            /* The low byte of each coordinate word is that vertex's own
+             * normal, as a signed byte. They are not unit length -- the
+             * lengths run from 0 to 127 -- but they do sit a median 25
+             * degrees from the face normal, against the 90 that random
+             * directions would give, which is what identifies them. */
+            vn[slot][0] = (float)(int8_t)(wx & 0xFFu);
+            vn[slot][1] = (float)(int8_t)(wy & 0xFFu);
+            vn[slot][2] = (float)(int8_t)(wz & 0xFFu);
         }
 
         rgb = (((ph[4] >> 24) & 0xFFu) << 16) | (((ph[4] >> 16) & 0xFFu) << 8)
             | ((ph[4] >> 8) & 0xFFu);
 
         if (slot >= 3) {
-            float wv[4][3], wn[3];
-            for (j = 0; j < slot; j++) mat_point(m, vs[j], wv[j]);
+            float wv[4][3], wn[3], wvn[4][3];
+            for (j = 0; j < slot; j++) {
+                mat_point(m, vs[j], wv[j]);
+                mat_dir(m, vn[j], wvn[j]);
+            }
             mat_dir(m, nrm, wn);
             for (j = 1; j + 1 < slot; j++)
-                emit(wv[0], wv[j], wv[j+1], wn, rgb);
+                emit(wv[0], wv[j], wv[j+1], wn, rgb,
+                     wvn[0], wvn[j], wvn[j+1]);
         }
 
-        for (j = 0; j < slot; j++) memcpy(prev[j], vs[j], sizeof prev[j]);
+        for (j = 0; j < slot; j++) {
+            memcpy(prev[j], vs[j], sizeof prev[j]);
+            memcpy(prevn[j], vn[j], sizeof prevn[j]);
+        }
         nprev = slot;
 
         i += (7u + 4u * nnew) * 4u;
@@ -420,6 +444,26 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
         int r, g, b;
         uint32_t argb;
 
+        /* Backface culling.
+         *
+         * Safe here because the winding is consistent: in a dumped model all
+         * 588 polygons agree in sign between their header normal and the
+         * normal computed from their own vertices, every one of them. So a
+         * polygon faces away exactly when its normal points along the ray
+         * from the eye to it, and there is no need to guess at a
+         * double-sided flag to avoid throwing away visible surfaces.
+         *
+         * It removes about five triangles in six -- 2169 of 2617 in one
+         * frame -- and the pixel count barely moves (105903 to 105527),
+         * which is what culling only hidden geometry looks like. */
+        {
+            float cx = (tr->v[0][0] + tr->v[1][0] + tr->v[2][0]) / 3.0f;
+            float cy = (tr->v[0][1] + tr->v[1][1] + tr->v[2][1]) / 3.0f;
+            float cz = (tr->v[0][2] + tr->v[1][2] + tr->v[2][2]) / 3.0f;
+            if (tr->n[0]*cx + tr->n[1]*cy + tr->n[2]*cz > 0.0f)
+                continue;
+        }
+
         /* Cut against the near plane rather than dropping the triangle.
          * A triangle that straddles the eye plane cannot be projected, but
          * discarding it throws away exactly the large near-camera polygons
@@ -442,10 +486,16 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
           + (p[2][0]-p[1][0])*(p[0][1]-p[2][1]);
         if (d > -1e-9 && d < 1e-9) continue;
 
+        /* Flat shade as the fallback, for a polygon whose vertex normals
+         * are degenerate. One-sided now that backfaces are culled: with the
+         * real light the term runs from -0.72 to +0.93 across a frame, so
+         * roughly two triangles in five are in shadow and the picture has
+         * some range in it. Taking the absolute value, which is what this
+         * did before, lit both sides equally and flattened that out. */
         lit = tr->n[0]*L[0] + tr->n[1]*L[1] + tr->n[2]*L[2];
-        if (lit < 0) lit = -lit;
+        if (lit < 0) lit = 0;
         if (lit > 1.0f) lit = 1.0f;
-        sh = 0.25f + 0.75f * lit;
+        sh = AMBIENT + (1.0f - AMBIENT) * lit;
         r = (int)(tr->r * sh); g = (int)(tr->g * sh); b = (int)(tr->b * sh);
         if (r > 255) r = 255;
         if (g > 255) g = 255;
@@ -488,7 +538,35 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                 z = l0*p[0][2] + l1*p[1][2] + l2*p[2][2];
                 o = y * fw + x;
                 if (z < g_zbuf[o]) {
-                    g_zbuf[o] = (float)z; fb[o] = argb; g_drawn++;
+                    uint32_t c = argb;
+                    /* Gouraud: interpolate the vertex normals across the
+                     * triangle. The hardware shades this way, and the
+                     * faceting without it is the most visible thing wrong
+                     * with a rounded surface like a boulder. */
+                    float nx = (float)(l0*tr->vn[0][0] + l1*tr->vn[1][0]
+                                     + l2*tr->vn[2][0]);
+                    float ny = (float)(l0*tr->vn[0][1] + l1*tr->vn[1][1]
+                                     + l2*tr->vn[2][1]);
+                    float nz = (float)(l0*tr->vn[0][2] + l1*tr->vn[1][2]
+                                     + l2*tr->vn[2][2]);
+                    float nl = nx*nx + ny*ny + nz*nz;
+                    if (nl > 1e-6f) {
+                        float il = 1.0f / sqrtf(nl);
+                        float d = (nx*L[0] + ny*L[1] + nz*L[2]) * il;
+                        float s2;
+                        int rr, gg, bb;
+                        if (d < 0) d = 0;
+                        if (d > 1.0f) d = 1.0f;
+                        s2 = AMBIENT + (1.0f - AMBIENT) * d;
+                        rr = (int)(tr->r * s2); gg = (int)(tr->g * s2);
+                        bb = (int)(tr->b * s2);
+                        if (rr > 255) rr = 255;
+                        if (gg > 255) gg = 255;
+                        if (bb > 255) bb = 255;
+                        c = 0xFF000000u | ((uint32_t)rr << 16)
+                          | ((uint32_t)gg << 8) | (uint32_t)bb;
+                    }
+                    g_zbuf[o] = (float)z; fb[o] = c; g_drawn++;
                 }
             }
         }

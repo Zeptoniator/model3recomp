@@ -35,6 +35,22 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rather than none.
 
 ### Fixed
+- **Backface culling.** Safe to do because the winding turns out to be
+  consistent: in a dumped model all 588 polygons agree in sign between their
+  header normal and the normal computed from their own vertices, every one.
+  So there is no need to guess at a double-sided flag. It removes five
+  triangles in six while the pixel count barely moves, which is what culling
+  only hidden geometry looks like -- and the surfaces that used to show
+  through a dinosaur are gone.
+- **Gouraud shading.** The low byte of each vertex coordinate word is that
+  vertex's own normal. They are not unit length, which is why they did not
+  look like normals at first; what identifies them is that they sit a median
+  25 degrees from the face normal, against the 90 that random directions
+  would give.
+- **One-sided diffuse.** Taking the absolute value of the lighting term lit
+  both sides of every surface equally. With the real light and backfaces
+  culled the term runs from -0.72 to +0.93 across a frame, so two triangles
+  in five are now in shadow.
 - **The rasteriser works in double.** A projected triangle here reaches
   coordinates in the hundreds of thousands, and in float the barycentric
   denominator lost enough precision that pixels inside a triangle tested as
