@@ -199,6 +199,51 @@ translations are all zero, so placement comes entirely from the matrix table;
 and no single matrix serves as a per-frame camera -- the best candidate for
 one scene scores 1358 triangles on screen and 1 on the next scene along.
 
+## Textures: what is known, and what is missing
+
+Not implemented. Polygons draw in their header colour, which is why every
+frame is grey. What has been established, so that the next attempt does not
+start from nothing:
+
+- **Where the data is.** VROM splits cleanly in half. The lower 16 MB is
+  models and the upper 16 MB is texture data, and the split is not a guess:
+  correlate each byte with the one two along and the model half scores near
+  zero while the texture half scores +0.6, which is what 16-bit pixels look
+  like. Correlating with the *next* byte goes negative there, which is the
+  high byte and low byte of a pixel alternating.
+- **The pixel format.** 16-bit, 1-5-5-5, the same packing the tilemap
+  palette uses. Decoded that way the texture half comes out in jungle greens,
+  bark browns and rock greys rather than noise, which is the check.
+- **What the polygon header holds.** Header word 5's low seven bits and
+  several fields of word 6 vary per texture; word 6 bit 26 is set on 1749 of
+  1780 polygons in one model and clear on the rest, so it is the texture
+  enable. The values are small indices, not addresses -- so they are
+  coordinates into texture RAM, not offsets into VROM.
+- **UVs.** Vertex word 3, u in the high half and v in the low. The spans land
+  on 512, 1024, 4096, so the unit is one eighth of a texel.
+
+Two things block it:
+
+- **The upload path is not observable.** Texture RAM is filled from VROM by
+  something this runtime does not see. The FIFO at 0x94000000 takes 321 KB in
+  a whole run and then stops, which is nowhere near a texture set, and its
+  contents are commands and runs of zeros rather than pixels. The trigger at
+  0x88000000 is written with 0xDEADDEAD, a doorbell. Until that path is
+  found, a texture-RAM coordinate in a polygon header cannot be turned into
+  an address in VROM.
+- **The VROM texture storage is tiled, and the tiling is unknown.** Rendered
+  linearly at any width it stripes. Linear, 2x2, 4x4 and 8x8 tiles in both
+  row- and column-major order were scored by how smooth the result comes out;
+  they land within 6% of each other (47.2 to 50.1), which is the signature of
+  none of them being right rather than of one of them winning.
+
+## Things that look wrong and are not
+
+- **Long thin slivers.** Some polygons rasterise as near-degenerate spikes
+  across the screen. They are real: all 53 in one frame are thin in three
+  dimensions as well as on screen, with aspect ratios from 85 to 512. They
+  are terrain strips seen at a grazing angle, not a decode fault.
+
 ## What is still not settled
 
 - **The light's intensity.** The direction comes from the viewport now --

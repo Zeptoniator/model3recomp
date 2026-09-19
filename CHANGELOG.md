@@ -64,6 +64,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   invention: words 0x04..0x06 are a unit vector.
 
 ### Added
+- `M3_R3D_TRACE`: logs writes to the Real3D command trigger. It answered one
+  question quickly -- the trigger is written with 0xDEADDEAD, so it is a
+  doorbell and not the texture upload path.
+- Texture groundwork in `docs/technical/real3d.md`: where the texture data
+  is in VROM and how it is packed, what the polygon header holds, and the
+  two specific things that block using any of it.
 - `M3_SHOT_EVERY=N[,DIR]`: write a screenshot every N fields. An attract
   cycle is some 4200 fields and its 3D runs in bursts of a few dozen, so
   sampling it one run per field is not a way to look at it.

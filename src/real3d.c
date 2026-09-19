@@ -677,10 +677,11 @@ void real3d_render(void)
         static unsigned last_drawn = 0xFFFFFFFFu;
         if (total != last_total || g_drawn != last_drawn) {
             last_total = total; last_drawn = g_drawn;
-            fprintf(stderr, "[real3d] field %llu trig %llu: %u triangles, %u drawn\n",
+            { size_t _fu = 0; bus_texfifo(&_fu, NULL);
+            fprintf(stderr, "[real3d] field %llu trig %llu fifo %llu: %u triangles, %u drawn\n",
                     (unsigned long long)model3recomp_frame_count(),
                     (unsigned long long)bus_r3d_trigger_count(),
-                    total, g_drawn);
+                    (unsigned long long)_fu, total, g_drawn); }
             fflush(stderr);
         }
     }

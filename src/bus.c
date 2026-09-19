@@ -573,6 +573,11 @@ static void dev_write_word(uint32_t w, uint32_t v)
 
     if ((w & 0xFF000000u) == M3_R3D_TRIGGER) {
         g_r3d_triggers++;
+        if (getenv("M3_R3D_TRACE")) {
+            static unsigned n;
+            if (n++ < 400)
+                fprintf(stderr, "[r3d] trigger %08X = %08X\n", w, v);
+        }
         return;
     }
 
