@@ -199,43 +199,58 @@ translations are all zero, so placement comes entirely from the matrix table;
 and no single matrix serves as a per-frame camera -- the best candidate for
 one scene scores 1358 triangles on screen and 1 on the next scene along.
 
-## Textures: what is known, and what is missing
+## Textures: the pipeline works, the address mapping does not
 
-Not implemented. Polygons draw in their header colour, which is why every
-frame is grey. What has been established, so that the next attempt does not
-start from nothing:
+`M3_TEXTURES=1` turns texturing on. It is off by default, and that is the
+honest setting rather than a cautious one -- see the end of this section.
 
-- **Where the data is.** VROM splits cleanly in half. The lower 16 MB is
-  models and the upper 16 MB is texture data, and the split is not a guess:
-  correlate each byte with the one two along and the model half scores near
-  zero while the texture half scores +0.6, which is what 16-bit pixels look
-  like. Correlating with the *next* byte goes negative there, which is the
-  high byte and low byte of a pixel alternating.
-- **The pixel format.** 16-bit, 1-5-5-5, the same packing the tilemap
-  palette uses. Decoded that way the texture half comes out in jungle greens,
-  bark browns and rock greys rather than noise, which is the check.
-- **What the polygon header holds.** Header word 5's low seven bits and
-  several fields of word 6 vary per texture; word 6 bit 26 is set on 1749 of
-  1780 polygons in one model and clear on the rest, so it is the texture
-  enable. The values are small indices, not addresses -- so they are
-  coordinates into texture RAM, not offsets into VROM.
-- **UVs.** Vertex word 3, u in the high half and v in the low. The spans land
-  on 512, 1024, 4096, so the unit is one eighth of a texel.
+Working, and checked:
 
-Two things block it:
+- **Where the data is.** VROM splits in half: models below 16 MB, textures
+  above. Correlate each byte with the one two along and the model half scores
+  near zero while the texture half scores +0.6, which is what 16-bit pixels
+  look like; correlate with the *next* byte instead and the texture half goes
+  negative, which is a pixel's two halves alternating.
+- **Texel format.** 16-bit, 1-5-5-5, bit 15 transparent -- the same packing
+  the tilemap palette uses. Big-endian, by a factor of five: read that way a
+  block scores 5205 for smoothness and the other way 24279.
+- **The polygon header.** Word 6 bit 26 is the texture enable (set on 1749 of
+  1780 polygons in a model, clear on the rest). Bits 7..9 are the pixel
+  format: 0 on 5614 of 6093 headers and 5, 6 or 7 on the others, and only 0
+  is a plain 16-bit texel. Origin is in 32-texel units out of word 4's low
+  five bits and word 5.
+- **UVs.** Vertex word 3, u in the high half, v in the low, in eighths of a
+  texel. Interpolated with perspective correction -- u/z, v/z and 1/z linearly
+  in screen space, divided at the end -- and carried through the near clip,
+  because a ground plane running to the horizon is exactly where affine
+  interpolation falls apart.
 
-- **The upload path is not observable.** Texture RAM is filled from VROM by
-  something this runtime does not see. The FIFO at 0x94000000 takes 321 KB in
-  a whole run and then stops, which is nowhere near a texture set, and its
-  contents are commands and runs of zeros rather than pixels. The trigger at
-  0x88000000 is written with 0xDEADDEAD, a doorbell. Until that path is
-  found, a texture-RAM coordinate in a polygon header cannot be turned into
-  an address in VROM.
-- **The VROM texture storage is tiled, and the tiling is unknown.** Rendered
-  linearly at any width it stripes. Linear, 2x2, 4x4 and 8x8 tiles in both
-  row- and column-major order were scored by how smooth the result comes out;
-  they land within 6% of each other (47.2 to 50.1), which is the signature of
-  none of them being right rather than of one of them winning.
+Not working: **which VROM address a polygon's texture coordinates name.**
+
+Tried, and measured by how smooth the result comes out against a median of
+5520 for arbitrary offsets: linear at eight widths; 32- and 64-texel tiles,
+row-major and column-major; two-level tilings with inner blocks of 1, 2, 4,
+8, 16 and 32; tile-row strides from 8 to 256; Morton order with x and y both
+ways; sheets of 2048x2048, 2048x1024 and 4096x1024 across two and four
+pages; and undoing the lane-pair swap the ROM builder applies, on the theory
+that a 32-bit model word can read correctly while the two 16-bit texels
+inside it are transposed. The best scored 3407. A correct layout does not
+win by that margin, it wins by the margin the model decode won by, which was
+31265 models against none.
+
+So the polygons fetch real texels from the wrong places. Switched on it
+looks like texturing -- foliage appears on the rocks, the colour count in a
+frame goes from about a hundred to seven thousand -- and it is not
+texturing. That is the specific failure this file exists to avoid, so the
+switch defaults to off and the pipeline stays in place for whoever finds the
+mapping.
+
+One thing that has been ruled out: the textures are not uploaded. Every
+SCRIPTS DMA in a run was traced. 1.5 MB goes to culling RAM, 321 KB to the
+FIFO at 0x94000000 -- all of it from work RAM, and its contents are commands
+and runs of zeros rather than pixels -- 3.7 KB to the trigger, and 36 bytes
+to the texture port. The rejected transfers are all boot-test noise with
+garbage addresses. Nothing is being dropped; there is no upload to find.
 
 ## Things that look wrong and are not
 

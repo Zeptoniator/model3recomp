@@ -64,6 +64,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   invention: words 0x04..0x06 are a unit vector.
 
 ### Added
+- **Texture sampling**, behind `M3_TEXTURES=1` and off by default. The
+  pipeline is complete -- descriptor from the polygon header, perspective-
+  correct UVs carried through the near clip, 1-5-5-5 texels with
+  transparency, wrapping, format gating, shading modulation -- and the VROM
+  address mapping is not solved, so what it draws is real texels from the
+  wrong places. It looks like texturing and is not, which is why the switch
+  defaults to off. `docs/technical/real3d.md` lists every layout tried and
+  what it scored.
 - `M3_R3D_TRACE`: logs writes to the Real3D command trigger. It answered one
   question quickly -- the trigger is written with 0xDEADDEAD, so it is a
   doorbell and not the texture upload path.

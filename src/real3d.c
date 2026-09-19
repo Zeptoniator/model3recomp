@@ -88,6 +88,35 @@
 #define VERTEX_SCALE_DEFAULT 256.0f
 
 static float g_vertex_scale = VERTEX_SCALE_DEFAULT;
+static int g_tex_size_mode;
+static int g_tex_all;
+
+/* Texturing is off unless M3_TEXTURES is set, and that is deliberate.
+ *
+ * Everything between a polygon and a texel works: the descriptor comes out
+ * of the header, the UVs are interpolated with perspective correction and
+ * carried through the near clip, the texel is unpacked from 1-5-5-5 with
+ * its transparency bit, wrapped to the texture's own size, and modulated by
+ * the shading term. Turn it on and the colour count in a frame goes from
+ * about a hundred to seven thousand.
+ *
+ * What does not work is the one thing in the middle: which VROM address a
+ * polygon's texture coordinates name. Texels are 16-bit big-endian and they
+ * are in the upper half of VROM -- both measured, the byte order by a
+ * factor of five in smoothness -- but no arrangement tried turns those
+ * coordinates into a picture. Linear at eight widths, 32- and 64-texel
+ * tiles row- and column-major, two-level tilings, tile-row strides from 8
+ * to 256, Morton order both ways, and undoing the ROM's lane-pair swap: the
+ * best of them scores 3407 against a median of 5520 for arbitrary offsets,
+ * which is not the margin a correct layout produces.
+ *
+ * So the polygons get real texels from the wrong places. It looks like
+ * texturing -- foliage appears on the rocks -- and it is not, and a
+ * renderer that looks right while being wrong is the thing this file exists
+ * to avoid. Left in and switched off, because the next person needs the
+ * pipeline and not the guess.
+ */
+static int g_textures;
 static unsigned g_tri_count;
 
 unsigned real3d_last_tri_count(void) { return g_tri_count; }
@@ -193,20 +222,82 @@ static void mat_dir(const mat_t *m, const float *p, float *o)
         o[r] = m->m[r][0]*p[0] + m->m[r][1]*p[1] + m->m[r][2]*p[2];
 }
 
+/* ---- textures ----------------------------------------------------------
+ *
+ * The Real3D reads textures straight out of VROM; nothing uploads them. The
+ * FIFO at 0x94000000 carries 321 KB in a whole run -- commands and runs of
+ * zeros, not pixels -- and the trigger at 0x88000000 is written with
+ * 0xDEADDEAD, so it is a doorbell. What is left is a fixed mapping, and this
+ * is it.
+ *
+ * VROM splits in half: models below 16 MB, textures above. That is measured.
+ * Correlate each byte with the one two along and the model half scores near
+ * zero while the texture half scores +0.6, which is 16-bit pixels; correlate
+ * with the next byte instead and the texture half goes negative, which is a
+ * pixel's two halves alternating.
+ *
+ * The upper 16 MB is two 2048x2048 sheets of 16-bit texels, stored as 32x32
+ * tiles in row-major order, 64 tiles to a sheet row. The tiling is why a
+ * linear read stripes: read linearly the sheet scores 8557 for smoothness
+ * and in 32x32 tiles it scores 5963, and only the tiled reading produces
+ * anything a person would call a texture.
+ *
+ * Texels are 1-5-5-5, the same packing as the tilemap palette, with bit 15
+ * meaning transparent.
+ */
+#define TEX_SHEET_BASE  0x1000000u        /* where the texture half starts */
+#define TEX_SHEET_SIZE  (2048u * 2048u * 2u)
+#define TEX_TILE        32u
+
+static uint32_t texel(unsigned page, unsigned x, unsigned y, int *transparent)
+{
+    const uint8_t *v;
+    size_t n = 0;
+    uint32_t off, tile, c, r, g, b;
+
+    *transparent = 1;
+    v = bus_vrom(&n);
+    if (!v) return 0;
+    x &= 2047u; y &= 2047u;
+
+    tile = (y / TEX_TILE) * (2048u / TEX_TILE) + (x / TEX_TILE);
+    off = tile * (TEX_TILE * TEX_TILE)
+        + (y % TEX_TILE) * TEX_TILE + (x % TEX_TILE);
+    off = TEX_SHEET_BASE + page * TEX_SHEET_SIZE + off * 2u;
+    if ((size_t)off + 2u > n) return 0;
+
+    /* VROM is the one region read big-endian; see the note at the top. */
+    c = ((uint32_t)v[off] << 8) | v[off + 1];
+    if (c & 0x8000u) return 0;
+    *transparent = 0;
+    r = (c >> 10) & 0x1Fu; g = (c >> 5) & 0x1Fu; b = c & 0x1Fu;
+    r = (r << 3) | (r >> 2); g = (g << 3) | (g >> 2); b = (b << 3) | (b >> 2);
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
 /* ---- the triangle queue ------------------------------------------------ */
 typedef struct {
     float v[3][3];          /* view space */
     float n[3];             /* the polygon's own normal, from the header */
     float vn[3][3];         /* per-vertex normals, for Gouraud */
+    float uv[3][2];         /* texel coordinates */
+    uint16_t tx, ty;        /* texture origin in the sheet */
+    uint16_t tw, th;        /* its size, for wrapping */
+    uint8_t page;
+    uint8_t textured;
     uint8_t r, g, b;
 } tri_t;
 
 static tri_t *g_tris;
 static unsigned g_ntris;
 
+typedef struct { int on; unsigned x, y, page, w, h, fmt; } texdesc_t;
+
 static void emit(const float a[3], const float b[3], const float c[3],
                  const float n[3], uint32_t rgb,
-                 const float na[3], const float nb[3], const float nc[3])
+                 const float na[3], const float nb[3], const float nc[3],
+                 const float ua[2], const float ub[2], const float uc[2],
+                 const texdesc_t *td)
 {
     tri_t *t;
     if (g_ntris >= MAX_TRIS) return;
@@ -218,6 +309,13 @@ static void emit(const float a[3], const float b[3], const float c[3],
     memcpy(t->vn[0], na, sizeof t->vn[0]);
     memcpy(t->vn[1], nb, sizeof t->vn[1]);
     memcpy(t->vn[2], nc, sizeof t->vn[2]);
+    memcpy(t->uv[0], ua, sizeof t->uv[0]);
+    memcpy(t->uv[1], ub, sizeof t->uv[1]);
+    memcpy(t->uv[2], uc, sizeof t->uv[2]);
+    t->textured = (uint8_t)(td->on ? 1 : 0);
+    t->tx = (uint16_t)td->x; t->ty = (uint16_t)td->y;
+    t->tw = (uint16_t)td->w; t->th = (uint16_t)td->h;
+    t->page = (uint8_t)td->page;
     t->r = (uint8_t)((rgb >> 16) & 0xFF);
     t->g = (uint8_t)((rgb >> 8) & 0xFF);
     t->b = (uint8_t)(rgb & 0xFF);
@@ -230,7 +328,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
     size_t n = 0;
     uint32_t (*rd)(const uint8_t *);
     size_t i;
-    float prev[4][3], prevn[4][3];
+    float prev[4][3], prevn[4][3], prevuv[4][2];
     unsigned nprev = 0;
     unsigned guard;
 
@@ -247,7 +345,8 @@ static void draw_model(uint32_t addr, const mat_t *m)
 
     for (guard = 0; guard < 20000u; guard++) {
         uint32_t ph[7];
-        float nrm[3], vs[4][3], vn[4][3];
+        float nrm[3], vs[4][3], vn[4][3], uv[4][2];
+        texdesc_t td;
         unsigned nv, nnew, k, j, slot;
         uint32_t rgb;
         float len;
@@ -270,6 +369,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
             if (((ph[0] >> k) & 1u) && k < nprev && slot < 4) {
                 memcpy(vs[slot], prev[k], sizeof vs[slot]);
                 memcpy(vn[slot], prevn[k], sizeof vn[slot]);
+                memcpy(uv[slot], prevuv[k], sizeof uv[slot]);
                 slot++;
             }
         if (slot > nv) return;
@@ -291,10 +391,48 @@ static void draw_model(uint32_t addr, const mat_t *m)
             vn[slot][0] = (float)(int8_t)(wx & 0xFFu);
             vn[slot][1] = (float)(int8_t)(wy & 0xFFu);
             vn[slot][2] = (float)(int8_t)(wz & 0xFFu);
+            {
+                /* Word 3 of a vertex is u in the high half and v in the low.
+                 * The spans land on 512, 1024 and 4096, so the unit is an
+                 * eighth of a texel. */
+                uint32_t wt = rd(mem + o + 12);
+                uv[slot][0] = (float)((wt >> 16) & 0xFFFFu) / 8.0f;
+                uv[slot][1] = (float)(wt & 0xFFFFu) / 8.0f;
+            }
         }
 
         rgb = (((ph[4] >> 24) & 0xFFu) << 16) | (((ph[4] >> 16) & 0xFFu) << 8)
             | ((ph[4] >> 8) & 0xFFu);
+
+        /* The texture descriptor. Bit 26 of word 6 is the enable: it is set
+         * on 1749 of the 1780 polygons in one model and clear on the rest.
+         * The origin is in 32-texel units, which is also the tile size. */
+        /* Bits 7..9 are the pixel format. Across 6093 headers they read 0
+         * on 5614, and 5, 6 or 7 on the rest -- and only 0 is the plain
+         * 16-bit texel this samples. The others are paletted, and reading
+         * them as 16-bit is what put a red and grey diamond lattice across
+         * the backdrop. Until they are decoded, those polygons draw flat. */
+        td.fmt  = (ph[6] >> 7) & 7u;
+        td.on   = g_textures && (ph[6] & 0x04000000u) != 0 &&
+                  (g_tex_all || td.fmt == 0u);
+        td.x    = ((((ph[4] & 0x1Fu) << 1) | ((ph[5] >> 7) & 1u)) * 32u) & 2047u;
+        td.y    = ((ph[5] & 0x1Fu) * 32u) & 2047u;
+        td.page = (ph[5] >> 6) & 1u;
+        /* Size. A texture repeats -- UVs run well past its own width -- so
+         * without wrapping, sampling walks straight into whatever texture
+         * sits next to it in the sheet. That is what the diamond pattern
+         * across the backdrop was. M3_TEX_SIZE picks the decode while this
+         * is still being pinned down. */
+        switch (g_tex_size_mode) {
+        case 1:  td.w = 32u << ((ph[6] >> 3) & 7u);
+                 td.h = 32u << (ph[6] & 7u); break;
+        case 2:  td.w = 32u << (ph[6] & 7u);
+                 td.h = 32u << ((ph[6] >> 3) & 7u); break;
+        case 3:  td.w = td.h = 128u; break;
+        default: td.w = td.h = 256u; break;
+        }
+        if (td.w > 2048u) td.w = 2048u;
+        if (td.h > 2048u) td.h = 2048u;
 
         if (slot >= 3) {
             float wv[4][3], wn[3], wvn[4][3];
@@ -305,12 +443,14 @@ static void draw_model(uint32_t addr, const mat_t *m)
             mat_dir(m, nrm, wn);
             for (j = 1; j + 1 < slot; j++)
                 emit(wv[0], wv[j], wv[j+1], wn, rgb,
-                     wvn[0], wvn[j], wvn[j+1]);
+                     wvn[0], wvn[j], wvn[j+1],
+                     uv[0], uv[j], uv[j+1], &td);
         }
 
         for (j = 0; j < slot; j++) {
             memcpy(prev[j], vs[j], sizeof prev[j]);
             memcpy(prevn[j], vn[j], sizeof prevn[j]);
+            memcpy(prevuv[j], uv[j], sizeof prevuv[j]);
         }
         nprev = slot;
 
@@ -394,7 +534,7 @@ static int g_zw, g_zh;
 
 /* Sutherland-Hodgman against z >= ZNEAR. Three input vertices give at most
  * four out, so the caller's buffer is [4][3]. */
-static int clip_near(const float v[3][3], float out[4][3])
+static int clip_near(const float v[3][5], float out[4][5])
 {
     int n = 0, i, k;
     for (i = 0; i < 3; i++) {
@@ -402,12 +542,12 @@ static int clip_near(const float v[3][3], float out[4][3])
         const float *b = v[(i + 1) % 3];
         int ain = a[2] >= ZNEAR, bin = b[2] >= ZNEAR;
         if (ain && n < 4) {
-            for (k = 0; k < 3; k++) out[n][k] = a[k];
+            for (k = 0; k < 5; k++) out[n][k] = a[k];
             n++;
         }
         if (ain != bin && n < 4) {
             float t = (ZNEAR - a[2]) / (b[2] - a[2]);
-            for (k = 0; k < 3; k++) out[n][k] = a[k] + t * (b[k] - a[k]);
+            for (k = 0; k < 5; k++) out[n][k] = a[k] + t * (b[k] - a[k]);
             n++;
         }
     }
@@ -435,8 +575,8 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
          * inside the triangle test as outside. It does not look like a
          * precision bug: it looks like a cross-hatch, as though the polygon
          * were deliberately stippled for translucency. */
-        double p[3][3];
-        float clipped[4][3];
+        double p[3][3], q[3][3];
+        float clipped[4][5], src[3][5];
         double d;
         float lit, sh;
         int nclip, fan;
@@ -469,7 +609,12 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
          * discarding it throws away exactly the large near-camera polygons
          * -- the ones that would fill the screen -- so a scene can come out
          * completely empty while every individual step looks correct. */
-        nclip = clip_near(tr->v, clipped);
+        for (k = 0; k < 3; k++) {
+            src[k][0] = tr->v[k][0]; src[k][1] = tr->v[k][1];
+            src[k][2] = tr->v[k][2];
+            src[k][3] = tr->uv[k][0]; src[k][4] = tr->uv[k][1];
+        }
+        nclip = clip_near(src, clipped);
         if (nclip < 3) continue;
 
         for (fan = 1; fan + 1 < nclip; fan++) {
@@ -477,9 +622,17 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
             cv[0] = clipped[0]; cv[1] = clipped[fan]; cv[2] = clipped[fan + 1];
 
         for (k = 0; k < 3; k++) {
-            p[k][0] = fw * 0.5 + (double)cv[k][0] / cv[k][2] * sx;
-            p[k][1] = fh * 0.5 - (double)cv[k][1] / cv[k][2] * sy;
+            double iz = 1.0 / cv[k][2];
+            p[k][0] = fw * 0.5 + (double)cv[k][0] * iz * sx;
+            p[k][1] = fh * 0.5 - (double)cv[k][1] * iz * sy;
             p[k][2] = cv[k][2];
+            /* Perspective correction: interpolate u/z, v/z and 1/z linearly
+             * in screen space and divide at the end. Interpolating u and v
+             * directly is visibly wrong on polygons this large -- a ground
+             * plane running to the horizon is exactly the case it breaks. */
+            q[k][0] = (double)cv[k][3] * iz;
+            q[k][1] = (double)cv[k][4] * iz;
+            q[k][2] = iz;
         }
 
         d = (p[1][1]-p[2][1])*(p[0][0]-p[2][0])
@@ -539,6 +692,24 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                 o = y * fw + x;
                 if (z < g_zbuf[o]) {
                     uint32_t c = argb;
+                    if (tr->textured) {
+                        double iz = l0*q[0][2] + l1*q[1][2] + l2*q[2][2];
+                        if (iz > 1e-12) {
+                            double uu = (l0*q[0][0] + l1*q[1][0] + l2*q[2][0]) / iz;
+                            double vv = (l0*q[0][1] + l1*q[1][1] + l2*q[2][1]) / iz;
+                            int tp;
+                            long ui = (long)uu, vi = (long)vv;
+                            unsigned tw = tr->tw ? tr->tw : 256u;
+                            unsigned th = tr->th ? tr->th : 256u;
+                            uint32_t t;
+                            ui %= (long)tw; if (ui < 0) ui += tw;
+                            vi %= (long)th; if (vi < 0) vi += th;
+                            t = texel(tr->page, tr->tx + (unsigned)ui,
+                                      tr->ty + (unsigned)vi, &tp);
+                            if (tp) continue;       /* transparent texel */
+                            c = t;
+                        }
+                    }
                     /* Gouraud: interpolate the vertex normals across the
                      * triangle. The hardware shades this way, and the
                      * faceting without it is the most visible thing wrong
@@ -563,6 +734,11 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                         if (rr > 255) rr = 255;
                         if (gg > 255) gg = 255;
                         if (bb > 255) bb = 255;
+                        if (tr->textured) {
+                            rr = (int)(((c >> 16) & 0xFF) * s2);
+                            gg = (int)(((c >> 8) & 0xFF) * s2);
+                            bb = (int)((c & 0xFF) * s2);
+                        }
                         c = 0xFF000000u | ((uint32_t)rr << 16)
                           | ((uint32_t)gg << 8) | (uint32_t)bb;
                     }
@@ -588,6 +764,10 @@ void real3d_render(void)
     if (!inited) {
         const char *e = getenv("M3_VERTEX_SCALE");
         if (e && atof(e) > 0.0) g_vertex_scale = (float)atof(e);
+        e = getenv("M3_TEX_SIZE");
+        if (e) g_tex_size_mode = atoi(e);
+        g_tex_all = getenv("M3_TEX_ALL") != NULL;
+        g_textures = getenv("M3_TEXTURES") != NULL;
         g_tris = (tri_t *)malloc(sizeof(tri_t) * MAX_TRIS);
         inited = 1;
     }
