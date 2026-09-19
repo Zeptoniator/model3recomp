@@ -48,6 +48,23 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   comment in `src/tilegen.c`, which says so.
 
 ### Added
+- **A Real3D scene renderer** (`src/real3d.c`). Walks the viewport list, the
+  culling-node tree and the models the game builds each field, and rasterises
+  them with a depth buffer under the tilemaps. See
+  `docs/technical/real3d.md`, which pairs every structure with the check that
+  settled it -- and names the three that are still guesses.
+
+### Fixed
+- **VROM is a 16-lane interleave, not two groups of eight.** Both spellings
+  produce a 32 MB image, and both look like data. Built as two groups, the
+  chips supplying the high half of every word sit 16 MB from the ones
+  supplying the low half, so every word the Real3D reads is half of one model
+  and half of another -- and nothing complains, because the culling tree
+  still walks and the polygon headers still have seven words.
+
+  The check is that a Model 3 polygon header carries its own normal as three
+  24-bit fixed-point fields over 2^22. A correct image has 31265 models whose
+  every normal comes out unit length. The 8-lane image has none at all.
 - `M3_TILEGEN_DUMP`: prints the tilegen registers and per-layer occupancy
   whenever register 0x20 changes. Per field it is noise; on change it is four
   lines for a whole attract cycle.

@@ -207,7 +207,9 @@ void tilegen_render(void)
     if (!fb || !v)
         return;
 
-    memset(fb, 0, (size_t)fbw * (size_t)fbh * sizeof(uint32_t));
+    /* No clear here: real3d_render() has already drawn the 3D scene into
+     * this buffer and cleared what it did not cover. The tilemaps go over
+     * it, which is why they are drawn second. */
 
 #ifdef M3_TILEGEN_DUMP
     {

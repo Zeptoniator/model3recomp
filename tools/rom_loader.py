@@ -188,11 +188,25 @@ def main():
     # the chip numbers come in:
     #
     #     banked CROM   4 chips per group, group reversed   (n+3, n+2, n+1, n)
-    #     VROM          8 chips per group, adjacent swapped (n+1, n, n+3, n+2)
+    #     VROM         16 chips per group, adjacent swapped (n+1, n, n+3, n+2)
     #
     # Getting either wrong still produces an image of the right size, and a
     # game reading it finds plausible-looking nonsense rather than nothing --
     # which is worse, because it gets further before it goes wrong.
+    #
+    # The VROM is all sixteen chips in ONE group, not two groups of eight.
+    # Both spellings produce a 32 MB image and both look like data; the
+    # difference is that one of them contains models. Eight lanes puts the
+    # chips that supply the high half of every word 16 MB away from the ones
+    # that supply the low half, so every 32-bit word the Real3D reads is half
+    # of one model and half of another. Nothing complains: the culling tree
+    # still walks, the polygon headers still have seven words, and the
+    # normals in them are simply not unit vectors any more.
+    #
+    # That last part is the check. A Model 3 polygon header carries its own
+    # normal as three 24-bit fixed-point fields over 2^22, and a correct
+    # image has tens of thousands of models whose every normal comes out
+    # unit length. The eight-lane image has none at all.
     if a.banked:
         names = sorted(n for n, b in files.items()
                        if len(b) == 0x400000 and n not in order)
@@ -201,7 +215,7 @@ def main():
     if a.vrom:
         names = sorted(n for n, b in files.items()
                        if len(b) == 0x200000 and n not in order)
-        build_region(files, names, 8, a.vrom, "VROM",
+        build_region(files, names, 16, a.vrom, "VROM",
                      group_order=swap_pairs)
     return 0
 

@@ -2,6 +2,7 @@
 #include "model3recomp/model3recomp.h"
 #include "model3recomp/platform.h"
 #include "model3recomp/tilegen.h"
+#include "model3recomp/real3d.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,7 +74,11 @@ void model3recomp_end_frame(void)
         fprintf(stderr, "[model3recomp] field %llu\n",
                 (unsigned long long)g_frames);
 
-    /* Real3D lands here when it is written; the tilemaps go under it. */
+    /* The 3D scene first -- it clears the buffer -- then the tilemaps over
+     * it. Model 3 can put a tilemap layer behind the 3D as well as in front
+     * of it; this draws them all in front, which is right for attract mode
+     * and for any screen whose 2D is text. */
+    real3d_render();
     tilegen_render();
     platform_present();
     if (g_frame_hook)
