@@ -281,6 +281,35 @@ log says anything is wrong. What found it was diffing two scene dumps ten
 fields apart and reading every word that differed -- one of which was a
 viewport field the code had a comment explaining why it ignored.
 
+## There is no environment in the scene, and that is upstream
+
+The renderer draws what it is given, and what it is given is not a scene.
+Field 2040, every model in it:
+
+    matrices 400-420   the figure, 21 parts          ~3500 triangles
+    matrix  421        one object in polygon RAM        764
+    matrices 422-445   the same 8-triangle model,       192
+                       instanced 24 times along a
+                       curve running out to 36000 units
+    matrices 393,394,  two 2-triangle and two            12
+            446,447    4-triangle quads
+
+That is the entire 4525. No terrain, no foliage, no ground -- a figure and
+some scattered markers. Every shot sampled has the same shape: around 55
+models and around 4500 triangles.
+
+The traversal is not at fault. A loose scan of culling RAM for anything that
+could be a node finds 62 addresses, and the only three the walk does not
+reach through the node run are the viewport roots, which it reaches directly.
+Culling RAM high is 3% populated -- 7782 non-zero words of 262144, nothing
+past 0x352F. Culling RAM low is completely empty, 0 of 4194304 bytes, and no
+DMA in an entire run targets it.
+
+So the game is describing a small scene, and the place to look is what the
+game is executing, not how the scene is walked. Worth stating plainly because
+the renderer has been the suspect for everything up to now and here it is
+not: it is drawing all of what arrives.
+
 ## Five parts of the model never draw
 
 Prompted by someone looking at a screenshot and saying it was half a model
