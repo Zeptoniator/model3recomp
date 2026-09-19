@@ -10,6 +10,7 @@
  * See docs/technical/execution-model.md.
  */
 #include "model3recomp/bus.h"
+#define M3_NL "\n"
 #include "model3recomp/irq.h"
 #include "model3recomp/scsi.h"
 #include "model3recomp/model3recomp.h"
@@ -513,6 +514,7 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
  * finished scene from a torn one.
  */
 static uint64_t g_r3d_triggers;
+static uint64_t g_dropped_writes[256];
 
 uint64_t bus_r3d_trigger_count(void) { return g_r3d_triggers; }
 
@@ -595,6 +597,32 @@ static void dev_write_word(uint32_t w, uint32_t v)
         if ((w & 0xFC) == 0x10) irq_ack(v);
         return;
     }
+
+    /* Anything that reaches here is a write the board does not model, and
+     * it is thrown away. Count it by page, because a region the guest
+     * writes megabytes to and we ignore looks exactly like a region the
+     * guest never writes. */
+    g_dropped_writes[(w >> 24) & 0xFFu]++;
+    if (getenv("M3_DROP_TRACE")) {
+        static unsigned n;
+        if (n++ < 30)
+            fprintf(stderr, "[drop] %08X = %08X" M3_NL, w, v);
+    }
+}
+
+void bus_report_dropped_writes(void)
+{
+    unsigned i, any = 0;
+    for (i = 0; i < 256; i++) {
+        if (!g_dropped_writes[i]) continue;
+        if (!any++) fprintf(stderr, "[model3recomp] writes the board "
+                                    "discarded, by page:\n");
+        fprintf(stderr, "    %02X000000: %llu\n", i,
+                (unsigned long long)g_dropped_writes[i]);
+    }
+    if (!any)
+        fprintf(stderr, "[model3recomp] no writes were discarded\n");
+    fflush(stderr);
 }
 
 /* Byte-lane extraction, big-endian: the byte at address a sits in lane

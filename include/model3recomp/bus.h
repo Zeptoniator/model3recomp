@@ -89,6 +89,9 @@ const uint32_t *bus_tilegen_regs(void);
  * is finished when this moves; see the note in bus.c. */
 uint64_t bus_r3d_trigger_count(void);
 
+/* Writes the board does not model, tallied by page. */
+void bus_report_dropped_writes(void);
+
 /* Real3D scene memory. Nothing renders these yet, but the guest fills them
  * every frame, so they are the evidence that it is drawing at all. */
 uint8_t *bus_cull_lo(size_t *size);

@@ -225,6 +225,21 @@ Working, and checked:
   because a ground plane running to the horizon is exactly where affine
   interpolation falls apart.
 
+Also ruled out, and this is the part that matters: **nothing uploads
+textures.** Every path was traced in a full run.
+
+- The FIFO at 0x94000000 takes 321 KB and stops. Its contents are not
+  pixels: the opening block is 1027 words of `0x80000000 | n*4` ending on a
+  non-linear tail, which is a gamma ramp, followed by two-word commands
+  separated by runs of zeros.
+- No SCRIPTS DMA targets texture memory, or polygon RAM, in an entire run.
+- Writes the board discards were counted by page. The largest group is
+  29112 to 0xF8FFF0xx, which are MPC105 bridge registers. Tens of kilobytes
+  in total across every page, nowhere near a texture set.
+
+So the Real3D reads textures out of VROM directly, and the whole problem is
+one address function.
+
 Not working: **which VROM address a polygon's texture coordinates name.**
 
 Tried, and measured by how smooth the result comes out against a median of
@@ -237,6 +252,18 @@ that a 32-bit model word can read correctly while the two 16-bit texels
 inside it are transposed. The best scored 3407. A correct layout does not
 win by that margin, it wins by the margin the model decode won by, which was
 31265 models against none.
+
+Two further things were measured and both came back negative. Asking the
+data for its own row width -- the ratio of vertical to horizontal neighbour
+difference, minimised at the true width -- gives 16 at every location tried,
+and sixteen 16-bit texels is 32 bytes, which is exactly this ROM's interleave
+group. That is the interleave answering, not the texture. And de-interleaving
+VROM into its sixteen chips and profiling each one separately gives a flat
+response at every width, so no chip holds a contiguous slice either.
+
+The interleave itself is not in question. If the lane pairs were misordered
+the model stream would scramble with them, and 600 models chain through it
+without a break.
 
 So the polygons fetch real texels from the wrong places. Switched on it
 looks like texturing -- foliage appears on the rocks, the colour count in a
