@@ -138,11 +138,27 @@ not few, none -- which is about as clear a signal as a ROM layout ever gives.
 
 ## What is not settled
 
-- **The vertex scale.** Two matrices in one scene independently imply about
-  1/3000; the code uses 1/1024 because it is a power of two nearby and it is
-  what puts the scene on screen. It needs a frame with something recognisable
-  in it, and attract mode does not reach one before a run times out.
+- **The vertex scale's divisor.** What *is* established is that models are
+  normalised to fill the 24-bit coordinate field: 866 of 1600 models chained
+  from four separated seeds have a largest coordinate between 112 and 128
+  units, and the ceiling is hit exactly and never crossed. The code reads the
+  field as 8.16, giving +/-128. But 1/32768 or 1/131072 would tell the same
+  story about normalisation with everything twice or half the size, so the
+  divisor itself needs a frame whose correct appearance is known.
   `M3_VERTEX_SCALE` overrides it.
+
+  An earlier note here claimed ~1/3000, derived by assuming a flat 4:3 model
+  was a backdrop that filled the screen and reading two matrices as agreeing
+  on it. They were not agreeing on anything. It is recorded because it looked
+  like a derivation and was a guess with arithmetic on top.
+- **Where the camera puts things.** In every frame this build can reach, the
+  scene's geometry projects to a tight cluster off the left of the screen and
+  above it -- coherent, consistently placed, and not in view. That is either
+  a camera transform that is wrong in some systematic way, or a screen whose
+  3D really is parked out of sight; the ranking table has no 3D in it, so
+  both are plausible and nothing here distinguishes them. Matrix 0 as given,
+  transposed, inverted, and no camera at all were all tried; none puts this
+  scene on screen.
 - **The light.** Fixed direction, invented. The hardware takes it from the
   viewport, which is not decoded.
 - **Textures.** Not done. Polygons draw in their header colour.

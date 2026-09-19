@@ -48,6 +48,25 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   comment in `src/tilegen.c`, which says so.
 
 ### Added
+- `tests/test_real3d.py` and `tools/model_view.py`. The test asserts the
+  invariants that settled the decode -- models chain back to back through
+  VROM, and the same image read the other way has none. The tool renders one
+  model on its own, which is the quickest way to tell a good VROM image from
+  a bad one.
+
+### Fixed
+- **Clip triangles against the near plane instead of dropping them.** A
+  triangle that straddles the eye plane cannot be projected, and discarding
+  it throws away exactly the large near-camera polygons that would fill the
+  screen -- so a scene comes out empty while every individual step looks
+  correct.
+- **The vertex scale is 1/65536**, not the 1/1024 first committed. The
+  earlier figure came from assuming a flat 4:3 model was a backdrop filling
+  the screen, and reading two matrices as agreeing on the result; they were
+  not agreeing on anything. What is actually established is narrower and is
+  written down as such in `src/real3d.c`: models are normalised to fill the
+  24-bit coordinate field, which fixes the field's meaning but not the
+  divisor.
 - **A Real3D scene renderer** (`src/real3d.c`). Walks the viewport list, the
   culling-node tree and the models the game builds each field, and rasterises
   them with a depth buffer under the tilemaps. See

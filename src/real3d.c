@@ -37,7 +37,13 @@
  *                 31265 of them, against none for the 8-lane image the ROM
  *                 builder used to produce. See tools/rom_loader.py.
  *
- * What is NOT settled is the vertex scale -- see VERTEX_SCALE_DEFAULT.
+ * What is NOT settled is the camera. Matrix 0 is used as the view transform
+ * because it is the only one of the table's first four that is a plain
+ * rotation and the only one that puts any of the scene in front of the eye.
+ * That is an argument, not a check, and it has never been held up against a
+ * frame whose correct appearance is known -- attract mode does not reach a
+ * scene with anything recognisable in it before a run times out. The light
+ * direction is invented outright, and there are no textures.
  */
 #include "model3recomp/real3d.h"
 #include "model3recomp/bus.h"
@@ -50,22 +56,30 @@
 #define MAX_TRIS   40000u
 #define MAX_DEPTH  24
 
-/* The vertex fixed-point scale.
+/* The vertex fixed-point scale: the 24-bit coordinate field read with 16
+ * fractional bits, so a coordinate runs from -128 to +128.
  *
- * This one is a calibration, not a derivation, and it is the weakest number
- * in the file. Two independent matrices in the same scene imply about
- * 1/3000: one is a pure rotation placing an object some 600 units away whose
- * raw half-extent is 655360, and another carries a scale of 45 with a
- * translation of 28000. Both want the object to come out a sensible size for
- * the field of view, and both land near 1/3000.
+ * Be clear about how far the evidence goes, because it is easy to overstate.
+ * What is established is that models are normalised to fill the field:
+ * chain 1600 of them out of VROM from four widely separated seeds and 866
+ * have a largest coordinate between 112 and 128 units, with the ceiling hit
+ * exactly and never crossed. So the field is a normalised range and the
+ * matrices carry the real size, which is the part that matters for getting
+ * the pipeline right.
  *
- * 1/1024 is what is used, because it is a power of two in that region and
- * because it is the value that puts this scene's geometry on screen. It
- * wants checking against a scene with something recognisable in it -- a
- * dinosaur is either the right size or it is not -- and attract mode does
- * not reach one before a run times out. M3_VERTEX_SCALE overrides it.
+ * What that does NOT establish is the divisor. 1/65536 is the natural 8.16
+ * split of a 24-bit field, and it makes this game's matrix scales come out
+ * at sensible on-screen sizes, but 1/32768 or 1/131072 would tell the same
+ * story about normalisation with every model twice or half the size. Only a
+ * frame whose correct appearance is known settles that, and attract mode
+ * does not reach one before a run times out. M3_VERTEX_SCALE overrides it.
+ *
+ * An earlier guess here was ~1/3000, from assuming a flat 4:3 model was a
+ * backdrop filling the screen and reading two matrices as agreeing on it.
+ * They were not agreeing on anything; they were being asked a leading
+ * question, and it is worth remembering how reasonable that looked.
  */
-#define VERTEX_SCALE_DEFAULT 1024.0f
+#define VERTEX_SCALE_DEFAULT 65536.0f
 
 static float g_vertex_scale = VERTEX_SCALE_DEFAULT;
 static unsigned g_tri_count;
@@ -346,6 +360,30 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
 static float *g_zbuf;
 static int g_zw, g_zh;
 
+#define ZNEAR 0.05f
+
+/* Sutherland-Hodgman against z >= ZNEAR. Three input vertices give at most
+ * four out, so the caller's buffer is [4][3]. */
+static int clip_near(const float v[3][3], float out[4][3])
+{
+    int n = 0, i, k;
+    for (i = 0; i < 3; i++) {
+        const float *a = v[i];
+        const float *b = v[(i + 1) % 3];
+        int ain = a[2] >= ZNEAR, bin = b[2] >= ZNEAR;
+        if (ain && n < 4) {
+            for (k = 0; k < 3; k++) out[n][k] = a[k];
+            n++;
+        }
+        if (ain != bin && n < 4) {
+            float t = (ZNEAR - a[2]) / (b[2] - a[2]);
+            for (k = 0; k < 3; k++) out[n][k] = a[k] + t * (b[k] - a[k]);
+            n++;
+        }
+    }
+    return n;
+}
+
 static void raster(uint32_t *fb, int fw, int fh, float sx, float sy)
 {
     /* A fixed key light. The hardware takes its light from the viewport,
@@ -357,19 +395,29 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy)
     for (t = 0; t < g_ntris; t++) {
         const tri_t *tr = &g_tris[t];
         float p[3][3];
+        float clipped[4][3];
         float d, lit, sh;
+        int nclip, fan;
         int x0, x1, y0, y1, x, y, k;
         int r, g, b;
         uint32_t argb;
 
-        if (tr->v[0][2] <= 0.001f || tr->v[1][2] <= 0.001f ||
-            tr->v[2][2] <= 0.001f)
-            continue;                        /* behind or on the eye plane */
+        /* Cut against the near plane rather than dropping the triangle.
+         * A triangle that straddles the eye plane cannot be projected, but
+         * discarding it throws away exactly the large near-camera polygons
+         * -- the ones that would fill the screen -- so a scene can come out
+         * completely empty while every individual step looks correct. */
+        nclip = clip_near(tr->v, clipped);
+        if (nclip < 3) continue;
+
+        for (fan = 1; fan + 1 < nclip; fan++) {
+            const float *cv[3];
+            cv[0] = clipped[0]; cv[1] = clipped[fan]; cv[2] = clipped[fan + 1];
 
         for (k = 0; k < 3; k++) {
-            p[k][0] = fw * 0.5f + tr->v[k][0] / tr->v[k][2] * sx;
-            p[k][1] = fh * 0.5f - tr->v[k][1] / tr->v[k][2] * sy;
-            p[k][2] = tr->v[k][2];
+            p[k][0] = fw * 0.5f + cv[k][0] / cv[k][2] * sx;
+            p[k][1] = fh * 0.5f - cv[k][1] / cv[k][2] * sy;
+            p[k][2] = cv[k][2];
         }
 
         d = (p[1][1]-p[2][1])*(p[0][0]-p[2][0])
@@ -410,6 +458,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy)
                 o = y * fw + x;
                 if (z < g_zbuf[o]) { g_zbuf[o] = z; fb[o] = argb; }
             }
+        }
         }
     }
 }
