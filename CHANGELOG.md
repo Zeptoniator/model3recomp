@@ -48,6 +48,17 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   comment in `src/tilegen.c`, which says so.
 
 ### Added
+- `M3_REAL3D_STATS`: prints triangles submitted and pixels drawn, on change.
+  This is what found the first frame of attract mode that actually has a 3D
+  scene in it -- field 2080, 4525 triangles submitted and zero drawn.
+
+### Fixed
+- **The 3D layer draws.** The vertex scale is 1/256 and there is no camera
+  matrix. Both had been wrong, and both wrong answers came with arguments --
+  see `docs/technical/real3d.md`, which keeps them written down, because
+  they have the same shape and it is the shape to watch for: a 3D pipeline
+  never reports a wrong constant, it draws. Field 2080 renders rocks and a
+  cliff face under the attract text.
 - `tests/test_real3d.py` and `tools/model_view.py`. The test asserts the
   invariants that settled the decode -- models chain back to back through
   VROM, and the same image read the other way has none. The tool renders one

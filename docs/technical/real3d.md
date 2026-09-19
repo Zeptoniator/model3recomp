@@ -136,31 +136,54 @@ The check is the normals again. A correct image has 31265 models whose every
 header normal is unit length. The eight-lane image has **none at all** --
 not few, none -- which is about as clear a signal as a ROM layout ever gives.
 
-## What is not settled
+## The reference frame
 
-- **The vertex scale's divisor.** What *is* established is that models are
-  normalised to fill the 24-bit coordinate field: 866 of 1600 models chained
-  from four separated seeds have a largest coordinate between 112 and 128
-  units, and the ceiling is hit exactly and never crossed. The code reads the
-  field as 8.16, giving +/-128. But 1/32768 or 1/131072 would tell the same
-  story about normalisation with everything twice or half the size, so the
-  divisor itself needs a frame whose correct appearance is known.
-  `M3_VERTEX_SCALE` overrides it.
+Field 2080 of attract mode. The game hands the renderer 4525 triangles
+across 55 models, and they resolve into rocks in the foreground with a cliff
+face behind. That frame is what settled the vertex scale and the camera, and
+it is what to render first after changing anything here -- everything before
+it in attract mode is 2D over an empty or parked scene, which is exactly the
+condition under which a broken renderer looks fine.
 
-  An earlier note here claimed ~1/3000, derived by assuming a flat 4:3 model
-  was a backdrop that filled the screen and reading two matrices as agreeing
-  on it. They were not agreeing on anything. It is recorded because it looked
-  like a derivation and was a guess with arithmetic on top.
-- **Where the camera puts things.** In every frame this build can reach, the
-  scene's geometry projects to a tight cluster off the left of the screen and
-  above it -- coherent, consistently placed, and not in view. That is either
-  a camera transform that is wrong in some systematic way, or a screen whose
-  3D really is parked out of sight; the ranking table has no 3D in it, so
-  both are plausible and nothing here distinguishes them. Matrix 0 as given,
-  transposed, inverted, and no camera at all were all tried; none puts this
-  scene on screen.
+    M3_REAL3D_STATS=1 ./lostworld 2080
+
+`M3_REAL3D_STATS` prints the triangle count and how many pixels reached the
+framebuffer, on change. That is how field 2080 was found in the first place:
+4525 triangles submitted and zero drawn, for twenty fields running.
+
+## Two wrong answers, kept on purpose
+
+The vertex scale is 1/256. It was committed twice before that, wrongly, and
+both times with an argument:
+
+- **1/1024**, from taking a flat 4:3 model for a backdrop that filled the
+  screen and reading two matrices as independently agreeing on the size that
+  implied. They were not agreeing on anything; they were being asked a
+  leading question, with arithmetic on top to make it look derived.
+- **1/65536**, from the observation that model extents crowd the top of the
+  24-bit coordinate field. The observation is true and it is worthless: the
+  raw integers fill the field whatever divisor is applied afterwards, so it
+  says nothing whatever about the divisor. It looked like evidence.
+
+The camera went the same way. Matrix 0 is a plain rotation sitting exactly
+where a view transform belongs, and using it turned the only scene then
+available from nothing into something -- which was taken as confirmation. On
+a frame that actually has a scene in it, matrix 0 pushes everything off the
+left of the screen and leaving it out gives the rocks. The node matrices
+already carry geometry into view space.
+
+Both failures have the same shape, and it is the shape to watch for here: a
+3D pipeline never reports a wrong constant, it just draws. Only a frame with
+a recognisable subject in it can say no.
+
+## What is still not settled
+
 - **The light.** Fixed direction, invented. The hardware takes it from the
-  viewport, which is not decoded.
-- **Textures.** Not done. Polygons draw in their header colour.
+  viewport, which is not decoded, so surface shading is readable but not
+  right.
+- **Textures.** Not done. Polygons draw in their header colour, which is why
+  the reference frame is grey.
 - **Layer priority.** The tilemaps are all drawn over the 3D. Model 3 can put
   a tilemap layer behind it.
+- **Culling.** The node bounding data is read but not used; everything
+  submitted is transformed.

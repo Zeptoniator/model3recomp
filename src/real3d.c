@@ -48,6 +48,9 @@
 #include "model3recomp/real3d.h"
 #include "model3recomp/bus.h"
 #include "model3recomp/platform.h"
+#include "model3recomp/model3recomp.h"
+
+#include <stdio.h>
 
 #include <math.h>
 #include <stdlib.h>
@@ -56,30 +59,32 @@
 #define MAX_TRIS   40000u
 #define MAX_DEPTH  24
 
-/* The vertex fixed-point scale: the 24-bit coordinate field read with 16
- * fractional bits, so a coordinate runs from -128 to +128.
+/* The vertex fixed-point scale: the 24-bit coordinate field over 256.
  *
- * Be clear about how far the evidence goes, because it is easy to overstate.
- * What is established is that models are normalised to fill the field:
- * chain 1600 of them out of VROM from four widely separated seeds and 866
- * have a largest coordinate between 112 and 128 units, with the ceiling hit
- * exactly and never crossed. So the field is a normalised range and the
- * matrices carry the real size, which is the part that matters for getting
- * the pipeline right.
+ * This finally has a real check behind it. Field 2080 of attract mode hands
+ * the renderer 4525 triangles across 55 models, and at 1/256 they resolve
+ * into a scene you can recognise -- rocks in the foreground, a cliff face
+ * behind. At 1/16 the camera is inside the geometry and the screen is one
+ * flat wash; at 1/1024 and beyond every object is sub-pixel and 1262
+ * triangles between them light two pixels.
  *
- * What that does NOT establish is the divisor. 1/65536 is the natural 8.16
- * split of a 24-bit field, and it makes this game's matrix scales come out
- * at sensible on-screen sizes, but 1/32768 or 1/131072 would tell the same
- * story about normalisation with every model twice or half the size. Only a
- * frame whose correct appearance is known settles that, and attract mode
- * does not reach one before a run times out. M3_VERTEX_SCALE overrides it.
+ * Two earlier answers here were wrong, in opposite directions, and both came
+ * with reasoning:
  *
- * An earlier guess here was ~1/3000, from assuming a flat 4:3 model was a
- * backdrop filling the screen and reading two matrices as agreeing on it.
- * They were not agreeing on anything; they were being asked a leading
- * question, and it is worth remembering how reasonable that looked.
+ *   1/1024, from taking a flat 4:3 model for a backdrop that filled the
+ *   screen and reading two matrices as independently agreeing on the size
+ *   that implied. They were not agreeing on anything.
+ *
+ *   1/65536, from the observation that model extents crowd the top of the
+ *   24-bit field. That observation is true and it is also worthless here:
+ *   the raw integers fill the field whatever divisor you then apply, so it
+ *   says nothing about the divisor at all. What it looked like was evidence.
+ *
+ * The lesson both times was the same. Nothing about this pipeline announces
+ * a wrong scale -- it just draws something -- so the only thing that settles
+ * it is a frame with a recognisable subject in it. M3_VERTEX_SCALE overrides.
  */
-#define VERTEX_SCALE_DEFAULT 65536.0f
+#define VERTEX_SCALE_DEFAULT 256.0f
 
 static float g_vertex_scale = VERTEX_SCALE_DEFAULT;
 static unsigned g_tri_count;
@@ -357,6 +362,7 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
 }
 
 /* ---- rasteriser -------------------------------------------------------- */
+static unsigned g_drawn;
 static float *g_zbuf;
 static int g_zw, g_zh;
 
@@ -456,7 +462,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy)
                 if (l0 < 0 || l1 < 0 || l2 < 0) continue;
                 z = l0*p[0][2] + l1*p[1][2] + l2*p[2][2];
                 o = y * fw + x;
-                if (z < g_zbuf[o]) { g_zbuf[o] = z; fb[o] = argb; }
+                if (z < g_zbuf[o]) { g_zbuf[o] = z; fb[o] = argb; g_drawn++; }
             }
         }
         }
@@ -495,6 +501,7 @@ void real3d_render(void)
         for (i = 0; i < nn; i++) g_zbuf[i] = 1e30f;
     }
 
+    g_drawn = 0;
     vpaddr = 0x800000u;
     for (guard = 0; guard < 16u && vpaddr; guard++) {
         const uint8_t *vp = cull_at(vpaddr, 0x20);
@@ -520,10 +527,14 @@ void real3d_render(void)
         sx = (fw * 0.5f) / tanf(hf);
         sy = (fh * 0.5f) / tanf(vf);
 
-        /* Matrix 0 is the camera. It is the only one of the table's first
-         * four that puts any of this scene in front of the eye, and it is a
-         * plain rotation. */
-        if (!mat_load(g_matbase, 0, &cam)) cam = IDENT;
+        /* No camera matrix. Matrix 0 looked like one -- a plain rotation,
+         * sitting where a view transform belongs -- and using it turned the
+         * one scene available at the time from nothing into something, which
+         * was taken for confirmation. On a frame that actually has a scene
+         * in it, applying matrix 0 pushes the whole thing off the left of
+         * the screen, and leaving it out gives rocks and a cliff face. The
+         * node matrices already carry the geometry into view space. */
+        cam = IDENT;
 
         g_ntris = 0;
         descend(rd32le(vp + 0x02 * 4) & 0x00FFFFFFu, &cam, 0);
@@ -535,4 +546,20 @@ void real3d_render(void)
         vpaddr = next;
     }
     g_tri_count = total;
+
+    /* M3_REAL3D_STATS: how much geometry the game handed us, and how much of
+     * it landed. Printed on change rather than per field, because it changes
+     * a handful of times in an attract cycle and printing it every field
+     * buries that. This is how you find a frame that has 3D in it at all. */
+    if (getenv("M3_REAL3D_STATS")) {
+        static unsigned last_total = 0xFFFFFFFFu;
+        static unsigned last_drawn = 0xFFFFFFFFu;
+        if (total != last_total || g_drawn != last_drawn) {
+            last_total = total; last_drawn = g_drawn;
+            fprintf(stderr, "[real3d] field %llu: %u triangles, %u drawn\n",
+                    (unsigned long long)model3recomp_frame_count(),
+                    total, g_drawn);
+            fflush(stderr);
+        }
+    }
 }
