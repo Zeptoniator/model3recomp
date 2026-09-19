@@ -252,6 +252,24 @@ and runs of zeros rather than pixels -- 3.7 KB to the trigger, and 36 bytes
 to the texture port. The rejected transfers are all boot-test noise with
 garbage addresses. Nothing is being dropped; there is no upload to find.
 
+## The scene animates, and then it stops
+
+Worth knowing before reading too much into a screenshot. Sampled every field
+through the attract sequence at 2040-2075:
+
+    2040..2061   the picture changes every field, by 35 down to 17 grey
+                 levels per pixel, decaying smoothly -- a camera in motion
+    2062..2075   byte-identical, field after field, fourteen of them
+    2092         cuts to 2D only
+
+The Real3D trigger keeps firing at four writes a field the whole time, so the
+game is still asking for frames; it has simply stopped changing what it asks
+for. Something the demo advances its own state with is not advancing.
+
+So what the renderer shows is a fragment of a demo -- about twenty fields of
+real motion -- and then a freeze. It is not the attract sequence playing
+through, and a still taken from the frozen part cannot tell you which.
+
 ## Things that look wrong and are not
 
 - **Long thin slivers.** Some polygons rasterise as near-degenerate spikes
