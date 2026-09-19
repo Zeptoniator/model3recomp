@@ -35,6 +35,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rather than none.
 
 ### Fixed
+- **The attract-mode cross-fade.** Viewport word 0x07 is a global brightness
+  multiplier -- it holds at exactly 1.0 for a thousand fields, ramps to 0.0
+  in even steps, holds through the gap between demo shots, and ramps back.
+  Ignoring it made the renderer look frozen for twenty-six fields at a time:
+  the game was fading a shot to black and the picture was drawn at full
+  brightness all the way down, byte-identical, while the scene underneath it
+  changed every field.
 - **Backface culling.** Safe to do because the winding turns out to be
   consistent: in a dumped model all 588 polygons agree in sign between their
   header normal and the normal computed from their own vertices, every one.

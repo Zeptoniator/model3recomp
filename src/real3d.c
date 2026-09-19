@@ -117,6 +117,9 @@ static int g_tex_all;
  * pipeline and not the guess.
  */
 static int g_textures;
+static uint32_t g_scene_hash;
+static uint32_t g_fb_hash;
+static float g_vp07;
 static unsigned g_tri_count;
 
 unsigned real3d_last_tri_count(void) { return g_tri_count; }
@@ -555,15 +558,25 @@ static int clip_near(const float v[3][5], float out[4][5])
 }
 
 static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
-                   const float L[3])
+                   const float L[3], float intensity)
 {
     /* The light comes from the viewport now, not from an invention.
      * Words 0x04..0x06 are a unit vector -- (-0.72288, -0.16226, -0.67156)
      * in this game, length 1.0000 to five places, and the same in every
      * scene dumped -- which is what identifies them. Word 0x07 sits with
-     * them and looks like an intensity, but it reads 0.93 in one attract
-     * shot and 0.06 in another that is plainly not six percent as bright,
-     * so it is left alone rather than guessed at. */
+     * Word 0x07 is a global brightness multiplier, and it took a second
+     * look to see it. It was dismissed once for reading 0.93 in one attract
+     * shot and 0.06 in another that was plainly not six per cent as bright
+     * -- which was two moments compared without asking what happened
+     * between them. Sampled every field it is unmistakable: it holds at
+     * exactly 1.0000 for a thousand fields, ramps down in even steps to
+     * 0.0000, holds there through the gap between demo shots, and ramps
+     * back. It is the cross-fade.
+     *
+     * Ignoring it is what made the renderer look frozen: the game spent
+     * twenty fields fading a shot to black and the picture stayed at full
+     * brightness, byte-identical, while the scene underneath it changed
+     * every field. */
     unsigned t;
 
     for (t = 0; t < g_ntris; t++) {
@@ -648,7 +661,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
         lit = tr->n[0]*L[0] + tr->n[1]*L[1] + tr->n[2]*L[2];
         if (lit < 0) lit = 0;
         if (lit > 1.0f) lit = 1.0f;
-        sh = AMBIENT + (1.0f - AMBIENT) * lit;
+        sh = (AMBIENT + (1.0f - AMBIENT) * lit) * intensity;
         r = (int)(tr->r * sh); g = (int)(tr->g * sh); b = (int)(tr->b * sh);
         if (r > 255) r = 255;
         if (g > 255) g = 255;
@@ -728,7 +741,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                         int rr, gg, bb;
                         if (d < 0) d = 0;
                         if (d > 1.0f) d = 1.0f;
-                        s2 = AMBIENT + (1.0f - AMBIENT) * d;
+                        s2 = (AMBIENT + (1.0f - AMBIENT) * d) * intensity;
                         rr = (int)(tr->r * s2); gg = (int)(tr->g * s2);
                         bb = (int)(tr->b * s2);
                         if (rr > 255) rr = 255;
@@ -791,7 +804,7 @@ void real3d_render(void)
     for (guard = 0; guard < 16u && vpaddr; guard++) {
         const uint8_t *vp = cull_at(vpaddr, 0x20);
         mat_t cam;
-        float hf, vf, sx, sy, light[3];
+        float hf, vf, sx, sy, light[3], intensity;
         uint32_t next;
 
         if (!vp) break;
@@ -815,6 +828,7 @@ void real3d_render(void)
         light[0] = f32_of(rd32le(vp + 0x04 * 4));
         light[1] = f32_of(rd32le(vp + 0x05 * 4));
         light[2] = f32_of(rd32le(vp + 0x06 * 4));
+        g_vp07 = f32_of(rd32le(vp + 0x07 * 4));
         if (light[0] == 0.0f && light[1] == 0.0f && light[2] == 0.0f) {
             light[0] = 0.3f; light[1] = 0.5f; light[2] = -0.81f;
         }
@@ -837,9 +851,13 @@ void real3d_render(void)
          * node matrices already carry the geometry into view space. */
         cam = IDENT;
 
+        intensity = f32_of(rd32le(vp + 0x07 * 4));
+        if (!(intensity >= 0.0f)) intensity = 1.0f;   /* NaN guard */
+        if (intensity > 2.0f) intensity = 2.0f;
+
         g_ntris = 0;
         descend(rd32le(vp + 0x02 * 4) & 0x00FFFFFFu, &cam, 0);
-        raster(fb, fw, fh, sx, sy, light);
+        raster(fb, fw, fh, sx, sy, light, intensity);
         total += g_ntris;
 
         next = rd32le(vp + 0x01 * 4) & 0x00FFFFFFu;
@@ -852,16 +870,43 @@ void real3d_render(void)
      * it landed. Printed on change rather than per field, because it changes
      * a handful of times in an attract cycle and printing it every field
      * buries that. This is how you find a frame that has 3D in it at all. */
+    /* A cheap fingerprint of what the guest handed us: the culling tree and
+     * the matrix table. If the picture stops changing, this says whether the
+     * guest stopped writing a new scene or kept writing the same one. */
+    if (getenv("M3_REAL3D_STATS")) {
+        size_t cn = 0;
+        const uint8_t *cp = bus_cull_hi(&cn);
+        uint32_t h = 2166136261u;
+        if (cp) {
+            size_t k, lim = cn < 0x20000u ? cn : 0x20000u;
+            for (k = 0; k < lim; k += 4)
+                h = (h ^ rd32le(cp + k)) * 16777619u;
+        }
+        g_scene_hash = h;
+    }
+    /* And a fingerprint of what came out, so a scene that changes while the
+     * picture does not shows up as exactly that. */
+    if (getenv("M3_REAL3D_STATS")) {
+        uint32_t h = 2166136261u;
+        int k, nn = fw * fh;
+        for (k = 0; k < nn; k += 7)
+            h = (h ^ fb[k]) * 16777619u;
+        g_fb_hash = h;
+    }
     if (getenv("M3_REAL3D_STATS")) {
         static unsigned last_total = 0xFFFFFFFFu;
         static unsigned last_drawn = 0xFFFFFFFFu;
-        if (total != last_total || g_drawn != last_drawn) {
+        static uint32_t last_hash = 0xFFFFFFFFu;
+        if (total != last_total || g_drawn != last_drawn ||
+            g_scene_hash != last_hash) {
             last_total = total; last_drawn = g_drawn;
+            last_hash = g_scene_hash;
             { size_t _fu = 0; bus_texfifo(&_fu, NULL);
-            fprintf(stderr, "[real3d] field %llu trig %llu fifo %llu: %u triangles, %u drawn\n",
+            fprintf(stderr, "[real3d] field %llu trig %llu fifo %llu scene %08X fb %08X vp07 %.4f: %u triangles, %u drawn\n",
                     (unsigned long long)model3recomp_frame_count(),
                     (unsigned long long)bus_r3d_trigger_count(),
-                    (unsigned long long)_fu, total, g_drawn); }
+                    (unsigned long long)_fu, g_scene_hash, g_fb_hash,
+                    g_vp07, total, g_drawn); }
             fflush(stderr);
         }
     }

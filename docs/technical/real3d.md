@@ -252,23 +252,34 @@ and runs of zeros rather than pixels -- 3.7 KB to the trigger, and 36 bytes
 to the texture port. The rejected transfers are all boot-test noise with
 garbage addresses. Nothing is being dropped; there is no upload to find.
 
-## The scene animates, and then it stops
+## The cross-fade, and the freeze that was not one
 
-Worth knowing before reading too much into a screenshot. Sampled every field
-through the attract sequence at 2040-2075:
+Viewport word 0x07 is a global brightness multiplier. Sampled every field it
+is unmistakable: it holds at exactly 1.0000 for a thousand fields, ramps down
+in even steps to 0.0000, holds there through the gap between demo shots, and
+ramps back up. It is how attract mode cuts between shots.
 
-    2040..2061   the picture changes every field, by 35 down to 17 grey
-                 levels per pixel, decaying smoothly -- a camera in motion
-    2062..2075   byte-identical, field after field, fourteen of them
-    2092         cuts to 2D only
+It was dismissed once, on the grounds that it read 0.93 in one shot and 0.06
+in another that was plainly not six per cent as bright. That was two moments
+compared without asking what happened between them, and it is the reason the
+renderer looked broken in a way that had nothing to do with the renderer:
 
-The Real3D trigger keeps firing at four writes a field the whole time, so the
-game is still asking for frames; it has simply stopped changing what it asks
-for. Something the demo advances its own state with is not advancing.
+    2040..2061   picture changes every field
+    2062..2088   byte-identical, twenty-six fields running
+    2092         cuts to 2D
 
-So what the renderer shows is a fragment of a demo -- about twenty fields of
-real motion -- and then a freeze. It is not the attract sequence playing
-through, and a still taken from the frozen part cannot tell you which.
+The obvious reading was that the game had stopped advancing its demo. It had
+not. Fingerprinting the culling tree per field showed it changing every
+single field throughout, while the framebuffer fingerprint sat on one value.
+The game was fading a shot to black over twenty fields and the picture was
+being drawn at full brightness the whole way down.
+
+Worth keeping because of how it presented. A still from the middle of that
+run looks exactly like a still from a working one, the triangle count stays
+around 4500, the trigger keeps firing four times a field, and nothing in any
+log says anything is wrong. What found it was diffing two scene dumps ten
+fields apart and reading every word that differed -- one of which was a
+viewport field the code had a comment explaining why it ignored.
 
 ## Things that look wrong and are not
 
