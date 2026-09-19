@@ -281,6 +281,44 @@ log says anything is wrong. What found it was diffing two scene dumps ten
 fields apart and reading every word that differed -- one of which was a
 viewport field the code had a comment explaining why it ignored.
 
+## Five parts of the model never draw
+
+Prompted by someone looking at a screenshot and saying it was half a model
+in a clump rather than a scene. It is worth writing down how right that was.
+
+The attract scene is flat: three root nodes, fifty-five leaves, no nesting,
+no node with two live children. Each leaf is one matrix and one model. Eleven
+of those leaves are parts of a single articulated object -- matrices 400 to
+414, translations spread over about two hundred units, rotation rows all
+unit length. That is an assembled figure, not a pile.
+
+Five consecutive parts of it never render, every frame, in every scene
+dumped:
+
+    matrix 395   -> 0100003C   polygon RAM word 0x3C, which is empty.
+                                Polygon RAM only ever has content from word
+                                0x10000 up.
+    matrix 396   -> 0FFF5488   top byte 0x0F
+    matrix 397   -> 0FFF6028
+    matrix 398   -> 0FFF65F8
+    matrix 399   -> 0FFF6BC8
+
+The four with top byte 0x0F have bits 24, 25, 26 and 27 all set, which is not
+a combination the rest of the scene uses -- every model pointer that works
+has 0x01. Read as models they resolve to nothing: masked to 23, 24, 22, 21
+and 28 bits, in VROM and in polygon RAM, nothing parses.
+
+They are clearly a related run. The gaps between their addresses are 0xBA0,
+0x5D0, 0x5D0, and the gaps between their node[0x09] fields are 0xBA0, 0x5D0,
+0x5D0 -- identical. So they are consecutive models in some buffer, and
+node[0x09] is their offset within it. Whatever fills that buffer, this
+runtime does not see it: the FIFO at 0x94000000 contains no polygon header
+anywhere in it (zero unit-normal triples in 80390 words, read either way
+round), and no DMA in a whole run targets polygon RAM at all.
+
+So the figure is drawn with a run of its middle missing, which is exactly
+what it looks like.
+
 ## Things that look wrong and are not
 
 - **Long thin slivers.** Some polygons rasterise as near-degenerate spikes
