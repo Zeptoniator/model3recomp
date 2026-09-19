@@ -390,19 +390,31 @@ static int clip_near(const float v[3][3], float out[4][3])
     return n;
 }
 
-static void raster(uint32_t *fb, int fw, int fh, float sx, float sy)
+static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
+                   const float L[3])
 {
-    /* A fixed key light. The hardware takes its light from the viewport,
-     * which is not decoded yet; until it is, a constant direction at least
-     * makes the shape of a surface readable instead of flat. */
-    static const float L[3] = { 0.3f, 0.5f, -0.81f };
+    /* The light comes from the viewport now, not from an invention.
+     * Words 0x04..0x06 are a unit vector -- (-0.72288, -0.16226, -0.67156)
+     * in this game, length 1.0000 to five places, and the same in every
+     * scene dumped -- which is what identifies them. Word 0x07 sits with
+     * them and looks like an intensity, but it reads 0.93 in one attract
+     * shot and 0.06 in another that is plainly not six percent as bright,
+     * so it is left alone rather than guessed at. */
     unsigned t;
 
     for (t = 0; t < g_ntris; t++) {
         const tri_t *tr = &g_tris[t];
-        float p[3][3];
+        /* Screen-space vertices in double. A projected triangle here can
+         * reach coordinates in the hundreds of thousands -- the scene runs
+         * well past the edges of a 496-pixel screen -- and in float the
+         * barycentric denominator then loses enough precision that pixels
+         * inside the triangle test as outside. It does not look like a
+         * precision bug: it looks like a cross-hatch, as though the polygon
+         * were deliberately stippled for translucency. */
+        double p[3][3];
         float clipped[4][3];
-        float d, lit, sh;
+        double d;
+        float lit, sh;
         int nclip, fan;
         int x0, x1, y0, y1, x, y, k;
         int r, g, b;
@@ -421,14 +433,14 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy)
             cv[0] = clipped[0]; cv[1] = clipped[fan]; cv[2] = clipped[fan + 1];
 
         for (k = 0; k < 3; k++) {
-            p[k][0] = fw * 0.5f + cv[k][0] / cv[k][2] * sx;
-            p[k][1] = fh * 0.5f - cv[k][1] / cv[k][2] * sy;
+            p[k][0] = fw * 0.5 + (double)cv[k][0] / cv[k][2] * sx;
+            p[k][1] = fh * 0.5 - (double)cv[k][1] / cv[k][2] * sy;
             p[k][2] = cv[k][2];
         }
 
         d = (p[1][1]-p[2][1])*(p[0][0]-p[2][0])
           + (p[2][0]-p[1][0])*(p[0][1]-p[2][1]);
-        if (d > -1e-6f && d < 1e-6f) continue;
+        if (d > -1e-9 && d < 1e-9) continue;
 
         lit = tr->n[0]*L[0] + tr->n[1]*L[1] + tr->n[2]*L[2];
         if (lit < 0) lit = -lit;
@@ -441,10 +453,23 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy)
         argb = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8)
              | (uint32_t)b;
 
-        x0 = (int)floorf(fminf(fminf(p[0][0], p[1][0]), p[2][0]));
-        x1 = (int)ceilf (fmaxf(fmaxf(p[0][0], p[1][0]), p[2][0]));
-        y0 = (int)floorf(fminf(fminf(p[0][1], p[1][1]), p[2][1]));
-        y1 = (int)ceilf (fmaxf(fmaxf(p[0][1], p[1][1]), p[2][1]));
+        {
+            double lo, hi;
+            lo = p[0][0] < p[1][0] ? p[0][0] : p[1][0];
+            if (p[2][0] < lo) lo = p[2][0];
+            hi = p[0][0] > p[1][0] ? p[0][0] : p[1][0];
+            if (p[2][0] > hi) hi = p[2][0];
+            x0 = lo < 0 ? 0 : (lo > fw - 1 ? fw - 1 : (int)lo);
+            x1 = hi < 0 ? 0 : (hi > fw - 1 ? fw - 1 : (int)hi + 1);
+            if (x1 > fw - 1) x1 = fw - 1;
+            lo = p[0][1] < p[1][1] ? p[0][1] : p[1][1];
+            if (p[2][1] < lo) lo = p[2][1];
+            hi = p[0][1] > p[1][1] ? p[0][1] : p[1][1];
+            if (p[2][1] > hi) hi = p[2][1];
+            y0 = lo < 0 ? 0 : (lo > fh - 1 ? fh - 1 : (int)lo);
+            y1 = hi < 0 ? 0 : (hi > fh - 1 ? fh - 1 : (int)hi + 1);
+            if (y1 > fh - 1) y1 = fh - 1;
+        }
         if (x0 < 0) x0 = 0;
         if (y0 < 0) y0 = 0;
         if (x1 > fw - 1) x1 = fw - 1;
@@ -452,7 +477,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy)
 
         for (y = y0; y <= y1; y++) {
             for (x = x0; x <= x1; x++) {
-                float l0, l1, l2, z;
+                double l0, l1, l2, z;
                 int o;
                 l0 = ((p[1][1]-p[2][1])*(x-p[2][0])
                     + (p[2][0]-p[1][0])*(y-p[2][1])) / d;
@@ -462,7 +487,9 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy)
                 if (l0 < 0 || l1 < 0 || l2 < 0) continue;
                 z = l0*p[0][2] + l1*p[1][2] + l2*p[2][2];
                 o = y * fw + x;
-                if (z < g_zbuf[o]) { g_zbuf[o] = z; fb[o] = argb; g_drawn++; }
+                if (z < g_zbuf[o]) {
+                    g_zbuf[o] = (float)z; fb[o] = argb; g_drawn++;
+                }
             }
         }
         }
@@ -506,7 +533,7 @@ void real3d_render(void)
     for (guard = 0; guard < 16u && vpaddr; guard++) {
         const uint8_t *vp = cull_at(vpaddr, 0x20);
         mat_t cam;
-        float hf, vf, sx, sy;
+        float hf, vf, sx, sy, light[3];
         uint32_t next;
 
         if (!vp) break;
@@ -527,6 +554,22 @@ void real3d_render(void)
         sx = (fw * 0.5f) / tanf(hf);
         sy = (fh * 0.5f) / tanf(vf);
 
+        light[0] = f32_of(rd32le(vp + 0x04 * 4));
+        light[1] = f32_of(rd32le(vp + 0x05 * 4));
+        light[2] = f32_of(rd32le(vp + 0x06 * 4));
+        if (light[0] == 0.0f && light[1] == 0.0f && light[2] == 0.0f) {
+            light[0] = 0.3f; light[1] = 0.5f; light[2] = -0.81f;
+        }
+
+        /* A fresh depth buffer per viewport. They are separate layers, not
+         * one scene: sharing a buffer lets whichever viewport is walked
+         * first decide the depth of the whole screen, and the first one
+         * here holds a flat quad that covers it. */
+        {
+            int i, nn = fw * fh;
+            for (i = 0; i < nn; i++) g_zbuf[i] = 1e30f;
+        }
+
         /* No camera matrix. Matrix 0 looked like one -- a plain rotation,
          * sitting where a view transform belongs -- and using it turned the
          * one scene available at the time from nothing into something, which
@@ -538,7 +581,7 @@ void real3d_render(void)
 
         g_ntris = 0;
         descend(rd32le(vp + 0x02 * 4) & 0x00FFFFFFu, &cam, 0);
-        raster(fb, fw, fh, sx, sy);
+        raster(fb, fw, fh, sx, sy, light);
         total += g_ntris;
 
         next = rd32le(vp + 0x01 * 4) & 0x00FFFFFFu;
@@ -556,8 +599,9 @@ void real3d_render(void)
         static unsigned last_drawn = 0xFFFFFFFFu;
         if (total != last_total || g_drawn != last_drawn) {
             last_total = total; last_drawn = g_drawn;
-            fprintf(stderr, "[real3d] field %llu: %u triangles, %u drawn\n",
+            fprintf(stderr, "[real3d] field %llu trig %llu: %u triangles, %u drawn\n",
                     (unsigned long long)model3recomp_frame_count(),
+                    (unsigned long long)bus_r3d_trigger_count(),
                     total, g_drawn);
             fflush(stderr);
         }

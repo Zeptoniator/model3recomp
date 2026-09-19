@@ -35,6 +35,22 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rather than none.
 
 ### Fixed
+- **The rasteriser works in double.** A projected triangle here reaches
+  coordinates in the hundreds of thousands, and in float the barycentric
+  denominator lost enough precision that pixels inside a triangle tested as
+  outside. It did not look like a precision bug -- it looked like a
+  deliberate stipple, a neat cross-hatch over a large surface, which is a
+  plausible enough way to fake translucency that it was nearly left alone.
+- **A depth buffer per viewport.** They are separate layers, not one scene.
+  Sharing one buffer let whichever viewport was walked first set the depth of
+  the whole screen, and the first one holds a flat quad that covers it.
+- **The light direction comes from the viewport** rather than from an
+  invention: words 0x04..0x06 are a unit vector.
+
+### Added
+- `M3_SHOT_EVERY=N[,DIR]`: write a screenshot every N fields. An attract
+  cycle is some 4200 fields and its 3D runs in bursts of a few dozen, so
+  sampling it one run per field is not a way to look at it.
 - **Honour the tilegen's per-layer enable.** Layer 2 spends attract mode
   holding a solid full-screen rectangle -- one flat-colour tile repeated 2492
   times -- and the game simply stops displaying the layer rather than clearing

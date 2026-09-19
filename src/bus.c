@@ -502,6 +502,20 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
     return 0;
 }
 
+/* The Real3D "draw this" trigger.
+ *
+ * The scene in culling and polygon RAM is written by the guest over many
+ * thousands of instructions, and the runtime's field boundary is synthetic
+ * -- it comes off m3_work, not off a video clock -- so rendering on the
+ * field boundary means rendering whatever happens to be in the buffers at
+ * that moment, which can be half of the frame the guest is building and half
+ * of the one before it. Counting the trigger lets the renderer tell a
+ * finished scene from a torn one.
+ */
+static uint64_t g_r3d_triggers;
+
+uint64_t bus_r3d_trigger_count(void) { return g_r3d_triggers; }
+
 static void dev_write_word(uint32_t w, uint32_t v)
 {
     if ((w & 0xFFFFFFC0u) == M3_SYSCTL_BASE) {
@@ -554,6 +568,11 @@ static void dev_write_word(uint32_t w, uint32_t v)
 
     if ((w & 0xFFFFFFC0u) == M3_INPUTS_BASE) {
         if ((w & 0x3Cu) == 0x00u) g_io_ctrl = v;
+        return;
+    }
+
+    if ((w & 0xFF000000u) == M3_R3D_TRIGGER) {
+        g_r3d_triggers++;
         return;
     }
 

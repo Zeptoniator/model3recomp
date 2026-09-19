@@ -176,11 +176,37 @@ Both failures have the same shape, and it is the shape to watch for here: a
 3D pipeline never reports a wrong constant, it just draws. Only a frame with
 a recognisable subject in it can say no.
 
+## Why so much of attract mode is still black
+
+Roughly a tenth of a sampled attract cycle shows substantial 3D: the rock
+faces around fields 1500-1520 and 2020-2080, and a further sequence at
+3220-3400. The rest is 2D over a scene that is genuinely nearly empty (the
+warning and title screens submit a few hundred triangles, most of them a flat
+backdrop) or over geometry that falls outside the frustum.
+
+That last case is worth being precise about, because it looks like a bug and
+may not be one. At field 1500 the scene's models sit a median 50 degrees off
+the view axis, and rendering it at a 70-degree half-angle shows a coherent
+landscape off to the side. At field 2080, with the identical viewport
+frustum, the models sit a median 4 degrees off axis and the frame looks
+right. So the transform is not obviously wrong -- 2080 is evidence that it
+works -- and the scene at 1500 really does extend past the edges of a
+21-degree view, which terrain does.
+
+What has been ruled out: the traversal is complete (all 59 nodes that exist
+in culling RAM are visited, and none of them is an LOD table); node
+translations are all zero, so placement comes entirely from the matrix table;
+and no single matrix serves as a per-frame camera -- the best candidate for
+one scene scores 1358 triangles on screen and 1 on the next scene along.
+
 ## What is still not settled
 
-- **The light.** Fixed direction, invented. The hardware takes it from the
-  viewport, which is not decoded, so surface shading is readable but not
-  right.
+- **The light's intensity.** The direction comes from the viewport now --
+  words 0x04..0x06 are a unit vector, (-0.72288, -0.16226, -0.67156), length
+  1.0000 to five places and identical in every scene dumped, which is what
+  identifies them. Word 0x07 sits with them and looks like an intensity, but
+  it reads 0.93 in one attract shot and 0.06 in another that is plainly not
+  six per cent as bright, so it is left alone.
 - **Textures.** Not done. Polygons draw in their header colour, which is why
   the reference frame is grey.
 - **Layer priority.** The tilemaps are all drawn over the 3D. Model 3 can put
