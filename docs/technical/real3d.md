@@ -199,114 +199,54 @@ translations are all zero, so placement comes entirely from the matrix table;
 and no single matrix serves as a per-frame camera -- the best candidate for
 one scene scores 1358 triangles on screen and 1 on the next scene along.
 
-## Textures: the pipeline works, the address mapping does not
+## Textures: the format, from a reference rather than from guessing
 
-`M3_TEXTURES=1` turns texturing on. It is off by default, and that is the
-honest setting rather than a cautious one -- see the end of this section.
+`M3_TEXTURES=1` turns texturing on; it is off by default because it is not
+finished. What changed is that the format is no longer being guessed at. It
+was read out of Supermodel, which is the only place it exists in public.
 
-Working, and checked:
+Blind search had it wrong in several places, and it is worth recording which,
+because every one of them looked settled at the time.
 
-- **Where the data is.** VROM splits in half: models below 16 MB, textures
-  above. Correlate each byte with the one two along and the model half scores
-  near zero while the texture half scores +0.6, which is what 16-bit pixels
-  look like; correlate with the *next* byte instead and the texture half goes
-  negative, which is a pixel's two halves alternating.
-- **Texel format.** 16-bit, 1-5-5-5, bit 15 transparent -- the same packing
-  the tilemap palette uses. Big-endian, by a factor of five: read that way a
-  block scores 5205 for smoothness and the other way 24279.
-- **The polygon header.** Word 6 bit 26 is the texture enable (set on 1749 of
-  1780 polygons in a model, clear on the rest). Bits 7..9 are the pixel
-  format: 0 on 5614 of 6093 headers and 5, 6 or 7 on the others, and only 0
-  is a plain 16-bit texel. Origin is in 32-texel units out of word 4's low
-  five bits and word 5.
-- **UVs.** Vertex word 3, u in the high half, v in the low, in eighths of a
-  texel. Interpolated with perspective correction -- u/z, v/z and 1/z linearly
-  in screen space, divided at the end -- and carried through the near clip,
-  because a ground plane running to the horizon is exactly where affine
-  interpolation falls apart.
+**Texture memory is a flat 2048x2048 sheet**, two 2048x1024 pages stacked,
+built by uploads. It is not addressed into VROM at all. Weeks of layout
+search here -- linear at eight widths, 32- and 64-texel tiles both ways
+round, two-level tilings, strides from 8 to 256, Morton order -- were
+searching for a mapping that does not exist.
 
-Also ruled out, and this is the part that matters: **nothing uploads
-textures.** Every path was traced in a full run.
+**The tiling is 8x8, and it is in the arriving data, not in the sheet.**
+Texels come in 8x8 tiles with the pairs inside each transposed. `DETILE` in
+`src/real3d.c` is that map. Every attempt here had assumed 32x32 tiles,
+because the polygon header's coordinates are in units of 32.
 
-- The FIFO at 0x94000000 takes 321 KB and stops. Its contents are not
-  pixels: the opening block is 1027 words of `0x80000000 | n*4` ending on a
-  non-linear tail, which is a gamma ramp, followed by two-word commands
-  separated by runs of zeros.
-- No SCRIPTS DMA targets texture memory, or polygon RAM, in an entire run.
-- Writes the board discards were counted by page. The largest group is
-  29112 to 0xF8FFF0xx, which are MPC105 bridge registers. Tens of kilobytes
-  in total across every page, nowhere near a texture set.
+**The FIFO carries the textures after all.** An entry is a length word, a
+header word, then texels, and it occupies `(2 + length/2)/4` words, which is
+how the next entry is found. The stream had been dismissed as "commands and
+runs of zeros" on the strength of its first block, which really is a gamma
+ramp.
 
-So the Real3D reads textures out of VROM directly, and the whole problem is
-one address function.
+**Three polygon-header fields were wrong:**
 
-Not working: **which VROM address a polygon's texture coordinates name.**
+    field        was                          is
+    enabled      word 6 bit 26                word 6 bit 10
+    width        word 6 bits 3..5             word 3 bits 3..5
+    height       word 6 bits 0..2             word 3 bits 0..2
+    page         word 5 bit 6                 word 4 bit 6
 
-Tried, and measured by how smooth the result comes out against a median of
-5520 for arbitrary offsets: linear at eight widths; 32- and 64-texel tiles,
-row-major and column-major; two-level tilings with inner blocks of 1, 2, 4,
-8, 16 and 32; tile-row strides from 8 to 256; Morton order with x and y both
-ways; sheets of 2048x2048, 2048x1024 and 4096x1024 across two and four
-pages; and undoing the lane-pair swap the ROM builder applies, on the theory
-that a 32-bit model word can read correctly while the two 16-bit texels
-inside it are transposed. The best scored 3407. A correct layout does not
-win by that margin, it wins by the margin the model decode won by, which was
-31265 models against none.
+Width and height live in the low bits of word 3, whose top 24 bits are the
+polygon normal -- which is why they were never found by looking at word 6.
+The enable bit was right by luck: bit 26 and bit 10 agree on every sample
+that was checked.
 
-Two further things were measured and both came back negative. Asking the
-data for its own row width -- the ratio of vertical to horizontal neighbour
-difference, minimised at the true width -- gives 16 at every location tried,
-and sixteen 16-bit texels is 32 bytes, which is exactly this ROM's interleave
-group. That is the interleave answering, not the texture. And de-interleaving
-VROM into its sixteen chips and profiling each one separately gives a flat
-response at every width, so no chip holds a contiguous slice either.
-
-The interleave itself is not in question. If the lane pairs were misordered
-the model stream would scramble with them, and 600 models chain through it
-without a break.
-
-So the polygons fetch real texels from the wrong places. Switched on it
-looks like texturing -- foliage appears on the rocks, the colour count in a
-frame goes from about a hundred to seven thousand -- and it is not
-texturing. That is the specific failure this file exists to avoid, so the
-switch defaults to off and the pipeline stays in place for whoever finds the
-mapping.
-
-One thing that has been ruled out: the textures are not uploaded. Every
-SCRIPTS DMA in a run was traced. 1.5 MB goes to culling RAM, 321 KB to the
-FIFO at 0x94000000 -- all of it from work RAM, and its contents are commands
-and runs of zeros rather than pixels -- 3.7 KB to the trigger, and 36 bytes
-to the texture port. The rejected transfers are all boot-test noise with
-garbage addresses. Nothing is being dropped; there is no upload to find.
-
-## The cross-fade, and the freeze that was not one
-
-Viewport word 0x07 is a global brightness multiplier. Sampled every field it
-is unmistakable: it holds at exactly 1.0000 for a thousand fields, ramps down
-in even steps to 0.0000, holds there through the gap between demo shots, and
-ramps back up. It is how attract mode cuts between shots.
-
-It was dismissed once, on the grounds that it read 0.93 in one shot and 0.06
-in another that was plainly not six per cent as bright. That was two moments
-compared without asking what happened between them, and it is the reason the
-renderer looked broken in a way that had nothing to do with the renderer:
-
-    2040..2061   picture changes every field
-    2062..2088   byte-identical, twenty-six fields running
-    2092         cuts to 2D
-
-The obvious reading was that the game had stopped advancing its demo. It had
-not. Fingerprinting the culling tree per field showed it changing every
-single field throughout, while the framebuffer fingerprint sat on one value.
-The game was fading a shot to black over twenty fields and the picture was
-being drawn at full brightness the whole way down.
-
-Worth keeping because of how it presented. A still from the middle of that
-run looks exactly like a still from a working one, the triangle count stays
-around 4500, the trigger keeps firing four times a field, and nothing in any
-log says anything is wrong. What found it was diffing two scene dumps ten
-fields apart and reading every word that differed -- one of which was a
-viewport field the code had a comment explaining why it ignored.
+What still does not work: in the window this runtime reaches, every FIFO
+entry carries the same header, 0x80000000, which is one 32x32 texture at the
+origin. 312 entries of it per frame. The parse is not in doubt -- the entry
+sizes are self-consistent and the walk never desynchronises -- so either the
+game uploads its real textures at a point this build does not reach, or the
+capture of the stream is losing something. Until that is resolved, most
+surfaces sample a sheet position that was never written, and the renderer
+falls back to flat shading for those rather than drawing the cleared sheet,
+which is opaque black and turns every untextured surface into a silhouette.
 
 ## There is no environment in the scene, and that is upstream
 

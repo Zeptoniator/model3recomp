@@ -602,6 +602,11 @@ static void dev_write_word(uint32_t w, uint32_t v)
      * it is thrown away. Count it by page, because a region the guest
      * writes megabytes to and we ignore looks exactly like a region the
      * guest never writes. */
+    if ((w & 0xFF000000u) == 0x9C000000u) {
+        fprintf(stderr, "[texport] %08X = %08X" M3_NL, w, v);
+        g_dropped_writes[(w >> 24) & 0xFFu]++;
+        return;
+    }
     g_dropped_writes[(w >> 24) & 0xFFu]++;
     if (getenv("M3_DROP_TRACE")) {
         static unsigned n;

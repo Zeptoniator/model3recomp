@@ -227,50 +227,130 @@ static void mat_dir(const mat_t *m, const float *p, float *o)
 
 /* ---- textures ----------------------------------------------------------
  *
- * The Real3D reads textures straight out of VROM; nothing uploads them. The
- * FIFO at 0x94000000 carries 321 KB in a whole run -- commands and runs of
- * zeros, not pixels -- and the trigger at 0x88000000 is written with
- * 0xDEADDEAD, so it is a doorbell. What is left is a fixed mapping, and this
- * is it.
+ * Texture memory is a flat sheet of 2048x2048 texels, built from uploads.
+ * The guest streams entries into the FIFO at 0x94000000, each one
  *
- * VROM splits in half: models below 16 MB, textures above. That is measured.
- * Correlate each byte with the one two along and the model half scores near
- * zero while the texture half scores +0.6, which is 16-bit pixels; correlate
- * with the next byte instead and the texture half goes negative, which is a
- * pixel's two halves alternating.
+ *     word 0   length of the entry in bytes
+ *     word 1   the texture header
+ *     word 2+  the texels
  *
- * The upper 16 MB is two 2048x2048 sheets of 16-bit texels, stored as 32x32
- * tiles in row-major order, 64 tiles to a sheet row. The tiling is why a
- * linear read stripes: read linearly the sheet scores 8557 for smoothness
- * and in 32x32 tiles it scores 5963, and only the tiled reading produces
- * anything a person would call a texture.
+ * and an entry occupies (2 + length/2)/4 words, which is how the next one is
+ * found. The FIFO is drained when the guest rings the doorbell at
+ * 0x88000000.
  *
- * Texels are 1-5-5-5, the same packing as the tilemap palette, with bit 15
- * meaning transparent.
+ * The texels are not stored in reading order. They arrive in 8x8 tiles with
+ * the pairs inside each tile transposed, and DETILE below is the map from a
+ * position in the tile to the word it came from. That is the piece no amount
+ * of staring at the ROM produced: the data is tiled at 8x8 and every attempt
+ * here assumed 32x32 tiles or a linear sheet, and both are wrong.
  */
-#define TEX_SHEET_BASE  0x1000000u        /* where the texture half starts */
-#define TEX_SHEET_SIZE  (2048u * 2048u * 2u)
-#define TEX_TILE        32u
+#define TEX_W 2048u
+#define TEX_H 2048u
 
-static uint32_t texel(unsigned page, unsigned x, unsigned y, int *transparent)
+/* Position in an 8x8 tile -> index in the arriving data. */
+static const unsigned char DETILE[64] = {
+     1, 0, 5, 4, 9, 8,13,12,
+     3, 2, 7, 6,11,10,15,14,
+    17,16,21,20,25,24,29,28,
+    19,18,23,22,27,26,31,30,
+    33,32,37,36,41,40,45,44,
+    35,34,39,38,43,42,47,46,
+    49,48,53,52,57,56,61,60,
+    51,50,55,54,59,58,63,62
+};
+
+static uint16_t *g_sheet;
+static uint8_t  *g_sheet_set;          /* TEX_W * TEX_H texels */
+static size_t    g_fifo_seen;      /* how much of the FIFO has been drained */
+static unsigned  g_tex_uploads;
+
+static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
 {
-    const uint8_t *v;
-    size_t n = 0;
-    uint32_t off, tile, c, r, g, b;
+    uint32_t x = 32u * (header & 0x3Fu);
+    uint32_t y = 32u * ((header >> 7) & 0x1Fu);
+    uint32_t page = (header >> 20) & 1u;
+    uint32_t w = 32u << ((header >> 14) & 7u);
+    uint32_t h = 32u << ((header >> 17) & 7u);
+    int sixteen = (header >> 23) & 1u;
+    uint32_t tx, ty, yy, xx;
+    size_t off = 0;
 
+    if (!g_sheet || w > 1024u || h > 1024u) return;
+    y += page * 1024u;                      /* two 2048x1024 pages, stacked */
+    if (x + w > TEX_W || y + h > TEX_H) return;
+
+    for (ty = 0; ty < h; ty += 8u) {
+        for (tx = 0; tx < w; tx += 8u) {
+            for (yy = 0; yy < 8u; yy++) {
+                for (xx = 0; xx < 8u; xx++) {
+                    size_t si = off + DETILE[yy * 8u + xx];
+                    uint16_t t;
+                    if (sixteen) {
+                        if ((si + 1) * 2 > avail) continue;
+                        t = (uint16_t)((src[si*2] << 8) | src[si*2 + 1]);
+                    } else {
+                        if (si >= avail) continue;
+                        /* 8-bit: the byte is an intensity until the palette
+                         * path exists, which keeps the shape visible rather
+                         * than drawing noise. */
+                        uint32_t v = src[si] >> 3;
+                        t = (uint16_t)((v << 10) | (v << 5) | v);
+                    }
+                    {
+                        size_t o = (size_t)(y + ty + yy) * TEX_W
+                                 + (x + tx + xx);
+                        g_sheet[o] = t;
+                        if (g_sheet_set) g_sheet_set[o] = 1;
+                    }
+                }
+            }
+            off += 64;
+        }
+    }
+    g_tex_uploads++;
+}
+
+/* Drain whatever the guest has put in the FIFO since last time. */
+static void flush_texture_fifo(void)
+{
+    size_t used = 0, i;
+    const uint8_t *f = bus_texfifo(&used, NULL);
+    if (!f || used <= g_fifo_seen) return;
+    for (i = 0; i + 8 <= used; ) {
+        uint32_t len = rd32le(f + i);
+        uint32_t words = (2u + len / 2u) / 4u;
+        uint32_t header = rd32le(f + i + 4);
+        if (getenv("M3_TEX_TRACE")) {
+            static unsigned n;
+            if (n++ < 12)
+                fprintf(stderr, "[tex] entry at %u: len %u -> %u words, "
+                        "header %08X%s", (unsigned)i, len, words, header,
+                        "\n");
+        }
+        if (!words || (size_t)words * 4u > used - i) break;
+        upload_texture(header, f + i + 8, (size_t)words * 4u - 8u);
+        i += (size_t)words * 4u;
+    }
+    g_fifo_seen = used;
+    if (getenv("M3_TEX_TRACE"))
+        fprintf(stderr, "[tex] fifo %u bytes, %u uploads so far%s",
+                (unsigned)used, g_tex_uploads, "\n");
+}
+
+static uint32_t sheet_texel(unsigned x, unsigned y, int *transparent)
+{
+    uint16_t c;
+    uint32_t r, g, b;
     *transparent = 1;
-    v = bus_vrom(&n);
-    if (!v) return 0;
-    x &= 2047u; y &= 2047u;
-
-    tile = (y / TEX_TILE) * (2048u / TEX_TILE) + (x / TEX_TILE);
-    off = tile * (TEX_TILE * TEX_TILE)
-        + (y % TEX_TILE) * TEX_TILE + (x % TEX_TILE);
-    off = TEX_SHEET_BASE + page * TEX_SHEET_SIZE + off * 2u;
-    if ((size_t)off + 2u > n) return 0;
-
-    /* VROM is the one region read big-endian; see the note at the top. */
-    c = ((uint32_t)v[off] << 8) | v[off + 1];
+    if (!g_sheet) return 0;
+    {
+        size_t o = (size_t)(y & (TEX_H - 1u)) * TEX_W + (x & (TEX_W - 1u));
+        /* Never uploaded. Say so rather than drawing the cleared sheet,
+         * which is opaque black and turns every untextured surface into a
+         * silhouette. */
+        if (g_sheet_set && !g_sheet_set[o]) { *transparent = -1; return 0; }
+        c = g_sheet[o];
+    }
     if (c & 0x8000u) return 0;
     *transparent = 0;
     r = (c >> 10) & 0x1Fu; g = (c >> 5) & 0x1Fu; b = c & 0x1Fu;
@@ -410,30 +490,25 @@ static void draw_model(uint32_t addr, const mat_t *m)
         /* The texture descriptor. Bit 26 of word 6 is the enable: it is set
          * on 1749 of the 1780 polygons in one model and clear on the rest.
          * The origin is in 32-texel units, which is also the tile size. */
-        /* Bits 7..9 are the pixel format. Across 6093 headers they read 0
-         * on 5614, and 5, 6 or 7 on the rest -- and only 0 is the plain
-         * 16-bit texel this samples. The others are paletted, and reading
-         * them as 16-bit is what put a red and grey diamond lattice across
-         * the backdrop. Until they are decoded, those polygons draw flat. */
-        td.fmt  = (ph[6] >> 7) & 7u;
-        td.on   = g_textures && (ph[6] & 0x04000000u) != 0 &&
-                  (g_tex_all || td.fmt == 0u);
-        td.x    = ((((ph[4] & 0x1Fu) << 1) | ((ph[5] >> 7) & 1u)) * 32u) & 2047u;
-        td.y    = ((ph[5] & 0x1Fu) * 32u) & 2047u;
-        td.page = (ph[5] >> 6) & 1u;
-        /* Size. A texture repeats -- UVs run well past its own width -- so
-         * without wrapping, sampling walks straight into whatever texture
-         * sits next to it in the sheet. That is what the diamond pattern
-         * across the backdrop was. M3_TEX_SIZE picks the decode while this
-         * is still being pinned down. */
-        switch (g_tex_size_mode) {
-        case 1:  td.w = 32u << ((ph[6] >> 3) & 7u);
-                 td.h = 32u << (ph[6] & 7u); break;
-        case 2:  td.w = 32u << (ph[6] & 7u);
-                 td.h = 32u << ((ph[6] >> 3) & 7u); break;
-        case 3:  td.w = td.h = 128u; break;
-        default: td.w = td.h = 256u; break;
+        /* The texture descriptor, and three of these were wrong before.
+         *
+         * The enable is bit 10 of word 6, not bit 26. Width and height are
+         * the low bits of word 3 -- the same word whose top 24 bits are the
+         * polygon normal, which is why they were never found there. The page
+         * is bit 6 of word 4, whose top 24 bits are the colour. Both size
+         * fields read 6 or 7 to mean 32. */
+        {
+            uint32_t ws = (ph[3] >> 3) & 7u, hs = ph[3] & 7u;
+            if (ws >= 6u) ws = 0u;
+            if (hs >= 6u) hs = 0u;
+            td.w = 32u << ws;
+            td.h = 32u << hs;
         }
+        td.fmt  = (ph[6] >> 7) & 7u;
+        td.on   = g_textures && (ph[6] & 0x400u) != 0;
+        td.x    = (32u * (((ph[4] & 0x1Fu) << 1) | ((ph[5] >> 7) & 1u))) & 2047u;
+        td.y    = (32u * (ph[5] & 0x1Fu)) & 2047u;
+        td.page = (ph[4] & 0x40u) >> 6;
         if (td.w > 2048u) td.w = 2048u;
         if (td.h > 2048u) td.h = 2048u;
 
@@ -712,15 +787,16 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                             double vv = (l0*q[0][1] + l1*q[1][1] + l2*q[2][1]) / iz;
                             int tp;
                             long ui = (long)uu, vi = (long)vv;
-                            unsigned tw = tr->tw ? tr->tw : 256u;
-                            unsigned th = tr->th ? tr->th : 256u;
+                            unsigned tw = tr->tw ? tr->tw : 32u;
+                            unsigned th = tr->th ? tr->th : 32u;
                             uint32_t t;
                             ui %= (long)tw; if (ui < 0) ui += tw;
                             vi %= (long)th; if (vi < 0) vi += th;
-                            t = texel(tr->page, tr->tx + (unsigned)ui,
-                                      tr->ty + (unsigned)vi, &tp);
-                            if (tp) continue;       /* transparent texel */
-                            c = t;
+                            t = sheet_texel(tr->tx + (unsigned)ui,
+                                            tr->ty + tr->page * 1024u
+                                                   + (unsigned)vi, &tp);
+                            if (tp > 0) continue;   /* transparent texel */
+                            if (tp == 0) c = t;     /* tp < 0: never loaded */
                         }
                     }
                     /* Gouraud: interpolate the vertex normals across the
@@ -782,9 +858,13 @@ void real3d_render(void)
         g_tex_all = getenv("M3_TEX_ALL") != NULL;
         g_textures = getenv("M3_TEXTURES") != NULL;
         g_tris = (tri_t *)malloc(sizeof(tri_t) * MAX_TRIS);
+        g_sheet = (uint16_t *)calloc(TEX_W * TEX_H, sizeof(uint16_t));
+        g_sheet_set = (uint8_t *)calloc(TEX_W * TEX_H, 1);
         inited = 1;
     }
     if (!g_tris) return;
+
+    flush_texture_fifo();
 
     memset(fb, 0, (size_t)fw * (size_t)fh * sizeof(uint32_t));
 
