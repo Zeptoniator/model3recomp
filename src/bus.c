@@ -532,6 +532,11 @@ static void dev_write_word(uint32_t w, uint32_t v)
             static unsigned mode;
             uint32_t b = (v >> 24) & 0xFFu;
             g_crom_bank_reg = b;
+            if (getenv("M3_BANK_TRACE")) {
+                static uint8_t seen[256];
+                if (!seen[b]) { seen[b] = 1;
+                    fprintf(stderr, "[bank] guest wrote %02X" M3_NL, b); }
+            }
             if (!probed) {
                 const char *e = getenv("M3_CROM_BANK");
                 probed = 1;
@@ -560,7 +565,27 @@ static void dev_write_word(uint32_t w, uint32_t v)
              * For most of the values The Lost World writes -- 0xF7 above all
              * -- that lands far outside the image, every read through the
              * window returns zero, and the guest quietly gets nothing. */
-            default: g_crom_bank = b << 20; break;
+            /* Active-low, four bits, eight megabytes a bank. The banked
+             * image is the 64 MB that follows the fixed program CROM, so
+             * the index is used directly against it. */
+            case 12: g_crom_bank = ((~b) & 0xFu) * 0x800000u; break;
+            case 13: g_crom_bank = ((~b) & 0x7u) * 0x800000u; break;
+            /* The bank select is active low: the index is the written
+             * byte inverted, three bits of it, because this game's banked
+             * image is 64 MB and a bank is 8 MB.
+             *
+             * This used to shift the byte into a byte offset, and the
+             * comment here used to note that for the values The Lost World
+             * writes -- 0xF7 above all -- that lands outside the image and
+             * the guest quietly gets nothing. That was correct and it sat
+             * there, because a game reading zeros where its data should be
+             * does not crash. It draws less.
+             *
+             * It drew a great deal less. With the window returning zeros
+             * the guest streamed 321 KB to the Real3D in a whole run; with
+             * it working it streams 3.4 MB. That is the difference between
+             * a scene with no textures in it and one with. */
+            default: g_crom_bank = ((~b) & 0x7u) * 0x800000u; break;
             }
             return;
         }

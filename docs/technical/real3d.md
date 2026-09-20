@@ -199,54 +199,59 @@ translations are all zero, so placement comes entirely from the matrix table;
 and no single matrix serves as a per-frame camera -- the best candidate for
 one scene scores 1358 triangles on screen and 1 on the next scene along.
 
-## Textures: the format, from a reference rather than from guessing
+## Textures
 
-`M3_TEXTURES=1` turns texturing on; it is off by default because it is not
-finished. What changed is that the format is no longer being guessed at. It
-was read out of Supermodel, which is the only place it exists in public.
+They work. The pipeline is: the guest streams entries into the FIFO at
+0x94000000, each one a length word, a header word and then texels; an entry
+occupies `(2 + length/2)/4` words. Texels arrive in 8x8 tiles with the pairs
+inside each tile transposed -- `DETILE` in `src/real3d.c` -- and are written
+into a flat 2048x2048 sheet, two 2048x1024 pages stacked. They are 16-bit
+1-5-5-5, little-endian, blue in the top field, the same way round as the
+tilemap palette.
 
-Blind search had it wrong in several places, and it is worth recording which,
-because every one of them looked settled at the time.
+Entries whose payload is not exactly `width * height * 2` are mipmap chains
+(type 0x02 follows the base at type 0x01 with about a third the data) and are
+skipped. Uploading them as though they were the base turns every surface
+into coloured static.
 
-**Texture memory is a flat 2048x2048 sheet**, two 2048x1024 pages stacked,
-built by uploads. It is not addressed into VROM at all. Weeks of layout
-search here -- linear at eight widths, 32- and 64-texel tiles both ways
-round, two-level tilings, strides from 8 to 256, Morton order -- were
-searching for a mapping that does not exist.
+The polygon header fields, which had been wrong in three places:
 
-**The tiling is 8x8, and it is in the arriving data, not in the sheet.**
-Texels come in 8x8 tiles with the pairs inside each transposed. `DETILE` in
-`src/real3d.c` is that map. Every attempt here had assumed 32x32 tiles,
-because the polygon header's coordinates are in units of 32.
+    enabled   word 6 bit 10       (not bit 26)
+    width     word 3 bits 3..5    (not word 6)
+    height    word 3 bits 0..2    (not word 6)
+    page      word 4 bit 6        (not word 5)
+    x         32 * ((word4 & 0x1F) << 1 | (word5 >> 7) & 1)
+    y         32 * (word5 & 0x1F)
 
-**The FIFO carries the textures after all.** An entry is a length word, a
-header word, then texels, and it occupies `(2 + length/2)/4` words, which is
-how the next entry is found. The stream had been dismissed as "commands and
-runs of zeros" on the strength of its first block, which really is a gamma
-ramp.
+Width and height are the low bits of word 3, whose top 24 bits are the
+polygon normal, which is why looking at word 6 never found them.
 
-**Three polygon-header fields were wrong:**
+## What actually unblocked this, and it was not the renderer
 
-    field        was                          is
-    enabled      word 6 bit 26                word 6 bit 10
-    width        word 6 bits 3..5             word 3 bits 3..5
-    height       word 6 bits 0..2             word 3 bits 0..2
-    page         word 5 bit 6                 word 4 bit 6
+The guest could not read its own data ROM.
 
-Width and height live in the low bits of word 3, whose top 24 bits are the
-polygon normal -- which is why they were never found by looking at word 6.
-The enable bit was right by luck: bit 26 and bit 10 agree on every sample
-that was checked.
+The banked CROM window at 0xFF000000 selects one of eight 8 MB banks, and the
+select is **active low**: the bank is the written byte inverted, three bits of
+it. What this did instead was shift the byte into a byte offset, and for the
+values The Lost World writes -- 0xF7 above all -- that lands outside the
+image, so every read through the window returned zero.
 
-What still does not work: in the window this runtime reaches, every FIFO
-entry carries the same header, 0x80000000, which is one 32x32 texture at the
-origin. 312 entries of it per frame. The parse is not in doubt -- the entry
-sizes are self-consistent and the walk never desynchronises -- so either the
-game uploads its real textures at a point this build does not reach, or the
-capture of the stream is losing something. Until that is resolved, most
-surfaces sample a sheet position that was never written, and the renderer
-falls back to flat shading for those rather than drawing the cleared sheet,
-which is opaque black and turns every untextured surface into a silhouette.
+The comment in `src/bus.c` had said exactly that for a long time. It was left
+alone because a game reading zeros where its data should be does not crash.
+It draws less.
+
+It drew a very great deal less. With the window returning zeros the guest
+streamed 321 KB to the Real3D across an entire run, and that 321 KB is a
+gamma ramp and a handful of 32x32 uploads to the same corner of the sheet --
+which is why the FIFO looked like it carried no textures, and why the scene
+had no environment in it, and why five parts of the model pointed at a
+buffer nothing filled. With the window working the guest streams 3.4 MB,
+464 texture entries with 461 distinct headers, and the tilemap gains
+content too: the Sega copyright line on the attract screen was simply never
+being read.
+
+Three separate investigations here -- textures, the missing environment, the
+missing model parts -- were all the same bug, one address decode away.
 
 ## There is no environment in the scene, and that is upstream
 

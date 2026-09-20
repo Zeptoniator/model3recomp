@@ -58,7 +58,7 @@
 
 #define MAX_TRIS   40000u
 #define MAX_DEPTH  24
-#define AMBIENT    0.20f
+#define AMBIENT    g_ambient
 
 /* The vertex fixed-point scale: the 24-bit coordinate field over 256.
  *
@@ -91,32 +91,18 @@ static float g_vertex_scale = VERTEX_SCALE_DEFAULT;
 static int g_tex_size_mode;
 static int g_tex_all;
 
-/* Texturing is off unless M3_TEXTURES is set, and that is deliberate.
+/* Texturing. M3_NO_TEXTURES turns it off.
  *
- * Everything between a polygon and a texel works: the descriptor comes out
- * of the header, the UVs are interpolated with perspective correction and
- * carried through the near clip, the texel is unpacked from 1-5-5-5 with
- * its transparency bit, wrapped to the texture's own size, and modulated by
- * the shading term. Turn it on and the colour count in a frame goes from
- * about a hundred to seven thousand.
- *
- * What does not work is the one thing in the middle: which VROM address a
- * polygon's texture coordinates name. Texels are 16-bit big-endian and they
- * are in the upper half of VROM -- both measured, the byte order by a
- * factor of five in smoothness -- but no arrangement tried turns those
- * coordinates into a picture. Linear at eight widths, 32- and 64-texel
- * tiles row- and column-major, two-level tilings, tile-row strides from 8
- * to 256, Morton order both ways, and undoing the ROM's lane-pair swap: the
- * best of them scores 3407 against a median of 5520 for arbitrary offsets,
- * which is not the margin a correct layout produces.
- *
- * So the polygons get real texels from the wrong places. It looks like
- * texturing -- foliage appears on the rocks -- and it is not, and a
- * renderer that looks right while being wrong is the thing this file exists
- * to avoid. Left in and switched off, because the next person needs the
- * pipeline and not the guess.
+ * This works now, and what unblocked it was not the renderer. The guest
+ * could not read its own data ROM: the banked CROM window decoded the bank
+ * select by shifting the written byte into an offset, which for the values
+ * this game writes lands outside the image, so every read through the
+ * window returned zero. With that fixed the guest streams 3.4 MB to the
+ * Real3D in a run instead of 321 KB, and the difference is every texture in
+ * the game.
  */
 static int g_textures;
+static float g_ambient = 0.20f;
 static uint32_t g_scene_hash;
 static uint32_t g_fb_hash;
 static float g_vp07;
@@ -275,7 +261,13 @@ static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
     uint32_t tx, ty, yy, xx;
     size_t off = 0;
 
+    /* An entry whose payload is not exactly the texture's own size is a
+     * mipmap chain, not the texture: the base arrives as type 0x01 with
+     * w*h*2 bytes and the chain follows as type 0x02 with about a third of
+     * that. Uploading the chain as though it were the base is what turned
+     * every surface into coloured static. */
     if (!g_sheet || w > 1024u || h > 1024u) return;
+    if (avail < (size_t)w * h * (sixteen ? 2u : 1u)) return;
     y += page * 1024u;                      /* two 2048x1024 pages, stacked */
     if (x + w > TEX_W || y + h > TEX_H) return;
 
@@ -287,7 +279,7 @@ static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
                     uint16_t t;
                     if (sixteen) {
                         if ((si + 1) * 2 > avail) continue;
-                        t = (uint16_t)((src[si*2] << 8) | src[si*2 + 1]);
+                        t = (uint16_t)(src[si*2] | (src[si*2 + 1] << 8));
                     } else {
                         if (si >= avail) continue;
                         /* 8-bit: the byte is an intensity until the palette
@@ -332,6 +324,14 @@ static void flush_texture_fifo(void)
         i += (size_t)words * 4u;
     }
     g_fifo_seen = used;
+    if (getenv("M3_TEX_DUMP")) {
+        static int done;
+        if (!done && g_tex_uploads > 100) {
+            FILE *f = fopen(getenv("M3_TEX_DUMP"), "wb");
+            done = 1;
+            if (f) { fwrite(g_sheet, 2, (size_t)TEX_W * TEX_H, f); fclose(f); }
+        }
+    }
     if (getenv("M3_TEX_TRACE"))
         fprintf(stderr, "[tex] fifo %u bytes, %u uploads so far%s",
                 (unsigned)used, g_tex_uploads, "\n");
@@ -353,7 +353,10 @@ static uint32_t sheet_texel(unsigned x, unsigned y, int *transparent)
     }
     if (c & 0x8000u) return 0;
     *transparent = 0;
-    r = (c >> 10) & 0x1Fu; g = (c >> 5) & 0x1Fu; b = c & 0x1Fu;
+    /* Blue is the top field and red the bottom, the same way round as the
+     * tilemap palette. Read the other way the game's green jeep comes out
+     * purple, which is how this was settled. */
+    b = (c >> 10) & 0x1Fu; g = (c >> 5) & 0x1Fu; r = c & 0x1Fu;
     r = (r << 3) | (r >> 2); g = (g << 3) | (g >> 2); b = (b << 3) | (b >> 2);
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
@@ -856,7 +859,9 @@ void real3d_render(void)
         e = getenv("M3_TEX_SIZE");
         if (e) g_tex_size_mode = atoi(e);
         g_tex_all = getenv("M3_TEX_ALL") != NULL;
-        g_textures = getenv("M3_TEXTURES") != NULL;
+        g_textures = getenv("M3_NO_TEXTURES") == NULL;
+        e = getenv("M3_AMBIENT");
+        if (e) g_ambient = (float)atof(e);
         g_tris = (tri_t *)malloc(sizeof(tri_t) * MAX_TRIS);
         g_sheet = (uint16_t *)calloc(TEX_W * TEX_H, sizeof(uint16_t));
         g_sheet_set = (uint8_t *)calloc(TEX_W * TEX_H, 1);
