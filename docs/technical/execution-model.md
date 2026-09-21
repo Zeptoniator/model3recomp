@@ -381,3 +381,89 @@ returns a number the rest of the runtime does arithmetic on.
 A host that wants to run at the right speed throttles in
 `platform_present()`. It does not get to decide when the guest's video
 hardware retires a frame.
+
+
+## Finding a frozen guest: `M3_TRACE_CALLS=N@F`
+
+A recompiled game has no program counter to inspect. When it stops making
+progress the only visible thing is the sequence of addresses going through
+`func_table_call()`, so `M3_TRACE_CALLS=N` prints the first N of them and
+`N@F` starts counting at field F -- which is what you want, because the
+interesting moment is thousands of fields after boot.
+
+Coin, credit, trigger, and then a screen that was byte-identical for 2750
+fields looked like a hang in the game. It was not. Fifty fields of trace at
+field 3400 were five addresses repeating:
+
+    0001D68C  0007F67C   <-- NOT LIFTED
+    00000900  00000500  00001578
+
+`0x900` and `0x500` are the decrementer and external-interrupt vectors, so
+interrupts were still being delivered and the runtime was still running. The
+game was calling a function that did not exist. `func_table_call()` returns
+0 for a miss and the caller spins.
+
+The five addresses a credit reaches -- `0x2B6C0`, `0x2BD78`, `0x2C3E0`,
+`0x2FCF8`, `0x7F67C` -- are all inside the lifted RAM range. They are
+indirect targets the static walk never saw because nothing in attract mode
+reaches them. Append them to the entries file and lift again.
+
+Which is the general shape of this: entry coverage is not a property of the
+program, it is a property of the paths you have run. Attract mode converging
+on zero misses says nothing about the paths a coin opens.
+
+
+## Entry discovery: what a credit needs that attract mode never asks for
+
+Feeding runtime misses back with `--entries` converges, but each round only
+buys one more state. Five addresses, lift, build, run, five more addresses one
+step further along. The addresses themselves said why:
+
+    00121860  0001C0E4      <- the game-state dispatch table
+       ...    (21 entries)
+    001218A8  0007F67C
+    001218AC  0007F8EC
+    001218B0  0001BFB0
+
+Three separate holes in `discover()` were hiding the rest.
+
+**Offset jump tables.** `scan_tables` knew one shape -- a table of addresses
+read with `lwzx` -- and this compiler emits the other:
+
+    0002BE24  addis r9,0,3 ; addi r11,r9,-0x41B8    ; r11 = 0x0002BE48
+    0002BE2C  add   r9,r0,r11 ; lwz r0,0(r9)        ; the offset
+    0002BE34  addis r11,0,3 ; addi r9,r11,-0x41B8   ; the base again
+    0002BE3C  add   r8,r0,r9 ; mtctr r8 ; bctr      ; base + offset
+    0002BE48  00000020 0000003C 000000BC ...        ; eight arms
+
+Every word in that table is small and none of them decodes as code, so a scan
+looking for addresses walks straight past it.
+
+**`addi rD, rA, lo` where `rD != rA`.** The address-pair tracking required the
+`addis` and the `addi` to name the same register. This compiler routinely
+writes the low half into a different one -- `addis r9,0,3 ; addi r11,r9,lo` --
+and every table built that way was invisible. Relaxing that one condition took
+discovery from 2596 entries to 3229.
+
+**Function prologues.** `stwu r1,-N(r1)` is one instruction, its immediate
+must be negative, and every non-leaf C function opens with it. 1429 of them in
+the RAM image. This matters because the handlers a credit runs are reached
+through pointers that only exist in RAM *after an overlay loads*: they are in
+no table the boot snapshot holds and no `bl` names them.
+
+Two things about the prologue scan are load-bearing:
+
+  * The addresses go in `entries` and **not** in `hard`. A prologue is an
+    extra way into code, like an address fed back from a runtime miss; making
+    it a boundary truncates whatever function branches across it, and the
+    symptom is the machine resetting to the WARNING screen on the first coin.
+  * It runs *before* the table scans and walks from its own finds, because
+    those scans only look at code that `seen` reaches. A jump table inside a
+    function nothing calls statically is exactly the case that matters.
+
+Together: 1254 -> 3244 functions, and the game goes from freezing on the
+credit to the stage-one intro and an in-game HUD.
+
+The general shape is worth stating once. Entry coverage is not a property of
+the program, it is a property of the paths that have been run. Attract mode
+converging on zero misses says nothing at all about the paths a coin opens.

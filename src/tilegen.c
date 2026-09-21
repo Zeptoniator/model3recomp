@@ -32,6 +32,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define VRAM_PATTERN      0x000000u
 #define VRAM_NAME_BASE    0x0F8000u
@@ -230,6 +231,12 @@ void tilegen_render_pass(int above)
     int layer;
 
     if (!fb || !v)
+        return;
+
+    /* M3_NO_2D: draw the 3D on its own. The tilemaps are opaque over most of
+     * the screen and sit above the 3D during a round, so this is the only
+     * way to see what the Real3D actually produced. */
+    if (getenv("M3_NO_2D"))
         return;
 
     /* No clear here: real3d_render() has already drawn the 3D scene into

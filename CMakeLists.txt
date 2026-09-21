@@ -49,6 +49,16 @@ else()
     target_compile_definitions(model3recomp PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
+# Instrument the lifted code so a guest that spins says which of its own
+# functions it is spinning in. PUBLIC because the lifted translation units
+# live in the parent project and are where the counters actually are.
+# Configure a second build directory for it; flipping it in place relifts
+# nothing but recompiles everything.
+option(MODEL3RECOMP_LOOP_GUARD "Locate guest spin loops (see lift.h)" OFF)
+if(MODEL3RECOMP_LOOP_GUARD)
+    target_compile_definitions(model3recomp PUBLIC M3_LOOP_GUARD)
+endif()
+
 # --- Tests ---
 option(MODEL3RECOMP_BUILD_TESTS "Build test programs" ON)
 if(MODEL3RECOMP_BUILD_TESTS)

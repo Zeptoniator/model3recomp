@@ -6,6 +6,7 @@
     --entry ADDR       extra entry point; repeatable
     --entries FILE     file of hex addresses, one per line
     --funcs-per-file N default 200
+    --no-scan-prologues  do not treat `stwu r1,-N(r1)` as a function start
     --stats            print the unimplemented-instruction histogram
 
 Emits, matching the house layout:
@@ -821,7 +822,7 @@ def scan_reachable(image, base, seeds):
 
 
 def discover(image, base, seeds, scan_pointers=False, scan_consts=True,
-             scan_tables=True):
+             scan_tables=True, scan_prologues=True):
     """Find function entries, and which of them are real function starts."""
     size = len(image)
     lo, hi_ = base, base + size
@@ -866,6 +867,26 @@ def discover(image, base, seeds, scan_pointers=False, scan_consts=True,
         w = struct.unpack_from(">I", image, addr - base)[0]
         return w not in (0, 0xFFFFFFFF) and D.decode(w, addr).mn is not None
 
+    if scan_prologues:
+        # `stwu r1,-N(r1)` -- every non-leaf C function opens with it and
+        # nothing else does. Reachability and the table scans still miss
+        # whole regions of a Model 3 game: the handlers a credit runs are
+        # reached through pointers that only exist in RAM after an overlay
+        # loads, so they are in no table this snapshot holds and no `bl`
+        # names them. The prologue is in the code itself.
+        #
+        # These go in `entries` and deliberately not in `hard`: a prologue is
+        # an extra way *into* code, like an address fed back from a runtime
+        # miss, and making it a boundary truncates whatever function branches
+        # across it.
+        #
+        # Walking from them too is the point of doing this before the table
+        # scans, which only look at code `seen` reaches.
+        pro = {addr for addr, raw in D.words(image, base)
+               if (raw >> 16) == 0x9421 and (raw & 0x8000)}
+        entries |= pro
+        seen |= scan_reachable(image, base, pro)[1]
+
     if scan_tables:
         # Switch statements compile to a jump table reached through bctr:
         #
@@ -876,12 +897,45 @@ def discover(image, base, seeds, scan_pointers=False, scan_consts=True,
         # The arms sit inside the enclosing function and nothing names them
         # with a bl, so without this every one is a runtime func-table miss.
         base_of, tbl_reg = {}, {}
+        # The other shape, and the one The Lost World's compiler emits: the
+        # table holds offsets from its own base rather than addresses, so
+        # every word in it is small and none of them decodes as code.
+        #
+        #     addis r9,0,3 ; addi r9,r9,-0x41B8    ; r9 = 0x0002BE48
+        #     add   r9,r0,r9                       ; &table[i]
+        #     lwz   r0,0(r9)                       ; the offset
+        #     addis r11,0,3 ; addi r11,r11,-0x41B8 ; the base again
+        #     add   r8,r0,r11 ; mtctr r8 ; bctr    ; base + offset
+        #
+        # Eight arms of an object handler hide behind this one, and the first
+        # of them is what a credit runs into.
+        tbl_ptr, loaded, off_tbl = {}, {}, {}
         for addr in sorted(seen):
             i = D.decode(struct.unpack_from(">I", image, addr - base)[0], addr)
             if i.mn == "addis" and i.ra == 0:
                 base_of[i.rd] = i.uimm << 16
-            elif i.mn == "addi" and i.ra in base_of and i.rd == i.ra:
+            elif i.mn == "addi" and i.ra in base_of:
+                # Not necessarily rd == ra. This compiler writes the low half
+                # into a different register -- `addis r9,0,3 ; addi r11,r9,lo`
+                # -- and requiring the pair to agree missed every such table.
                 base_of[i.rd] = (base_of[i.ra] + i.simm) & 0xFFFFFFFF
+            elif i.mn == "add" and (i.ra in loaded or i.rb in loaded):
+                off_tbl[i.rd] = loaded.get(i.ra, loaded.get(i.rb))
+            elif i.mn == "add" and (i.ra in base_of or i.rb in base_of):
+                tbl_ptr[i.rd] = base_of.get(i.ra, base_of.get(i.rb))
+            elif i.mn == "lwz" and i.ra in tbl_ptr:
+                loaded[i.rd] = tbl_ptr[i.ra]
+            elif i.mn == "mtspr" and i.spr == 9 and i.rd in off_tbl:
+                tbl = off_tbl.pop(i.rd)
+                if tbl is not None and lo <= tbl < hi_:
+                    for k in range(256):
+                        off = tbl - base + k * 4
+                        if off + 4 > size:
+                            break
+                        w = struct.unpack_from(">I", image, off)[0]
+                        if w & 3 or w > 0x40000 or not code_at(tbl + w):
+                            break
+                        entries.add(tbl + w)
             elif i.mn == "lwzx" and (i.ra in base_of or i.rb in base_of):
                 tbl_reg[i.rd] = base_of.get(i.ra, base_of.get(i.rb))
             elif i.mn == "mtspr" and i.spr == 9 and i.rd in tbl_reg:
@@ -899,6 +953,9 @@ def discover(image, base, seeds, scan_pointers=False, scan_consts=True,
             elif i.mn in ("b", "bc", "bclr", "bcctr"):
                 base_of.clear()
                 tbl_reg.clear()
+                tbl_ptr.clear()
+                loaded.clear()
+                off_tbl.clear()
 
     if scan_consts:
         # lis rX,hi ; addi/ori rX,rX,lo -- how PowerPC code materialises a
@@ -1061,6 +1118,8 @@ def main():
                     help="do not treat lis/addi address pairs as entries")
     ap.add_argument("--scan-pointers", action="store_true",
                     help="also treat code-looking pointers in data as entries")
+    ap.add_argument("--no-scan-prologues", action="store_true",
+                    help="do not treat stwu r1,-N(r1) as a function start")
     ap.add_argument("--stats", action="store_true")
     a = ap.parse_args()
 
@@ -1084,7 +1143,8 @@ def main():
                 seeds.add(vbase + v)
 
     entries, hard = discover(image, base, seeds, a.scan_pointers,
-                             not a.no_scan_consts, not a.no_scan_tables)
+                             not a.no_scan_consts, not a.no_scan_tables,
+                             not a.no_scan_prologues)
     entries = {e for e in entries if lo <= e < hi}
     hard = {e for e in hard if lo <= e < hi}
 

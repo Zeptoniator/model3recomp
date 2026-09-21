@@ -90,12 +90,17 @@ m3_func_t func_table_lookup(uint32_t addr)
 /* M3_TRACE_CALLS=N prints the first N dispatched addresses. A recompiled game
  * has no program counter to inspect, so this is the equivalent of watching
  * where it goes. */
+/* M3_TRACE_CALLS=N, or N@F to start at field F -- the only way to see where
+ * a frozen game is looping, since a recompiled guest has no program counter. */
+static long g_trace_from;
 static long trace_budget(void)
 {
     static long n = -1;
     if (n < 0) {
         const char *e = getenv("M3_TRACE_CALLS");
+        const char *at = e ? strchr(e, '@') : NULL;
         n = e ? strtol(e, NULL, 0) : 0;
+        g_trace_from = at ? strtol(at + 1, NULL, 0) : 0;
     }
     return n;
 }
@@ -110,7 +115,8 @@ int func_table_call(uint32_t addr)
 
     m3_work += 16;                 /* a dispatched call is real work */
 
-    if (traced < trace_budget()) {
+    if (traced < trace_budget() &&
+        (long)model3recomp_frame_count() >= g_trace_from) {
         traced++;
         fprintf(stderr, "[call %ld] %08X%s\n", traced, addr,
                 func_table_lookup(addr) ? "" : "   <-- NOT LIFTED");
