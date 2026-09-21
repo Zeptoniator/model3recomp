@@ -354,23 +354,30 @@ registers relative to that base. It is not code you need to understand — it is
 code you need to *run*, which the boot interpreter does.
 
 
-## The two platform layers do not agree, and they should
+## Fields are paced by guest work, not by the wall clock
 
-Built headless, field 1500 of a run is the attract scene: 18688 lit pixels,
-3774 colours, textured. Built against SDL2, the same field of the same
-binary-modulo-the-platform-layer is the Sega boot logo: 190296 pixels, 15
-colours, and it stays there for 30000 fields.
+`model3recomp_field_due()` asks how much work the guest has done, not what
+time it is. That distinction was learned the hard way.
 
-That is a guest-state difference, not a drawing difference. The tilemap holds
-different content in the two builds, so the guest has taken a different path.
+It used to ask the platform layer for the time. Headless that returns
+`m3_work`, so it was the right answer by accident. Against SDL it returns
+real microseconds, so fields arrived sixty times a second whether the guest
+had got anywhere or not -- and a recompiled 603e uploading three megabytes of
+texture does not run at real time. The guest got a fraction of the
+instructions per field it needed.
 
-Ruled out so far: the cabinet buttons (M3_NO_BUTTONS makes no difference),
-the framebuffer (both layers hand the renderer the same 496x384 buffer), the
-video driver (SDL_VIDEODRIVER=dummy behaves like the window), and both
-src/bus.c and src/real3d.c (checking out the versions from before the
-divergence changes nothing).
+What that looked like was not a timing bug. Built headless, field 1500 was
+the attract scene: 18688 lit pixels, 3774 colours, textured. Built against
+SDL2, the same field was the Sega boot logo, 190296 pixels, 15 colours, and
+it stayed there for 30000 fields. Two builds of the same emulator disagreeing
+about what the game was doing.
 
-What is left is that platform_sdl.c does something platform_null.c does not
-which the guest can observe. Nothing in the platform interface should be
-observable to the guest at all, so whatever it is, it is a bug in this
-runtime rather than a property of the game.
+Finding it meant ruling out everything that looked more likely first: the
+cabinet buttons, the framebuffer, the video driver, and checking out both
+`bus.c` and `real3d.c` from before the divergence. All of them behave the
+same. What was left was the one function in the platform interface that
+returns a number the rest of the runtime does arithmetic on.
+
+A host that wants to run at the right speed throttles in
+`platform_present()`. It does not get to decide when the guest's video
+hardware retires a frame.

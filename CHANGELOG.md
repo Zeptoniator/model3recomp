@@ -35,6 +35,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rather than none.
 
 ### Fixed
+- **Fields are paced by guest work, not the wall clock.** `field_due()`
+  asked the platform layer for the time; headless that returns `m3_work` and
+  was right by accident, but against SDL it returns real microseconds, so
+  fields arrived at 60 Hz whether the guest had progressed or not. The same
+  build headless walked into attract mode while the windowed one sat on the
+  Sega logo for 30000 fields.
 - **The attract-mode cross-fade.** Viewport word 0x07 is a global brightness
   multiplier -- it holds at exactly 1.0 for a thousand fields, ramps to 0.0
   in even steps, holds through the gap between demo shots, and ramps back.

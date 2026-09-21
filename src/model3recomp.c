@@ -1,6 +1,7 @@
 /* model3recomp -- library entry points and frame pacing. */
 #include "model3recomp/model3recomp.h"
 #include "model3recomp/platform.h"
+#include "model3recomp/ppc.h"
 #include "model3recomp/tilegen.h"
 #include "model3recomp/real3d.h"
 
@@ -32,7 +33,7 @@ int model3recomp_init(const m3_config_t *cfg)
                        g_cfg.title ? g_cfg.title : "model3recomp"))
         return 0;
 
-    g_last_field_us = platform_ticks_us();
+    g_last_field_us = m3_work;
     g_running = 1;
     return 1;
 }
@@ -51,7 +52,23 @@ int model3recomp_field_due(void)
      * reach without ever bringing the board up. No window, no frames. */
     if (!g_running)
         return 0;
-    now = platform_ticks_us();
+
+    /* Fields are paced by how much work the guest has done, not by the
+     * wall clock, and the two are not interchangeable.
+     *
+     * This used to ask the platform layer for the time. Headless, that
+     * returns m3_work and everything was fine. Against SDL it returns real
+     * microseconds, so fields arrived sixty times a second whether or not
+     * the guest had got anywhere -- and a recompiled 603e uploading three
+     * megabytes of texture does not run at real time. The guest was handed
+     * a fraction of the instructions per field that it needs and sat on the
+     * Sega logo for thirty thousand fields, while the same build headless
+     * walked into attract mode.
+     *
+     * A host that wants to run at the right speed throttles in
+     * platform_present(); it does not get to decide when the guest's video
+     * hardware retires a frame. */
+    now = m3_work;
     if (now - g_last_field_us < FIELD_US)
         return 0;
     g_last_field_us = now;

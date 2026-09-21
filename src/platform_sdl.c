@@ -69,7 +69,13 @@ int platform_poll(void)
  * a moment, so a run can be scripted without a person at the keyboard. A
  * coin slot is an edge rather than a level, so a button held from the first
  * field to the last may be counted once or not at all. */
-#define PRESS_FIELDS 8u
+static unsigned press_fields(void)
+{
+    static int probed; static unsigned n = 8u;
+    if (!probed) { const char *e = getenv("M3_PRESS_FIELDS");
+        probed = 1; if (e) n = (unsigned)strtoul(e, NULL, 0); }
+    return n;
+}
 
 static unsigned scripted_buttons(void)
 {
@@ -86,9 +92,9 @@ static unsigned scripted_buttons(void)
     }
     if (!coin_at && !start_at) return 0;
     f = (unsigned long)model3recomp_frame_count();
-    if (coin_at && f >= coin_at && f < coin_at + PRESS_FIELDS)
+    if (coin_at && f >= coin_at && f < coin_at + press_fields())
         b |= M3_BTN_COIN1;
-    if (start_at && f >= start_at && f < start_at + PRESS_FIELDS)
+    if (start_at && f >= start_at && f < start_at + press_fields())
         b |= M3_BTN_START1;
     return b;
 }

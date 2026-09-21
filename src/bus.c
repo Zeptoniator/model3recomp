@@ -470,6 +470,23 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
         }
         if ((w & 0x3Cu) == 0x00u)
             return g_io_ctrl;        /* the strobe latch reads back */
+        if (((w & 0x3Cu) == 0x08u || (w & 0x3Cu) == 0x0Cu)) {
+            /* Game inputs. On a gun cabinet this is where the trigger
+             * lives, and the attract screen asks you to shoot rather than
+             * to press start. M3_GUN_BIT picks which bit to pull low while
+             * which one it is is still being found. */
+            static int probed;
+            static unsigned bit = 32u;
+            uint32_t v = 0xFFFFFFFFu;
+            if (!probed) {
+                const char *e = getenv("M3_GUN_BIT");
+                probed = 1;
+                if (e) bit = (unsigned)strtoul(e, NULL, 0);
+            }
+            if (bit < 32u && (platform_buttons() & M3_BTN_START1))
+                v &= ~(1u << bit);
+            return v;
+        }
         if ((w & 0x3Cu) == 0x3Cu) {
             /* The ADC. The game reads this more than any other register in
              * the block. M3_ADC picks what it reads back while what the
