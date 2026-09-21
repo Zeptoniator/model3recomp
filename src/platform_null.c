@@ -59,15 +59,41 @@ uint64_t platform_ticks_us(void)
     return g_virtual_us;
 }
 
-/* Headless: whatever M3_BUTTONS says, so a harness can still insert a coin. */
+/* Headless input, for a harness.
+ *
+ *   M3_BUTTONS   a mask held down for the whole run
+ *   M3_COIN_AT   field number at which to press coin 1 for a moment
+ *   M3_START_AT  likewise for start 1
+ *
+ * The timed ones exist because a coin slot is an edge, not a level: a game
+ * counts the transition, so a mask held from the first field to the last may
+ * be seen once, or not at all if the guest was not looking yet.
+ */
+#define PRESS_FIELDS 8u
+
 unsigned platform_buttons(void)
 {
     static int probed;
     static unsigned held;
+    static unsigned long coin_at, start_at;
+    unsigned b;
+    unsigned long f;
+
     if (!probed) {
-        const char *e = getenv("M3_BUTTONS");
+        const char *e;
         probed = 1;
+        e = getenv("M3_BUTTONS");
         held = e ? (unsigned)strtoul(e, NULL, 0) : 0u;
+        e = getenv("M3_COIN_AT");
+        coin_at = e ? strtoul(e, NULL, 0) : 0u;
+        e = getenv("M3_START_AT");
+        start_at = e ? strtoul(e, NULL, 0) : 0u;
     }
-    return held;
+    b = held;
+    f = (unsigned long)model3recomp_frame_count();
+    if (coin_at && f >= coin_at && f < coin_at + PRESS_FIELDS)
+        b |= M3_BTN_COIN1;
+    if (start_at && f >= start_at && f < start_at + PRESS_FIELDS)
+        b |= M3_BTN_START1;
+    return b;
 }

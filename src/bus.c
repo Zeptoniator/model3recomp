@@ -464,31 +464,54 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
     if ((w & 0xFFFFFFC0u) == M3_INPUTS_BASE) {
         if (getenv("M3_IO_TRACE")) {
             static unsigned n;
-            if (n++ < 40)
+            if (n++ < 4000)
                 fprintf(stderr, "[io] read %08X (reg %02X) ctrl=%08X" M3_NL,
                         w, w & 0x3Cu, g_io_ctrl);
         }
         if ((w & 0x3Cu) == 0x00u)
             return g_io_ctrl;        /* the strobe latch reads back */
-        if ((w & 0x3Cu) == 0x04u && ((g_io_ctrl >> 24) & 1u) == 0u) {
-            /* Bank 0: the cabinet buttons. Active low, in the top byte,
-             * because the guest reads these registers a byte at a time and
-             * the board is big-endian.
-             *
-             *   bit 0 coin 1   bit 2 test      bit 4 start 1
-             *   bit 1 coin 2   bit 3 service   bit 5 start 2
-             */
-            unsigned b = platform_buttons();
-            uint32_t v = 0xFFu;
-            if (b & M3_BTN_COIN1)   v &= ~0x01u;
-            if (b & M3_BTN_COIN2)   v &= ~0x02u;
-            if (b & M3_BTN_TEST)    v &= ~0x04u;
-            if (b & M3_BTN_SERVICE) v &= ~0x08u;
-            if (b & M3_BTN_START1)  v &= ~0x10u;
-            if (b & M3_BTN_START2)  v &= ~0x20u;
-            return (v << 24) | 0x00FFFFFFu;
+        if ((w & 0x3Cu) == 0x3Cu) {
+            /* The ADC. The game reads this more than any other register in
+             * the block. M3_ADC picks what it reads back while what the
+             * guest wants from it is still being worked out; all ones is a
+             * stuck-high converter, which is what it used to get. */
+            static int probed;
+            static uint32_t adc = 0xFFFFFFFFu;
+            if (!probed) {
+                const char *e = getenv("M3_ADC");
+                probed = 1;
+                if (e) adc = (uint32_t)strtoul(e, NULL, 0);
+            }
+            return adc;
         }
         if ((w & 0x3Cu) == 0x04u) {
+            /* Register 0x04 carries the cabinet buttons, active low, in the
+             * top byte -- the board is big-endian and the guest reads this
+             * a byte at a time.
+             *
+             *   bit 0 coin 1   bit 2 test      bit 4 start 1
+             *   bit 1 coin 2   bit 3 service   bit 5 see below
+             *
+             * Bit 5 is left alone. The boot's EEPROM handshake watches it
+             * and waits for it to change, so driving it from a button that
+             * nobody is pressing hangs the machine on the Sega logo before
+             * it ever reaches attract mode. That is what happened the first
+             * time this was wired up. The toggle below is the old
+             * behaviour, kept underneath the buttons rather than replaced
+             * by them. */
+            unsigned btn = getenv("M3_NO_BUTTONS") ? 0u : platform_buttons();
+            uint32_t v;
+            g_io_ready ^= 0x20000000u;
+            v = 0xFFFFFFFFu ^ g_io_ready;
+            if (btn & M3_BTN_COIN1)   v &= ~0x01000000u;
+            if (btn & M3_BTN_COIN2)   v &= ~0x02000000u;
+            if (btn & M3_BTN_TEST)    v &= ~0x04000000u;
+            if (btn & M3_BTN_SERVICE) v &= ~0x08000000u;
+            if (btn & M3_BTN_START1)  v &= ~0x10000000u;
+            return v;
+        }
+        if (0) {
+
             /* ponytail: the I/O board's serial ready line is toggled rather
              * than driven by a real protocol. The boot bit-bangs a byte to
              * 0xF0040000 and then waits on bit 0x20000000 here -- first for it
@@ -612,6 +635,7 @@ static void dev_write_word(uint32_t w, uint32_t v)
              * the guest streamed 321 KB to the Real3D in a whole run; with
              * it working it streams 3.4 MB. That is the difference between
              * a scene with no textures in it and one with. */
+            case 99: g_crom_bank = b << 20; break;   /* the old, broken one */
             default: g_crom_bank = ((~b) & 0x7u) * 0x800000u; break;
             }
             return;

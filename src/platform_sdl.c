@@ -1,6 +1,8 @@
 /* model3recomp -- SDL2 platform layer. */
 #include "model3recomp/platform.h"
 
+#include "model3recomp/model3recomp.h"
+
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,12 +63,41 @@ int platform_poll(void)
     return 1;
 }
 
-/* The cabinet's buttons, on the keys an arcade front end would use. */
+/* The cabinet's buttons, on the keys an arcade front end would use.
+ *
+ * M3_COIN_AT and M3_START_AT press coin 1 and start 1 at a given field, for
+ * a moment, so a run can be scripted without a person at the keyboard. A
+ * coin slot is an edge rather than a level, so a button held from the first
+ * field to the last may be counted once or not at all. */
+#define PRESS_FIELDS 8u
+
+static unsigned scripted_buttons(void)
+{
+    static int probed;
+    static unsigned long coin_at, start_at;
+    unsigned long f;
+    unsigned b = 0;
+
+    if (!probed) {
+        const char *e;
+        probed = 1;
+        e = getenv("M3_COIN_AT");  coin_at  = e ? strtoul(e, NULL, 0) : 0u;
+        e = getenv("M3_START_AT"); start_at = e ? strtoul(e, NULL, 0) : 0u;
+    }
+    if (!coin_at && !start_at) return 0;
+    f = (unsigned long)model3recomp_frame_count();
+    if (coin_at && f >= coin_at && f < coin_at + PRESS_FIELDS)
+        b |= M3_BTN_COIN1;
+    if (start_at && f >= start_at && f < start_at + PRESS_FIELDS)
+        b |= M3_BTN_START1;
+    return b;
+}
+
 unsigned platform_buttons(void)
 {
     const Uint8 *k = SDL_GetKeyboardState(NULL);
-    unsigned b = 0;
-    if (!k) return 0;
+    unsigned b = scripted_buttons();
+    if (!k) return b;
     if (k[SDL_SCANCODE_5]) b |= M3_BTN_COIN1;
     if (k[SDL_SCANCODE_6]) b |= M3_BTN_COIN2;
     if (k[SDL_SCANCODE_1]) b |= M3_BTN_START1;

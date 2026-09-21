@@ -71,6 +71,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   invention: words 0x04..0x06 are a unit vector.
 
 ### Added
+- `M3_COIN_AT` / `M3_START_AT` press a coin and start at a given field, in
+  both platform layers, so a run can be scripted. A coin slot is an edge and
+  not a level, so a button held from the first field to the last may be
+  counted once or not at all.
+- `M3_ADC` chooses what the ADC register reads back, and `M3_IO_TRACE` logs
+  reads of the I/O block with the bank latch. The game reads register 0x3C
+  more than any other in that block and 0x04 next; what it wants from the
+  ADC is not yet known.
 - **Cabinet buttons.** `platform_buttons()` reports coins, starts, test and
   service; the SDL layer reads them off the keyboard (5/6 coin, 1/2 start,
   F2 test, F3 service) and the headless layer takes `M3_BUTTONS`. They are
