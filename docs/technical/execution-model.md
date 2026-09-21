@@ -352,3 +352,25 @@ code lives in the gaps:
 `(opcode, offset, value)` triples, writing bytes, halfwords and words to
 registers relative to that base. It is not code you need to understand — it is
 code you need to *run*, which the boot interpreter does.
+
+
+## The two platform layers do not agree, and they should
+
+Built headless, field 1500 of a run is the attract scene: 18688 lit pixels,
+3774 colours, textured. Built against SDL2, the same field of the same
+binary-modulo-the-platform-layer is the Sega boot logo: 190296 pixels, 15
+colours, and it stays there for 30000 fields.
+
+That is a guest-state difference, not a drawing difference. The tilemap holds
+different content in the two builds, so the guest has taken a different path.
+
+Ruled out so far: the cabinet buttons (M3_NO_BUTTONS makes no difference),
+the framebuffer (both layers hand the renderer the same 496x384 buffer), the
+video driver (SDL_VIDEODRIVER=dummy behaves like the window), and both
+src/bus.c and src/real3d.c (checking out the versions from before the
+divergence changes nothing).
+
+What is left is that platform_sdl.c does something platform_null.c does not
+which the guest can observe. Nothing in the platform interface should be
+observable to the guest at all, so whatever it is, it is a bug in this
+runtime rather than a property of the game.
