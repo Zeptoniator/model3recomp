@@ -95,7 +95,7 @@ static unsigned scripted_buttons(void)
     if (coin_at && f >= coin_at && f < coin_at + press_fields())
         b |= M3_BTN_COIN1;
     if (start_at && f >= start_at && f < start_at + press_fields())
-        b |= M3_BTN_START1;
+        b |= M3_BTN_START1 | M3_BTN_TRIG1;
     return b;
 }
 
@@ -110,6 +110,10 @@ unsigned platform_buttons(void)
     if (k[SDL_SCANCODE_2]) b |= M3_BTN_START2;
     if (k[SDL_SCANCODE_F2]) b |= M3_BTN_TEST;
     if (k[SDL_SCANCODE_F3]) b |= M3_BTN_SERVICE;
+    if (k[SDL_SCANCODE_SPACE] || k[SDL_SCANCODE_LCTRL])
+        b |= M3_BTN_TRIG1;
+    if (k[SDL_SCANCODE_RCTRL]) b |= M3_BTN_TRIG2;
+    if (k[SDL_SCANCODE_LSHIFT]) b |= M3_BTN_OFFSCR1;
     return b;
 }
 

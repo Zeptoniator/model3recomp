@@ -22,6 +22,10 @@ uint64_t platform_ticks_us(void);
 #define M3_BTN_SERVICE  0x0008u
 #define M3_BTN_START1   0x0010u
 #define M3_BTN_START2   0x0020u
+#define M3_BTN_TRIG1    0x0040u   /* light gun trigger                    */
+#define M3_BTN_TRIG2    0x0080u
+#define M3_BTN_OFFSCR1  0x0100u   /* pointed off screen, which is reload  */
+#define M3_BTN_OFFSCR2  0x0200u
 
 unsigned platform_buttons(void);
 

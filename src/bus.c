@@ -52,6 +52,28 @@ static uint32_t  g_r3d_ping;        /* Real3D status, bit 1 is the ping    */
  * 128 KB of palette. One allocation, since the guest addresses it as one. */
 #define TILEGEN_VRAM_SIZE 0x120000u
 static uint64_t g_dev_reads[256];
+
+/* The light gun board, reached through a two-byte serial window.
+ *
+ * The guest writes a command to register 0x24 and data to 0x28, and reads
+ * the answers back from 0x2C and 0x30. Command 0x00 latches which of the
+ * gun's own registers to look at; command 0x87 fetches it. Register 0x34
+ * reports whether a gun board is fitted at all.
+ *
+ * The Lost World asks the player to shoot rather than to press start, so
+ * none of this is optional: without it the attract panel telling you to
+ * shoot stays up forever, which is exactly where this got stuck. */
+static uint32_t g_serial1, g_serial2, g_gun_reg;
+
+/* Where the gun is pointing. Centre of the screen until a host supplies a
+ * real one; M3_GUN_X and M3_GUN_Y override. The board reports ten bits. */
+static unsigned gun_axis(const char *env, unsigned dflt)
+{
+    const char *e = getenv(env);
+    return e ? (unsigned)strtoul(e, NULL, 0) & 0x3FFu : dflt;
+}
+static unsigned gun_x(void) { return gun_axis("M3_GUN_X", 512u); }
+static unsigned gun_y(void) { return gun_axis("M3_GUN_Y", 512u); }
 static uint8_t *g_vram;
 
 /* The tilegen's own register file, 0xF1180000..0xF11800FF. Only the ack at
@@ -462,30 +484,28 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
         return 0x01000000u;
 
     if ((w & 0xFFFFFFC0u) == M3_INPUTS_BASE) {
-        if (getenv("M3_IO_TRACE")) {
+        if (getenv("M3_IO_TRACE") &&
+            model3recomp_frame_count() >= 3000u) {
             static unsigned n;
-            if (n++ < 4000)
+            if (n++ < 6000)
                 fprintf(stderr, "[io] read %08X (reg %02X) ctrl=%08X" M3_NL,
                         w, w & 0x3Cu, g_io_ctrl);
         }
         if ((w & 0x3Cu) == 0x00u)
             return g_io_ctrl;        /* the strobe latch reads back */
-        if (((w & 0x3Cu) == 0x08u || (w & 0x3Cu) == 0x0Cu)) {
-            /* Game inputs. On a gun cabinet this is where the trigger
-             * lives, and the attract screen asks you to shoot rather than
-             * to press start. M3_GUN_BIT picks which bit to pull low while
-             * which one it is is still being found. */
-            static int probed;
-            static unsigned bit = 32u;
-            uint32_t v = 0xFFFFFFFFu;
-            if (!probed) {
-                const char *e = getenv("M3_GUN_BIT");
-                probed = 1;
-                if (e) bit = (unsigned)strtoul(e, NULL, 0);
-            }
-            if (bit < 32u && (platform_buttons() & M3_BTN_START1))
-                v &= ~(1u << bit);
-            return v;
+        if ((w & 0x3Cu) == 0x2Cu) return g_serial1 << 24;
+        if ((w & 0x3Cu) == 0x30u) return g_serial2 << 24;
+        if ((w & 0x3Cu) == 0x34u) return 0x0Cu << 24;  /* a gun board is fitted */
+        if ((w & 0x3Cu) == 0x08u || (w & 0x3Cu) == 0x0Cu) {
+            /* Game inputs, active low in the top byte. On a gun cabinet
+             * bit 0 is that player's trigger: 0x08 is player one and 0x0C
+             * player two. The game asks you to shoot rather than to press
+             * start, so this is what actually begins a credit. */
+            unsigned btn = platform_buttons();
+            uint32_t v = 0xFFu;
+            unsigned want = ((w & 0x3Cu) == 0x08u) ? M3_BTN_TRIG1 : M3_BTN_TRIG2;
+            if (btn & want) v &= ~0x01u;
+            return (v << 24) | 0x00FFFFFFu;
         }
         if ((w & 0x3Cu) == 0x3Cu) {
             /* The ADC. The game reads this more than any other register in
@@ -516,7 +536,12 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
              * time this was wired up. The toggle below is the old
              * behaviour, kept underneath the buttons rather than replaced
              * by them. */
-            unsigned btn = getenv("M3_NO_BUTTONS") ? 0u : platform_buttons();
+            /* Only bank 0 carries the buttons. Bank 1 is the EEPROM and
+             * the service straps, and laying button bits over it feeds the
+             * guest nonsense whenever a key is held. */
+            unsigned btn = (getenv("M3_NO_BUTTONS") ||
+                            ((g_io_ctrl >> 24) & 1u))
+                         ? 0u : platform_buttons();
             uint32_t v;
             g_io_ready ^= 0x20000000u;
             v = 0xFFFFFFFFu ^ g_io_ready;
@@ -662,7 +687,53 @@ static void dev_write_word(uint32_t w, uint32_t v)
     }
 
     if ((w & 0xFFFFFFC0u) == M3_INPUTS_BASE) {
-        if ((w & 0x3Cu) == 0x00u) g_io_ctrl = v;
+        if ((w & 0x3Cu) == 0x00u) { g_io_ctrl = v; return; }
+        if ((w & 0x3Cu) == 0x28u) { g_serial2 = (v >> 24) & 0xFFu; return; }
+        if ((w & 0x3Cu) == 0x24u) {
+            unsigned cmd = (v >> 24) & 0xFFu;
+            if (getenv("M3_GUN_TRACE")) {
+                static unsigned n;
+                if (model3recomp_frame_count() >= 3000u && n++ < 2000)
+                    fprintf(stderr, "[gun] cmd %02X reg %u fifo2 %02X" M3_NL,
+                            cmd, g_gun_reg, g_serial2);
+            }
+            /* Command 0x00 latches which gun register to look at, from
+             * whatever was written to 0x28; command 0x87 fetches it. In
+             * the steady state this game sends exactly those two, a
+             * thousand of each. It sends 0x01/0x07/0x81/0x83 as well, but
+             * only during boot -- reading the boot phase as the protocol
+             * and rebuilding around it was a wrong turn. */
+            if (cmd == 0x00u) {
+                g_gun_reg = g_serial2;
+            } else if (cmd == 0x87u) {
+                unsigned x = gun_x(), y = gun_y();
+                unsigned btn = platform_buttons();
+                g_serial1 = 0;
+                switch (g_gun_reg) {
+                case 0: g_serial2 = y & 0xFFu; break;
+                case 1: g_serial2 = (y >> 8) & 3u; break;
+                case 2: g_serial2 = x & 0xFFu; break;
+                case 3: g_serial2 = (x >> 8) & 3u; break;
+                case 4: g_serial2 = y & 0xFFu; break;
+                case 5: g_serial2 = (y >> 8) & 3u; break;
+                case 6: g_serial2 = x & 0xFFu; break;
+                case 7: g_serial2 = (x >> 8) & 3u; break;
+                /* Offscreen, one bit per player: pointing away from the
+                 * screen is how a player reloads. */
+                case 8: g_serial2 = (btn & M3_BTN_OFFSCR2) ? 2u : 0u;
+                        if (btn & M3_BTN_OFFSCR1) g_serial2 |= 1u;
+                        break;
+                default: g_serial2 = 0; break;
+                }
+                if (getenv("M3_GUN_TRACE2")) {
+                    static unsigned m;
+                    if (m++ < 20)
+                        fprintf(stderr, "[gun] read reg %u -> %02X" M3_NL,
+                                g_gun_reg, g_serial2);
+                }
+            }
+            return;
+        }
         return;
     }
 

@@ -94,6 +94,6 @@ unsigned platform_buttons(void)
     if (coin_at && f >= coin_at && f < coin_at + PRESS_FIELDS)
         b |= M3_BTN_COIN1;
     if (start_at && f >= start_at && f < start_at + PRESS_FIELDS)
-        b |= M3_BTN_START1;
+        b |= M3_BTN_START1 | M3_BTN_TRIG1;
     return b;
 }

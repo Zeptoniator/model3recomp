@@ -77,6 +77,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   invention: words 0x04..0x06 are a unit vector.
 
 ### Added
+- **The light gun board.** Registers 0x24/0x28 take a command and data,
+  0x2C/0x30 return the answers and 0x34 reports that a board is fitted.
+  Command 0x00 latches which gun register to read and 0x87 fetches it;
+  registers 0 to 7 are the two guns' X and Y, and 8 is the offscreen flags.
+  Without it the attract panel asking the player to shoot never goes away.
+- **Gun triggers** at bit 0 of registers 0x08 and 0x0C, active low, one per
+  player, on space or left control. Shooting is how this game starts a
+  credit; it ignores the start button entirely.
 - `M3_COIN_AT` / `M3_START_AT` press a coin and start at a given field, in
   both platform layers, so a run can be scripted. A coin slot is an edge and
   not a level, so a button held from the first field to the last may be
