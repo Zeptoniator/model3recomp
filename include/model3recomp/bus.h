@@ -91,6 +91,7 @@ uint64_t bus_r3d_trigger_count(void);
 
 /* Writes the board does not model, tallied by page. */
 void bus_report_dropped_writes(void);
+void bus_report_device_reads(void);
 
 /* Real3D scene memory. Nothing renders these yet, but the guest fills them
  * every frame, so they are the evidence that it is drawing at all. */

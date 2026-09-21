@@ -103,6 +103,7 @@ static int g_tex_all;
  */
 static int g_textures;
 static float g_ambient = 0.20f;
+static int g_light_flip;
 static uint32_t g_scene_hash;
 static uint32_t g_fb_hash;
 static float g_vp07;
@@ -371,13 +372,14 @@ typedef struct {
     uint16_t tw, th;        /* its size, for wrapping */
     uint8_t page;
     uint8_t textured;
+    uint8_t luminous;
     uint8_t r, g, b;
 } tri_t;
 
 static tri_t *g_tris;
 static unsigned g_ntris;
 
-typedef struct { int on; unsigned x, y, page, w, h, fmt; } texdesc_t;
+typedef struct { int on, lum; unsigned x, y, page, w, h, fmt; } texdesc_t;
 
 static void emit(const float a[3], const float b[3], const float c[3],
                  const float n[3], uint32_t rgb,
@@ -399,6 +401,7 @@ static void emit(const float a[3], const float b[3], const float c[3],
     memcpy(t->uv[1], ub, sizeof t->uv[1]);
     memcpy(t->uv[2], uc, sizeof t->uv[2]);
     t->textured = (uint8_t)(td->on ? 1 : 0);
+    t->luminous = (uint8_t)(td->lum ? 1 : 0);
     t->tx = (uint16_t)td->x; t->ty = (uint16_t)td->y;
     t->tw = (uint16_t)td->w; t->th = (uint16_t)td->h;
     t->page = (uint8_t)td->page;
@@ -512,6 +515,9 @@ static void draw_model(uint32_t addr, const mat_t *m)
         td.x    = (32u * (((ph[4] & 0x1Fu) << 1) | ((ph[5] >> 7) & 1u))) & 2047u;
         td.y    = (32u * (ph[5] & 0x1Fu)) & 2047u;
         td.page = (ph[4] & 0x40u) >> 6;
+        /* Bit 16 of word 6 disables lighting for the polygon:
+         * it is drawn at full brightness. */
+        td.lum  = (ph[6] & 0x00010000u) != 0;
         if (td.w > 2048u) td.w = 2048u;
         if (td.h > 2048u) td.h = 2048u;
 
@@ -739,7 +745,8 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
         lit = tr->n[0]*L[0] + tr->n[1]*L[1] + tr->n[2]*L[2];
         if (lit < 0) lit = 0;
         if (lit > 1.0f) lit = 1.0f;
-        sh = (AMBIENT + (1.0f - AMBIENT) * lit) * intensity;
+        sh = tr->luminous ? intensity
+                          : (AMBIENT + (1.0f - AMBIENT) * lit) * intensity;
         r = (int)(tr->r * sh); g = (int)(tr->g * sh); b = (int)(tr->b * sh);
         if (r > 255) r = 255;
         if (g > 255) g = 255;
@@ -820,7 +827,8 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                         int rr, gg, bb;
                         if (d < 0) d = 0;
                         if (d > 1.0f) d = 1.0f;
-                        s2 = (AMBIENT + (1.0f - AMBIENT) * d) * intensity;
+                        s2 = tr->luminous ? intensity
+                           : (AMBIENT + (1.0f - AMBIENT) * d) * intensity;
                         rr = (int)(tr->r * s2); gg = (int)(tr->g * s2);
                         bb = (int)(tr->b * s2);
                         if (rr > 255) rr = 255;
@@ -860,6 +868,7 @@ void real3d_render(void)
         if (e) g_tex_size_mode = atoi(e);
         g_tex_all = getenv("M3_TEX_ALL") != NULL;
         g_textures = getenv("M3_NO_TEXTURES") == NULL;
+        g_light_flip = getenv("M3_LIGHT_FLIP") != NULL;
         e = getenv("M3_AMBIENT");
         if (e) g_ambient = (float)atof(e);
         g_tris = (tri_t *)malloc(sizeof(tri_t) * MAX_TRIS);
@@ -913,6 +922,8 @@ void real3d_render(void)
         light[0] = f32_of(rd32le(vp + 0x04 * 4));
         light[1] = f32_of(rd32le(vp + 0x05 * 4));
         light[2] = f32_of(rd32le(vp + 0x06 * 4));
+        if (g_light_flip) { light[0] = -light[0];
+            light[1] = -light[1]; light[2] = -light[2]; }
         g_vp07 = f32_of(rd32le(vp + 0x07 * 4));
         if (light[0] == 0.0f && light[1] == 0.0f && light[2] == 0.0f) {
             light[0] = 0.3f; light[1] = 0.5f; light[2] = -0.81f;

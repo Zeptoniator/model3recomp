@@ -71,6 +71,10 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   invention: words 0x04..0x06 are a unit vector.
 
 ### Added
+- **Cabinet buttons.** `platform_buttons()` reports coins, starts, test and
+  service; the SDL layer reads them off the keyboard (5/6 coin, 1/2 start,
+  F2 test, F3 service) and the headless layer takes `M3_BUTTONS`. They are
+  presented at I/O register 0x04 bank 0, active low in the top byte.
 - **Texture sampling**, behind `M3_TEXTURES=1` and off by default. The
   pipeline is complete -- descriptor from the polygon header, perspective-
   correct UVs carried through the near clip, 1-5-5-5 texels with

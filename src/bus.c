@@ -10,6 +10,7 @@
  * See docs/technical/execution-model.md.
  */
 #include "model3recomp/bus.h"
+#include "model3recomp/platform.h"
 #define M3_NL "\n"
 #include "model3recomp/irq.h"
 #include "model3recomp/scsi.h"
@@ -50,6 +51,7 @@ static uint32_t  g_r3d_ping;        /* Real3D status, bit 1 is the ping    */
 /* Tilegen VRAM is 0xF1000000..0xF111FFFF: 1 MB of tile/name data followed by
  * 128 KB of palette. One allocation, since the guest addresses it as one. */
 #define TILEGEN_VRAM_SIZE 0x120000u
+static uint64_t g_dev_reads[256];
 static uint8_t *g_vram;
 
 /* The tilegen's own register file, 0xF1180000..0xF11800FF. Only the ack at
@@ -390,6 +392,7 @@ static uint32_t dev_read_word(uint32_t w, int side_effects);
 
 static uint32_t dev_read_word(uint32_t w, int side_effects)
 {
+    g_dev_reads[(w >> 16) & 0xFFu]++;
     /* System controller / interrupt controller. */
     if ((w & 0xFFFFFFC0u) == M3_SYSCTL_BASE) {
         switch (w & 0x3C) {
@@ -459,8 +462,32 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
         return 0x01000000u;
 
     if ((w & 0xFFFFFFC0u) == M3_INPUTS_BASE) {
+        if (getenv("M3_IO_TRACE")) {
+            static unsigned n;
+            if (n++ < 40)
+                fprintf(stderr, "[io] read %08X (reg %02X) ctrl=%08X" M3_NL,
+                        w, w & 0x3Cu, g_io_ctrl);
+        }
         if ((w & 0x3Cu) == 0x00u)
             return g_io_ctrl;        /* the strobe latch reads back */
+        if ((w & 0x3Cu) == 0x04u && ((g_io_ctrl >> 24) & 1u) == 0u) {
+            /* Bank 0: the cabinet buttons. Active low, in the top byte,
+             * because the guest reads these registers a byte at a time and
+             * the board is big-endian.
+             *
+             *   bit 0 coin 1   bit 2 test      bit 4 start 1
+             *   bit 1 coin 2   bit 3 service   bit 5 start 2
+             */
+            unsigned b = platform_buttons();
+            uint32_t v = 0xFFu;
+            if (b & M3_BTN_COIN1)   v &= ~0x01u;
+            if (b & M3_BTN_COIN2)   v &= ~0x02u;
+            if (b & M3_BTN_TEST)    v &= ~0x04u;
+            if (b & M3_BTN_SERVICE) v &= ~0x08u;
+            if (b & M3_BTN_START1)  v &= ~0x10u;
+            if (b & M3_BTN_START2)  v &= ~0x20u;
+            return (v << 24) | 0x00FFFFFFu;
+        }
         if ((w & 0x3Cu) == 0x04u) {
             /* ponytail: the I/O board's serial ready line is toggled rather
              * than driven by a real protocol. The boot bit-bangs a byte to
@@ -628,7 +655,8 @@ static void dev_write_word(uint32_t w, uint32_t v)
      * writes megabytes to and we ignore looks exactly like a region the
      * guest never writes. */
     if ((w & 0xFF000000u) == 0x9C000000u) {
-        fprintf(stderr, "[texport] %08X = %08X" M3_NL, w, v);
+        if (getenv("M3_TEXPORT_TRACE"))
+            fprintf(stderr, "[texport] %08X = %08X" M3_NL, w, v);
         g_dropped_writes[(w >> 24) & 0xFFu]++;
         return;
     }
@@ -638,6 +666,17 @@ static void dev_write_word(uint32_t w, uint32_t v)
         if (n++ < 30)
             fprintf(stderr, "[drop] %08X = %08X" M3_NL, w, v);
     }
+}
+
+void bus_report_device_reads(void)
+{
+    unsigned i;
+    fprintf(stderr, "[model3recomp] device reads by address, F0xx pages:" M3_NL);
+    for (i = 0; i < 256; i++)
+        if (g_dev_reads[i])
+            fprintf(stderr, "    F0%02X0000: %llu" M3_NL, i,
+                    (unsigned long long)g_dev_reads[i]);
+    fflush(stderr);
 }
 
 void bus_report_dropped_writes(void)

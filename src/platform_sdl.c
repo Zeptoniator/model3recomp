@@ -61,6 +61,21 @@ int platform_poll(void)
     return 1;
 }
 
+/* The cabinet's buttons, on the keys an arcade front end would use. */
+unsigned platform_buttons(void)
+{
+    const Uint8 *k = SDL_GetKeyboardState(NULL);
+    unsigned b = 0;
+    if (!k) return 0;
+    if (k[SDL_SCANCODE_5]) b |= M3_BTN_COIN1;
+    if (k[SDL_SCANCODE_6]) b |= M3_BTN_COIN2;
+    if (k[SDL_SCANCODE_1]) b |= M3_BTN_START1;
+    if (k[SDL_SCANCODE_2]) b |= M3_BTN_START2;
+    if (k[SDL_SCANCODE_F2]) b |= M3_BTN_TEST;
+    if (k[SDL_SCANCODE_F3]) b |= M3_BTN_SERVICE;
+    return b;
+}
+
 void platform_present(void)
 {
     SDL_UpdateTexture(g_tex, NULL, g_fb, g_w * (int)sizeof(uint32_t));

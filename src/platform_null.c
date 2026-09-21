@@ -58,3 +58,16 @@ uint64_t platform_ticks_us(void)
     g_virtual_us = m3_work;
     return g_virtual_us;
 }
+
+/* Headless: whatever M3_BUTTONS says, so a harness can still insert a coin. */
+unsigned platform_buttons(void)
+{
+    static int probed;
+    static unsigned held;
+    if (!probed) {
+        const char *e = getenv("M3_BUTTONS");
+        probed = 1;
+        held = e ? (unsigned)strtoul(e, NULL, 0) : 0u;
+    }
+    return held;
+}
