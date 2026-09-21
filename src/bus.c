@@ -824,7 +824,7 @@ static uint32_t dev_read(uint32_t a, unsigned size)
      * lifted code keeps its temporaries in C locals the guest cannot reach.
      * irq_tick() is re-entrancy guarded. */
     irq_tick();
-    if ((a & 0xFE000000u) == M3_SCSI_BASE) {
+    if ((a & 0xFF000000u) == M3_SCSI_BASE) {
         uint32_t sv = scsi_read(a, size);
         io_log('R', a, size, sv);
         return sv;
@@ -885,7 +885,17 @@ static void dev_write(uint32_t a, uint32_t v, unsigned size)
     unsigned sh;
     spin_note(a, 1);
     io_log('W', a, size, v);
-    if ((a & 0xFE000000u) == M3_SCSI_BASE) { scsi_write(a, v, size); return; }
+    /* One 16 MB page, not two. The mask used to be 0xFE000000, which put
+     * 0xC0000000 in the SCSI window as well -- and the game uploads 40 KB to
+     * a device at 0xC0020000. Every one of those 10272 words landed on the
+     * 53C810's 64-byte register file, DSP included, and each DSP write
+     * launched a "SCRIPTS program" made of whatever the upload happened to
+     * contain. One of them moved 262232 bytes from 0x68 to 0x00000000 and
+     * took the low quarter-megabyte of RAM with it.
+     *
+     * The game says where the chip is: it writes DSP at 0xC100002C, and it
+     * touches 0x0C, 0x14, 0x2C, 0x38 and 0x39 there and nowhere else. */
+    if ((a & 0xFF000000u) == M3_SCSI_BASE) { scsi_write(a, v, size); return; }
     if (size == 4) { dev_write_word(w, v); return; }
     /* Read-modify-write without side effects: a byte store must not be able
      * to advance a field by accidentally reading the status register. */
@@ -896,6 +906,18 @@ static void dev_write(uint32_t a, uint32_t v, unsigned size)
 }
 
 /* ---- public accessors ---------------------------------------------------- */
+
+/* The watch in lift.h only sees stores from lifted code. Everything that
+ * reaches RAM another way -- a SCRIPTS DMA, most of all -- goes through the
+ * three writers below, and a byte quietly cleared by a DMA looks exactly
+ * like a byte nothing ever wrote. */
+#ifdef M3_WATCH
+void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size);
+#define BUS_WATCH(a, v, n)                                                  do { if ((uint32_t)(M3_WATCH) - (uint32_t)(a) < (uint32_t)(n))                   m3_watch_hit((uint32_t)(a), (uint32_t)(v), (n)); } while (0)
+#else
+#define BUS_WATCH(a, v, n) ((void)0)
+#endif
+
 uint8_t bus_read8(uint32_t a)
 {
     uint8_t *p = direct(a, 1, 0);
@@ -924,6 +946,7 @@ uint64_t bus_read64(uint32_t a)
 
 void bus_write8(uint32_t a, uint8_t v)
 {
+    BUS_WATCH(a, v, 1);
     uint8_t *p = direct(a, 1, 1);
     if (p) { *p = v; return; }
     dev_write(a, v, 1);
@@ -931,6 +954,7 @@ void bus_write8(uint32_t a, uint8_t v)
 
 void bus_write16(uint32_t a, uint16_t v)
 {
+    BUS_WATCH(a, v, 2);
     uint8_t *p = direct(a, 2, 1);
     if (p) { wbe16(p, v); return; }
     dev_write(a, v, 2);
@@ -938,6 +962,7 @@ void bus_write16(uint32_t a, uint16_t v)
 
 void bus_write32(uint32_t a, uint32_t v)
 {
+    BUS_WATCH(a, v, 4);
     uint8_t *p = direct(a, 4, 1);
     if (p) { wbe32(p, v); return; }
     dev_write(a, v, 4);

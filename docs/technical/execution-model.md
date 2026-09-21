@@ -467,3 +467,54 @@ credit to the stage-one intro and an in-game HUD.
 The general shape is worth stating once. Entry coverage is not a property of
 the program, it is a property of the paths that have been run. Attract mode
 converging on zero misses says nothing at all about the paths a coin opens.
+
+
+## The 53C810 is at 0xC1000000, and one page wider was fatal
+
+Halfway through the first round the screen went black and stayed black for
+seven thousand fields. The loop guard said where: one guest function entered
+251,700,076 times, and every other count identical to a thousand fields
+earlier, so nothing else had run at all.
+
+    00118A80  x251700076      <- new
+    0002E618  x11418712       <- same count at field 4600 and at 5600
+
+`0x118A80` reads a byte at RAM `0x6FB` and returns a pointer if it is 1, else
+zero; its caller is the Real3D frame sync and spins until it is non-zero.
+That byte is set once at boot, after a PCI probe of device 13 answers
+`0x16C311DB` -- Sega's vendor ID `0x11DB`, device `0x16C3`. It was 1 at field
+4500 and 0 at 5600, and the only instruction in the image that writes it
+writes 1.
+
+`M3_WATCH` existed for exactly this and missed it twice. First because it
+fired only on an exact address match, and a byte is most often cleared by a
+word store two bytes below it -- it now fires on any store that *covers* the
+address. Then because it lived in lift.h, which only sees stores from lifted
+code: this one came through `bus_write8()`, from a SCRIPTS DMA.
+
+The DMA was `0x68 -> 0x00000000, 262232 bytes`, which copies the low quarter
+megabyte of RAM over itself. It came from a SCRIPTS program the game never
+wrote. The SCSI decode was
+
+    (a & 0xFE000000u) == 0xC0000000u
+
+which is two 16 MB pages, and the game uploads 40 KB to a device at
+`0xC0020000`. All 10272 of those words landed on the 53C810's 64-byte
+register file, DSP among them, and every DSP write launched a "program" made
+of whatever the upload happened to contain.
+
+The game says where the chip really is. It writes DSP at `0xC100002C`, and in
+a whole boot it touches `0x0C`, `0x14`, `0x2C`, `0x38` and `0x39` there and
+nothing else in that space. One page, `0xFF000000`.
+
+What is at `0xC0000000` is a device this port does not have: the game writes
+`0xDEB00BED` there and reads it back to see whether it exists. With the SCSI
+window narrowed the read no longer answers, the probe fails, the game sets
+its own "absent" flag and skips the upload -- which is the honest model, and
+costs a device that was never emulated anyway.
+
+A SCRIPTS program that contains a move to nowhere is also now abandoned
+rather than skipped over. That alone did not fix this -- the destructive move
+was in range and perfectly plausible -- but walking on through 4096 more
+"instructions" of garbage is how a bogus program finds a plausible move in
+the first place.

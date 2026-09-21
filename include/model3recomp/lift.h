@@ -51,11 +51,13 @@ static inline uint32_t m3_ld8(uint32_t a)
  * tools/ppc_interp.py has --watch, and the runtime had no equivalent: lifted
  * code writes work RAM through the inline path below without the bus ever
  * seeing it, so "what wrote this word?" had no answer on the native side.
- * Set M3_WATCH to an address at build time and every write to it is reported
- * with the guest function that did it. Compiles to nothing otherwise. */
+ * Set M3_WATCH to an address at build time and every write that *covers* it
+ * is reported with the guest function that did it -- a byte is most often
+ * cleared by a word store two bytes below it, which an equality test misses.
+ * Compiles to nothing otherwise. */
 #ifdef M3_WATCH
 void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size);
-#define M3_WATCH_NOTE(a, v, n)                                              do { if ((uint32_t)(a) == (uint32_t)(M3_WATCH))                                  m3_watch_hit((uint32_t)(a), (uint32_t)(v), (n)); } while (0)
+#define M3_WATCH_NOTE(a, v, n)                                              do { if ((uint32_t)(M3_WATCH) - (uint32_t)(a) < (uint32_t)(n))                   m3_watch_hit((uint32_t)(a), (uint32_t)(v), (n)); } while (0)
 #else
 #define M3_WATCH_NOTE(a, v, n) ((void)0)
 #endif
@@ -150,6 +152,10 @@ void m3_loop_guard(uint32_t branch_at);
 void m3_fn_count(uint32_t addr);
 void m3_fn_report(unsigned top);
 extern uint32_t m3_fn_prev;
+/* The last few function entries in order, for m3_watch_hit(). */
+#define M3_FN_RING 32u
+extern uint32_t m3_fn_ring[M3_FN_RING];
+extern uint32_t m3_fn_ring_n;
 #define M3_FN(a)        (m3_fn_prev = m3_fn_now, m3_fn_now = (uint32_t)(a), m3_fn_count((uint32_t)(a)))
 #define M3_LOOP_NOTE(a) m3_loop_guard((uint32_t)(a))
 #else

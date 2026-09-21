@@ -27,7 +27,7 @@ extern "C" {
 #define M3_R3D_TEXPORT     0x9C000000u   /* texture upload FIFO             */
 #define M3_R3D_TEXFIFO     0x94000000u   /* Real3D upload FIFO, one port    */
 
-#define M3_SCSI_BASE       0xC0000000u   /* 53C810, Step 1.x                */
+#define M3_SCSI_BASE       0xC1000000u   /* 53C810, Step 1.x                */
 #define M3_SCSI_MIRROR     0xC1000000u
 
 #define M3_INPUTS_BASE     0xF0040000u   /* controls / coins / DIPs         */

@@ -115,9 +115,8 @@ static void scsi_run(uint32_t dsp)
             uint32_t src = d1;
             uint32_t dst = swap32(bus_read32(dsp + 8));
             dsp += 12;
-            if (!cnt || cnt > 0x00400000u)
-                continue;
-            if (!mapped(src, cnt) || !mapped(dst, cnt)) {
+            if (!cnt || cnt > 0x00400000u || !mapped(src, cnt)
+                     || !mapped(dst, cnt)) {
                 /* Reported once. The boot's register test writes a pattern
                  * over DSP, so this fires whenever that pattern happens to
                  * point at something; it is noise, not an event. */
@@ -128,10 +127,26 @@ static void scsi_run(uint32_t dsp)
                                     "(further reports silenced)\n",
                             src, dst, cnt);
                 DMA_LOG("reject", src, dst, cnt);
-                /* Skip the move but let the program run on, so its INT
-                 * still signals completion and the guest is not left
-                 * polling ISTAT forever. */
-                continue;
+                /* Abandon the program rather than skip the move.
+                 *
+                 * Skipping and running on was the first answer, so the INT
+                 * at the end would still signal completion. But a program
+                 * that contains a move to nowhere is not a program -- it is
+                 * whatever the guest's register test left in DSP -- and
+                 * running on walks up to 4096 more "instructions" through
+                 * garbage. One of those eventually decodes as a move that
+                 * is in range: 0x68 -> 0x00000000, 262232 bytes, which
+                 * copies the low quarter-megabyte of RAM over itself and
+                 * takes the "Real3D is present" flag at 0x6FB with it. The
+                 * game then waits forever for a chip it has been told is
+                 * absent, and the screen goes black halfway through the
+                 * first round.
+                 *
+                 * Signal completion anyway, so the guest is not left
+                 * polling ISTAT for a program that will never end. */
+                g_reg[R_ISTAT] |= ISTAT_DIP;
+                g_reg[R_DSTAT] |= DSTAT_SIR;
+                return;
             }
             moved += cnt;
             if (moved > 0x01000000u) {

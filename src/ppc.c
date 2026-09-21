@@ -86,10 +86,20 @@ void m3_timebase_set(unsigned spr, uint32_t v)
  * matters: the address alone says a word changed, not who changed it. */
 void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size)
 {
+    uint32_t k;
     fprintf(stderr, "[model3recomp] watch %08X = %08X (size %u) from guest "
                     "function %08X, field %llu\n",
             addr, val, size, m3_fn_now,
             (unsigned long long)model3recomp_frame_count());
+    /* m3_fn_now is where lifted code last *entered* a function, which is
+     * not where it is now: nothing restores it on return, so a write a
+     * caller makes after its callee returned is reported against the
+     * callee. The last entries in order say which caller that was. */
+    fprintf(stderr, "    last functions entered:");
+    for (k = m3_fn_ring_n > M3_FN_RING ? m3_fn_ring_n - M3_FN_RING : 0;
+         k < m3_fn_ring_n; k++)
+        fprintf(stderr, " %08X", m3_fn_ring[k & (M3_FN_RING - 1u)]);
+    fprintf(stderr, "\n");
     fflush(stderr);
 }
 #endif
@@ -122,8 +132,13 @@ uint32_t m3_fn_prev;
 static uint32_t g_fn_addr[FN_SLOTS];
 static uint32_t g_fn_hits[FN_SLOTS];
 
+/* The last few function entries, in order. See m3_watch_hit(). */
+uint32_t m3_fn_ring[M3_FN_RING];
+uint32_t m3_fn_ring_n;
+
 void m3_fn_count(uint32_t addr)
 {
+    m3_fn_ring[m3_fn_ring_n++ & (M3_FN_RING - 1u)] = addr;
     uint32_t i = (addr * 2654435761u) & (FN_SLOTS - 1u);
     uint32_t probes = 0;
     for (; probes < 64u; probes++) {

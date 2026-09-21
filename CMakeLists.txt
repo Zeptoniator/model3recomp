@@ -59,6 +59,14 @@ if(MODEL3RECOMP_LOOP_GUARD)
     target_compile_definitions(model3recomp PUBLIC M3_LOOP_GUARD)
 endif()
 
+# Report every store that covers this guest address, with the function that
+# did it (needs MODEL3RECOMP_LOOP_GUARD for the function name). See M3_WATCH
+# in lift.h.
+set(MODEL3RECOMP_WATCH "" CACHE STRING "Guest RAM address to watch, e.g. 0x6FB")
+if(MODEL3RECOMP_WATCH)
+    target_compile_definitions(model3recomp PUBLIC M3_WATCH=${MODEL3RECOMP_WATCH})
+endif()
+
 # --- Tests ---
 option(MODEL3RECOMP_BUILD_TESTS "Build test programs" ON)
 if(MODEL3RECOMP_BUILD_TESTS)
