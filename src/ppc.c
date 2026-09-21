@@ -10,6 +10,7 @@
 #include "model3recomp/irq.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 m3_ppc_t m3_ctx;
 
@@ -84,9 +85,24 @@ void m3_timebase_set(unsigned spr, uint32_t v)
 #ifdef M3_WATCH
 /* Reported with the guest function that did the write, which is the part that
  * matters: the address alone says a word changed, not who changed it. */
+uint32_t m3_watch_addr = 0xFFFFFFFFu;   /* set from M3_WATCH at init */
+static uint64_t g_watch_from;           /* M3_WATCH_FROM: first field */
+static int      g_watch_ring;           /* M3_WATCH_RING: call history */
+
+void m3_watch_init(void)
+{
+    const char *e = getenv("M3_WATCH");
+    m3_watch_addr = e ? (uint32_t)strtoul(e, NULL, 0) : 0xFFFFFFFFu;
+    e = getenv("M3_WATCH_FROM");
+    g_watch_from = e ? strtoull(e, NULL, 0) : 0;
+    g_watch_ring = getenv("M3_WATCH_RING") != NULL;
+    { void m3_fn_args_init(void); m3_fn_args_init(); }
+}
+
 void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size)
 {
     uint32_t k;
+    if (model3recomp_frame_count() < g_watch_from) return;
     fprintf(stderr, "[model3recomp] watch %08X = %08X (size %u) from guest "
                     "function %08X, field %llu\n",
             addr, val, size, m3_fn_now,
@@ -95,6 +111,9 @@ void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size)
      * not where it is now: nothing restores it on return, so a write a
      * caller makes after its callee returned is reported against the
      * callee. The last entries in order say which caller that was. */
+    if (!g_watch_ring) { fflush(stderr); return; }
+    fprintf(stderr, "    r3=%08X r4=%08X r5=%08X r31=%08X\n",
+            PPC_R(3), PPC_R(4), PPC_R(5), PPC_R(31));
     fprintf(stderr, "    last functions entered:");
     for (k = m3_fn_ring_n > M3_FN_RING ? m3_fn_ring_n - M3_FN_RING : 0;
          k < m3_fn_ring_n; k++)
@@ -136,9 +155,46 @@ static uint32_t g_fn_hits[FN_SLOTS];
 uint32_t m3_fn_ring[M3_FN_RING];
 uint32_t m3_fn_ring_n;
 
+/* M3_FN_ARGS=<guest addr>: print the argument registers every time that
+ * function is entered, from field M3_WATCH_FROM. A watch on memory says
+ * what a routine wrote; this says what it was told. Two builds of the same
+ * scene -- one that renders and one that does not -- diverge somewhere in
+ * these numbers long before they diverge in RAM. */
+static uint32_t g_fn_args = 0xFFFFFFFFu;
+static uint64_t g_fn_args_from;
+static uint32_t g_fn_mat = 0xFFFFFFFFu;
+void m3_fn_args_init(void)
+{
+    const char *e = getenv("M3_FN_ARGS");
+    g_fn_args = e ? (uint32_t)strtoul(e, NULL, 0) : 0xFFFFFFFFu;
+    e = getenv("M3_WATCH_FROM");
+    g_fn_args_from = e ? strtoull(e, NULL, 0) : 0;
+    e = getenv("M3_FN_MAT");
+    g_fn_mat = e ? (uint32_t)strtoul(e, NULL, 0) : 0xFFFFFFFFu;
+}
+
 void m3_fn_count(uint32_t addr)
 {
     m3_fn_ring[m3_fn_ring_n++ & (M3_FN_RING - 1u)] = addr;
+    if (addr == g_fn_args && model3recomp_frame_count() >= g_fn_args_from) {
+        fprintf(stderr, "[args] %08X f1=%.6g f2=%.6g f3=%.6g"
+                        "  r3=%08X r4=%08X field %llu\n",
+                addr, PPC_F(1), PPC_F(2), PPC_F(3), PPC_R(3), PPC_R(4),
+                (unsigned long long)model3recomp_frame_count());
+        if (g_fn_mat != 0xFFFFFFFFu) {
+            /* A value under 32 means "the matrix this register points at",
+             * which is how you follow an argument rather than a fixed
+             * buffer. */
+            uint32_t at = g_fn_mat < 32u ? PPC_R(g_fn_mat) : g_fn_mat;
+            unsigned k;
+            fprintf(stderr, "       mat@%08X", at);
+            for (k = 0; k < 12; k++)
+                fprintf(stderr, " %.5g",
+                        (double)m3_bits_to_f32(m3_ld32(at + k * 4u)));
+            fprintf(stderr, "\n");
+        }
+        fflush(stderr);
+    }
     uint32_t i = (addr * 2654435761u) & (FN_SLOTS - 1u);
     uint32_t probes = 0;
     for (; probes < 64u; probes++) {

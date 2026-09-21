@@ -24,6 +24,9 @@ int model3recomp_init(const m3_config_t *cfg)
     if (!g_cfg.width)  g_cfg.width  = 496;
     if (!g_cfg.height) g_cfg.height = 384;
 
+#ifdef M3_WATCH
+    { void m3_watch_init(void); m3_watch_init(); }
+#endif
     bus_init(&g_cfg.roms);
     func_table_init();
     irq_init();

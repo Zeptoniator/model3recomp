@@ -341,3 +341,86 @@ what it looks like.
   a tilemap layer behind it.
 - **Culling.** The node bounding data is read but not used; everything
   submitted is transformed.
+
+
+## The in-game scene: singular matrices, and where they come from
+
+Attract mode renders. A round does not: the picture is two full-screen quads
+and a couple of thin white lines. The renderer is not at fault, and it is
+worth writing down how that was established, because every step of it looked
+like a renderer bug first.
+
+`M3_NO_2D` draws the 3D on its own -- during a round register 0x20 reads
+`0xF300`, so all four tilemap layers sit above the 3D and the sky layer is
+opaque, and there is otherwise nothing to see. `M3_REAL3D_STATS` now reports
+per viewport, and the round says:
+
+    vp0 @800000  42 tris      0 px
+    vp1 @800040   4 tris      0 px
+    vp2 @800080  21114 tris  421715 px  back 9964 near 7117 degen 0 off 0
+
+So 4033 triangles rasterise, and `M3_TRI_MAX` -- which drops any triangle
+whose screen bounding box exceeds a given area and says what it was -- shows
+two of them cover the screen on their own, black, luminous, at a constant
+z of 1280. Dropping those leaves an empty frame. The scene is not being
+hidden; it is not there.
+
+`M3_NODE_DUMP`/`M3_NODE_FROM` print each culling node with the matrix it
+loads. The round's 55 object nodes sit at `0x801600`, ten words apart, node
+*k* using matrix 393+*k*, and the first four are the 2D overlays -- their
+matrices carry scales of 496 and 1/360, which is what a screen-space quad
+looks like. The rest should be the world. In attract they are:
+
+    attract  mo=400  |rows| 1 1 1                t -67 -37 209
+    in-game  mo=400  |rows| 0.554 0.107 0.437    t -4.5e6 -8.0e4 -5.6e7
+
+Every in-game matrix is **rank 1**. In matrix 440 the rows are exact
+multiples of one another -- `r1 = 0.1995*r0`, `r2 = 0.8114*r0` -- and the
+same ratios appear in its neighbours. A singular transform maps a model to a
+line, which is the picture.
+
+The chain back from there, with the instrument that found each step:
+
+  * The matrices reach culling RAM by DMA, `001BAE54 -> 8E00C9B0, 2688
+    bytes`, which is 56 matrices starting at index 393 (`M3_TRACE_DMA`).
+  * The source buffer in RAM is already bad, so it is not byte order and not
+    the DMA (read the dump both ways: little-endian is right).
+  * `M3_WATCH` on the source names `0x0010F068`, a transposing byte-swap
+    copier: destination words 3..5 are the source's *column* 0. Its source
+    register points at `0x0010E5D8`.
+  * `0x0010E5D8` is a 20-entry matrix stack -- 960 bytes of identity and
+    zeros -- with the depth byte at RAM `0x1256` and the current-matrix
+    pointer at `0x1258`. The routine at `0x0010E998` resets all three.
+  * `M3_FN_ARGS` prints a function's arguments on entry, and `M3_FN_MAT`
+    dumps the matrix it is handed (a value under 32 means "the matrix this
+    register points at"). The primitives are fine: the scale at `0x0010EEB8`
+    gets (496, 68, 1) and (1/360, ...) and (1, 1, 1); the rotate at
+    `0x0010E584` gets ordinary angles; the multiply at `0x0010EC08` is an
+    in-place 3x3 that the lifter translates instruction for instruction.
+  * The multiply's *other* operand is where it goes wrong:
+
+        mat@001FDC80
+          r0 -0.75578  -0.15629  -0.63192     |r0| = 0.9905
+          r1  3.87e-06 -2.11e-04  4.76e-05    |r1| = 2.2e-04
+          r2  0.06136   0.01269   0.051309    |r2| = 0.0804  = 0.0812 * r0
+
+    A rotation that has collapsed: row 0 is a unit vector, row 1 is zero,
+    row 2 is parallel to row 0. That is what a basis built by cross products
+    looks like when the two input vectors are parallel. Its direction is the
+    one that then propagates into all 55 object matrices.
+
+  * That buffer is on the guest stack and is filled by `0x0010E5CC`, which
+    is `matrix_get`: it copies the *current* matrix out. So the current
+    matrix was already collapsed. Its call history runs through `0x0010E9F8`
+    -- a loop that scans a column for the largest |element|, i.e. partial
+    pivoting, i.e. a matrix inverse.
+
+Nothing in the runtime is implicated: no unimplemented instruction executes
+during a round (all 746 are undecodable words in speculative functions, none
+reached), the sine table the trig helpers read at `0xFFF10000` is correct in
+the ROM image, and `fcmpu`, `fsel`, `fres` and `frsqrte` all translate
+faithfully.
+
+Open question, and the next thing to look at: what the game inverts, and
+why the two vectors it builds the camera basis from are parallel during a
+round and not during attract.

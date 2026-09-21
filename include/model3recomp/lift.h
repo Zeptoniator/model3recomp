@@ -51,13 +51,18 @@ static inline uint32_t m3_ld8(uint32_t a)
  * tools/ppc_interp.py has --watch, and the runtime had no equivalent: lifted
  * code writes work RAM through the inline path below without the bus ever
  * seeing it, so "what wrote this word?" had no answer on the native side.
- * Set M3_WATCH to an address at build time and every write that *covers* it
- * is reported with the guest function that did it -- a byte is most often
- * cleared by a word store two bytes below it, which an equality test misses.
- * Compiles to nothing otherwise. */
+ * Build with MODEL3RECOMP_WATCH to compile the check in, then set M3_WATCH
+ * in the environment to the address: every write that *covers* it is
+ * reported with the guest function that did it. The address is a runtime
+ * variable rather than a macro because moving the watch is most of the
+ * work -- one buffer names the next -- and a rebuild for each hop is
+ * twenty minutes. A byte is most often cleared by a word store two bytes
+ * below it, which an equality test misses, so the test is containment.
+ * Compiles to nothing without the build flag. */
 #ifdef M3_WATCH
 void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size);
-#define M3_WATCH_NOTE(a, v, n)                                              do { if ((uint32_t)(M3_WATCH) - (uint32_t)(a) < (uint32_t)(n))                   m3_watch_hit((uint32_t)(a), (uint32_t)(v), (n)); } while (0)
+extern uint32_t m3_watch_addr;
+#define M3_WATCH_NOTE(a, v, n)                                              do { if (m3_watch_addr - (uint32_t)(a) < (uint32_t)(n))                          m3_watch_hit((uint32_t)(a), (uint32_t)(v), (n)); } while (0)
 #else
 #define M3_WATCH_NOTE(a, v, n) ((void)0)
 #endif

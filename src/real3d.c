@@ -551,6 +551,14 @@ static uint32_t g_matbase;
 
 static void descend(uint32_t addr, const mat_t *m, int depth);
 
+/* Which matrices a viewport actually uses. The table is sparse -- most
+ * of it is zeros -- so "how many entries look valid" is not the question;
+ * "which ones does the scene reach for" is. */
+int m3_node_dump;
+uint64_t m3_node_from;
+static unsigned g_mat_loads, g_mat_max, g_mat_zero, g_mat_bigi;
+static float    g_mat_bigt;
+
 /* A pointer's top byte says what it points at: bit 24 a model, bit 26 a
  * pointer list, and otherwise another culling node. */
 static void follow(uint32_t p, const mat_t *m, int depth)
@@ -596,16 +604,45 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
     cur = *m;
 
     mo = rd32le(node + 3 * 4) & 0xFFFu;
-    if (mo && mat_load(g_matbase, mo, &mm))
-        cur = mat_mul(m, &mm);
-
     tx = f32_of(rd32le(node + 4 * 4));
     ty = f32_of(rd32le(node + 5 * 4));
     tz = f32_of(rd32le(node + 6 * 4));
-    if (tx != 0.0f || ty != 0.0f || tz != 0.0f) {
+
+    /* A node carries EITHER a translation OR a matrix, and bit 4 of word
+     * 0 says which. Applying both -- matrix first, then the translation
+     * whenever it was non-zero -- is right for every node that has one
+     * and wrong for every node that has the other, because a node with
+     * the bit set still has something in its matrix field and it is not
+     * a matrix index. */
+    if (rd32le(node) & 0x10u) {
         mat_t t = IDENT;
         t.m[0][3] = tx; t.m[1][3] = ty; t.m[2][3] = tz;
-        cur = mat_mul(&cur, &t);
+        cur = mat_mul(m, &t);
+    } else if (mo && mat_load(g_matbase, mo, &mm)) {
+        unsigned k;
+        float big = 0.0f;
+        for (k = 0; k < 3; k++) {
+            float v = mm.m[k][3] < 0 ? -mm.m[k][3] : mm.m[k][3];
+            if (v > big) big = v;
+        }
+        g_mat_loads++;
+        { static unsigned told; extern int m3_node_dump;
+          extern uint64_t m3_node_from;
+          if (m3_node_dump && model3recomp_frame_count() >= m3_node_from
+              && told++ < (unsigned)m3_node_dump)
+            fprintf(stderr, "[node] @%06X w0=%08X w3=%08X mo=%u"
+                            "  |rows| %.3g %.3g %.3g  t %.4g %.4g %.4g\n",
+                    addr, rd32le(node), rd32le(node + 3 * 4), mo,
+                    (double)sqrtf(mm.m[0][0]*mm.m[0][0]+mm.m[0][1]*mm.m[0][1]+mm.m[0][2]*mm.m[0][2]),
+                    (double)sqrtf(mm.m[1][0]*mm.m[1][0]+mm.m[1][1]*mm.m[1][1]+mm.m[1][2]*mm.m[1][2]),
+                    (double)sqrtf(mm.m[2][0]*mm.m[2][0]+mm.m[2][1]*mm.m[2][1]+mm.m[2][2]*mm.m[2][2]),
+                    (double)mm.m[0][3], (double)mm.m[1][3], (double)mm.m[2][3]); }
+        if (mo > g_mat_max) g_mat_max = mo;
+        if (big > g_mat_bigt) { g_mat_bigt = big; g_mat_bigi = mo; }
+        if (mm.m[0][0] == 0.0f && mm.m[0][1] == 0.0f && mm.m[0][2] == 0.0f
+         && mm.m[1][0] == 0.0f && mm.m[1][1] == 0.0f && mm.m[1][2] == 0.0f)
+            g_mat_zero++;
+        cur = mat_mul(m, &mm);
     }
 
     follow(rd32le(node + 7 * 4), &cur, depth);
@@ -641,6 +678,8 @@ static int clip_near(const float v[3][5], float out[4][5])
     return n;
 }
 
+static unsigned g_cull_back, g_cull_near, g_cull_degen, g_cull_off;
+
 static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                    const float L[3], float intensity)
 {
@@ -662,6 +701,30 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
      * brightness, byte-identical, while the scene underneath it changed
      * every field. */
     unsigned t;
+
+    /* Where the geometry actually is, in view space. A scene that comes
+     * out empty is usually not a rasteriser problem: it is geometry that
+     * never reaches the screen, and the bounds say so in one line. */
+    if (getenv("M3_REAL3D_STATS") && g_ntris) {
+        float lo[3], hi[3];
+        unsigned i, k, behind = 0;
+        for (k = 0; k < 3; k++) { lo[k] = 1e30f; hi[k] = -1e30f; }
+        for (i = 0; i < g_ntris; i++) {
+            unsigned j;
+            for (j = 0; j < 3; j++) {
+                for (k = 0; k < 3; k++) {
+                    float v = g_tris[i].v[j][k];
+                    if (v < lo[k]) lo[k] = v;
+                    if (v > hi[k]) hi[k] = v;
+                }
+                if (g_tris[i].v[j][2] <= 0.0f) behind++;
+            }
+        }
+        fprintf(stderr, "[real3d]     view bounds x %.0f..%.0f  y %.0f..%.0f"
+                        "  z %.0f..%.0f  %u/%u verts at z<=0\n",
+                lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], behind, g_ntris * 3u);
+        g_cull_back = g_cull_near = g_cull_degen = g_cull_off = 0;
+    }
 
     for (t = 0; t < g_ntris; t++) {
         const tri_t *tr = &g_tris[t];
@@ -698,7 +761,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
             float cy = (tr->v[0][1] + tr->v[1][1] + tr->v[2][1]) / 3.0f;
             float cz = (tr->v[0][2] + tr->v[1][2] + tr->v[2][2]) / 3.0f;
             if (tr->n[0]*cx + tr->n[1]*cy + tr->n[2]*cz > 0.0f)
-                continue;
+                { g_cull_back++; continue; }
         }
 
         /* Cut against the near plane rather than dropping the triangle.
@@ -712,7 +775,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
             src[k][3] = tr->uv[k][0]; src[k][4] = tr->uv[k][1];
         }
         nclip = clip_near(src, clipped);
-        if (nclip < 3) continue;
+        if (nclip < 3) { g_cull_near++; continue; }
 
         for (fan = 1; fan + 1 < nclip; fan++) {
             const float *cv[3];
@@ -734,7 +797,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
 
         d = (p[1][1]-p[2][1])*(p[0][0]-p[2][0])
           + (p[2][0]-p[1][0])*(p[0][1]-p[2][1]);
-        if (d > -1e-9 && d < 1e-9) continue;
+        if (d > -1e-9 && d < 1e-9) { g_cull_degen++; continue; }
 
         /* Flat shade as the fallback, for a polygon whose vertex normals
          * are degenerate. One-sided now that backfaces are culled: with the
@@ -775,6 +838,29 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
         if (y0 < 0) y0 = 0;
         if (x1 > fw - 1) x1 = fw - 1;
         if (y1 > fh - 1) y1 = fh - 1;
+        if (x1 < x0 || y1 < y0) { g_cull_off++; continue; }
+
+        /* M3_TRI_MAX=n: drop any triangle whose screen bounding box is
+         * bigger than n pixels, and say what it was. A scene that comes
+         * out as two flat blocks is a scene with two polygons in front
+         * of it; this is how you find out which two. */
+        {
+            static long cap = -2;
+            long area = (long)(x1 - x0 + 1) * (long)(y1 - y0 + 1);
+            if (cap == -2) { const char *e = getenv("M3_TRI_MAX");
+                             cap = e ? strtol(e, NULL, 0) : -1; }
+            if (cap > 0 && area > cap) {
+                static unsigned told;
+                if (told++ < 24)
+                    fprintf(stderr, "[real3d] huge tri %ld px  rgb %02X%02X%02X"
+                            "  tex %d lum %d  z %.1f %.1f %.1f"
+                            "  v0 %.0f,%.0f,%.0f\n",
+                            area, tr->r, tr->g, tr->b, tr->textured,
+                            tr->luminous, p[0][2], p[1][2], p[2][2],
+                            tr->v[0][0], tr->v[0][1], tr->v[0][2]);
+                continue;
+            }
+        }
 
         for (y = y0; y <= y1; y++) {
             for (x = x0; x <= x1; x++) {
@@ -895,6 +981,11 @@ void real3d_render(void)
     }
 
     g_drawn = 0;
+    { static int probed; if (!probed) { probed = 1;
+        { const char *e = getenv("M3_NODE_DUMP");
+          m3_node_dump = e ? (int)strtol(e, NULL, 0) : 0;
+          e = getenv("M3_NODE_FROM");
+          m3_node_from = e ? strtoull(e, NULL, 0) : 0; } } }
     vpaddr = 0x800000u;
     for (guard = 0; guard < 16u && vpaddr; guard++) {
         const uint8_t *vp = cull_at(vpaddr, 0x20);
@@ -945,16 +1036,63 @@ void real3d_render(void)
          * was taken for confirmation. On a frame that actually has a scene
          * in it, applying matrix 0 pushes the whole thing off the left of
          * the screen, and leaving it out gives rocks and a cliff face. The
-         * node matrices already carry the geometry into view space. */
+         * node matrices already carry the geometry into view space.
+         *
+         * M3_CAM0 puts it back for comparison: 1 as stored, 2 transposed.
+         * The scene a round builds is almost entirely off screen, which
+         * is what a missing axis permutation at the root of the matrix
+         * stack looks like. */
         cam = IDENT;
+        {
+            static long which = -2;
+            if (which == -2) { const char *e = getenv("M3_CAM0");
+                               which = e ? strtol(e, NULL, 0) : 0; }
+            if (which == 1) mat_load(g_matbase, 0, &cam);
+            else if (which == 2) {
+                mat_t t; int r, c;
+                if (mat_load(g_matbase, 0, &t)) {
+                    for (r = 0; r < 3; r++)
+                        for (c = 0; c < 3; c++) cam.m[r][c] = t.m[c][r];
+                    for (r = 0; r < 3; r++) cam.m[r][3] = t.m[r][3];
+                }
+            }
+        }
 
         intensity = f32_of(rd32le(vp + 0x07 * 4));
         if (!(intensity >= 0.0f)) intensity = 1.0f;   /* NaN guard */
         if (intensity > 2.0f) intensity = 2.0f;
 
         g_ntris = 0;
-        descend(rd32le(vp + 0x02 * 4) & 0x00FFFFFFu, &cam, 0);
-        raster(fb, fw, fh, sx, sy, light, intensity);
+        {
+            /* M3_VP=n draws only viewport n. Three of them share the
+             * screen in a round and each gets its own depth buffer, so
+             * whichever is walked last wins wherever it draws -- and
+             * the only way to tell which one is painting over the
+             * scene is to draw them one at a time. */
+            static long only = -2;
+            unsigned before = g_drawn;
+            if (only == -2) { const char *e = getenv("M3_VP");
+                              only = e ? strtol(e, NULL, 0) : -1; }
+            if (only < 0 || (long)guard == only) {
+                descend(rd32le(vp + 0x02 * 4) & 0x00FFFFFFu, &cam, 0);
+                raster(fb, fw, fh, sx, sy, light, intensity);
+            }
+            if (getenv("M3_REAL3D_STATS"))
+                fprintf(stderr, "[real3d]   vp%u @%06X rect %08X/%08X"
+                                "  %u tris  %u px  back %u near %u"
+                                "  degen %u off %u\n",
+                        guard, vpaddr & 0x00FFFFFFu,
+                        rd32le(vp + 0x14 * 4), rd32le(vp + 0x1A * 4),
+                        g_ntris, g_drawn - before,
+                        g_cull_back, g_cull_near, g_cull_degen, g_cull_off);
+            if (getenv("M3_REAL3D_STATS"))
+                fprintf(stderr, "[real3d]     matrices: %u loads, max index"
+                                " %u, %u all-zero, biggest |t| %.0f at %u\n",
+                        g_mat_loads, g_mat_max, g_mat_zero, g_mat_bigt,
+                        g_mat_bigi);
+            g_mat_loads = g_mat_max = g_mat_zero = g_mat_bigi = 0;
+            g_mat_bigt = 0.0f;
+        }
         total += g_ntris;
 
         next = rd32le(vp + 0x01 * 4) & 0x00FFFFFFu;

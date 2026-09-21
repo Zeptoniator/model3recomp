@@ -913,7 +913,8 @@ static void dev_write(uint32_t a, uint32_t v, unsigned size)
  * like a byte nothing ever wrote. */
 #ifdef M3_WATCH
 void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size);
-#define BUS_WATCH(a, v, n)                                                  do { if ((uint32_t)(M3_WATCH) - (uint32_t)(a) < (uint32_t)(n))                   m3_watch_hit((uint32_t)(a), (uint32_t)(v), (n)); } while (0)
+extern uint32_t m3_watch_addr;
+#define BUS_WATCH(a, v, n)                                                  do { if (m3_watch_addr - (uint32_t)(a) < (uint32_t)(n))                          m3_watch_hit((uint32_t)(a), (uint32_t)(v), (n)); } while (0)
 #else
 #define BUS_WATCH(a, v, n) ((void)0)
 #endif
