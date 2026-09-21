@@ -35,6 +35,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rather than none.
 
 ### Fixed
+- **Tilemap layers can be eight bits a pixel, and half of them are.** The
+  renderer decoded everything as four, which turns a photograph into
+  stripes. Register 0x20 carries a nibble of depth flags -- set means
+  four-bit -- and another nibble of priority flags saying whether each layer
+  is drawn in front of the 3D or behind it. With both read, attract mode has
+  its skies and the high score table has the Jurassic Park logo behind it.
+- **Layer enable is bit 31 of each layer's scroll register**, not a field in
+  register 0x20. The old reading was fitted to four observed values and was
+  a coincidence.
 - **Fields are paced by guest work, not the wall clock.** `field_due()`
   asked the platform layer for the time; headless that returns `m3_work` and
   was right by accident, but against SDL it returns real microseconds, so

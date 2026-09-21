@@ -52,36 +52,51 @@ void tilegen_enable_layer(int layer, int on)
         g_enable_layer[layer] = on;
 }
 
-/* A layer the guest has switched off.
- *
- * The tilegen's registers are on the PCI side, so a word read back here is
+/* The tilegen's registers are on the PCI side, so a word read back here is
  * reversed from the way the guest stored it -- 0x7F010000 written is 0x17F
- * seen, which is 383, the last scanline of a 384-line display. That is what
- * fixes the byte order; the rest of this follows from it.
- *
- * Reversed, register 0x20 carries four enable bits at bit 9. That position is
- * derived, not documented: across a whole attract cycle the register takes
- * exactly four values, layer 0 is displayed under all of them and layer 2
- * under none, and bit 9 is the only base for four consecutive bits where
- * layer 0's is always set and layer 2's never is.
- *
- * It is worth being clear about how weak that is. The field does not change
- * once during the run, so this is fitted to a single observation -- "layers 0
- * and 3, always" -- and any game state that switches a layer on will either
- * confirm the position or move it. What it is not is a guess: every other
- * position is ruled out by the values the register actually takes.
- *
- * Getting it wrong is not subtle, which is the one piece of luck here. Layer
- * 2 spends attract mode holding a solid full-screen rectangle -- one tile of
- * flat colour, repeated 2492 times -- and a renderer that draws it paints
- * that rectangle over the entire picture.
- */
+ * seen, which is 383, the last scanline of a 384-line display. */
+static uint32_t reg(unsigned idx)
+{
+    uint32_t v = bus_tilegen_regs()[idx / 4];
+    return ((v & 0xFFu) << 24) | ((v & 0xFF00u) << 8) |
+           ((v >> 8) & 0xFF00u) | ((v >> 24) & 0xFFu);
+}
+
+/* A layer is off when the top bit of its scroll register is clear. */
 static int layer_enabled(int layer)
 {
-    uint32_t r20 = bus_tilegen_regs()[0x20 / 4];
-    r20 = ((r20 & 0xFFu) << 24) | ((r20 & 0xFF00u) << 8) |
-          ((r20 >> 8) & 0xFF00u) | ((r20 >> 24) & 0xFFu);
-    return (r20 >> (9 + layer)) & 1u;
+    return (reg(0x60u + (unsigned)layer * 4u) >> 31) & 1u;
+}
+
+/* And four bits of register 0x20 say how deep each layer's pixels are: set
+ * means four bits per pixel, clear means eight.
+ *
+ * This was derived wrongly once, as an enable rather than a depth, from a
+ * register that takes only four values across a whole attract cycle. The
+ * fit was unique and it was still wrong, because the thing it was fitted to
+ * -- "layer 0 draws and layer 2 does not" -- has a different cause. What
+ * settles it is that the values agree with what the screens plainly are:
+ * 0xF300 during the boot report says all four layers are four-bit, and the
+ * report is text; 0x3300 during attract says layers 0 and 1 are four-bit
+ * and 2 and 3 are eight, and that is text over a photograph.
+ */
+static int layer_4bpp(int layer)
+{
+    return (reg(0x20) >> (8 + layer)) & 1u;
+}
+
+/* And four more say whether the layer sits in front of the 3D or behind it.
+ *
+ * These two fields share a byte and were conflated at first, and then
+ * swapped, because through most of attract mode both nibbles read 3 and
+ * either assignment explains the picture. What separates them is 0xF300,
+ * which the guest sets while a photographic sky is on screen: the low
+ * nibble is 3, so layers 2 and 3 are eight-bit, and they have to be, or
+ * the sky comes out as stripes. The high nibble is F, so everything is in
+ * front of the 3D, which costs nothing on a screen with no 3D on it. */
+static int layer_above_3d(int layer)
+{
+    return (reg(0x20) >> (12 + layer)) & 1u;
 }
 
 /* A name-table entry. Two of them share each 32-bit word, and the whole word
@@ -138,11 +153,12 @@ static uint32_t palette_argb(const uint8_t *v, unsigned index, int *transparent)
  */
 static void draw_tile(uint32_t *fb, int fbw, int fbh,
                       const uint8_t *v, uint32_t pattern,
-                      unsigned pal_base, int px, int py)
+                      unsigned pal_base, int px, int py, int four_bit)
 {
     int row, col;
+    uint32_t span = four_bit ? TILE_BYTES : TILE_BYTES * 2u;
 
-    if (pattern + TILE_BYTES > VRAM_NAME_BASE)
+    if (pattern + span > VRAM_NAME_BASE)
         return;
 
     for (row = 0; row < TILE; row++) {
@@ -157,8 +173,17 @@ static void draw_tile(uint32_t *fb, int fbw, int fbh,
             int transparent;
             if (x < 0 || x >= fbw)
                 continue;
-            byte = v[pattern + (uint32_t)row * 4u + (uint32_t)(3 - (col >> 1))];
-            idx = (col & 1) ? (byte & 0x0Fu) : (byte >> 4);
+            if (four_bit) {
+                byte = v[pattern + (uint32_t)row * 4u
+                                 + (uint32_t)(3 - (col >> 1))];
+                idx = (col & 1) ? (byte & 0x0Fu) : (byte >> 4);
+            } else {
+                /* Eight bits a pixel: the tile is twice as long and the
+                 * pixel is the whole byte. The byte order inside each
+                 * 32-bit word is reversed, same as the 4bpp case. */
+                byte = v[pattern + (uint32_t)row * 8u + (uint32_t)(col ^ 3)];
+                idx = byte;
+            }
             argb = palette_argb(v, pal_base + idx, &transparent);
             if (transparent)
                 continue;
@@ -197,7 +222,7 @@ static void dump_state(const uint8_t *v)
 }
 #endif
 
-void tilegen_render(void)
+void tilegen_render_pass(int above)
 {
     int fbw = 0, fbh = 0;
     uint32_t *fb = platform_framebuffer(&fbw, &fbh);
@@ -244,12 +269,30 @@ void tilegen_render(void)
     /* Back to front. Transparency comes from the palette rather than from
      * "index 0 on any layer but the bottom", so the bottom layer is not a
      * special case and a screen nothing wrote to stays black. */
+    if (getenv("M3_TILEGEN_REGS")) {
+        static uint32_t last = 0xFFFFFFFFu;
+        const uint32_t *rg = bus_tilegen_regs();
+        if (rg[0x20/4] != last) {
+            last = rg[0x20/4];
+            fprintf(stderr, "[tilegen] field %llu r20=%08X (swapped %08X)\n",
+                    (unsigned long long)model3recomp_frame_count(),
+                    rg[0x20/4],
+                    ((rg[0x20/4] & 0xFFu) << 24) | ((rg[0x20/4] & 0xFF00u) << 8) |
+                    ((rg[0x20/4] >> 8) & 0xFF00u) | ((rg[0x20/4] >> 24) & 0xFFu));
+            fflush(stderr);
+        }
+    }
+
     for (layer = LAYERS - 1; layer >= 0; layer--) {
         uint32_t nt = VRAM_NAME_BASE + (uint32_t)layer * LAYER_STRIDE;
         int ty, tx;
+        int four_bit;
 
         if (!g_enable_layer[layer] || !layer_enabled(layer))
             continue;
+        if (layer_above_3d(layer) != (above != 0))
+            continue;
+        four_bit = layer_4bpp(layer);
 
         for (ty = 0; ty * TILE < fbh; ty++) {
             for (tx = 0; tx * TILE < fbw; tx++) {
@@ -267,10 +310,21 @@ void tilegen_render(void)
                  * to check a decode against: its entries all carry palette
                  * 0x20, so a decode that loses the field entirely still draws
                  * the report in one flat colour that looks deliberate. */
-                tile = ((uint32_t)(e & 0x3FFFu) << 1) | (uint32_t)((e >> 15) & 1u);
-                pattern = tile * TILE_BYTES;
-                pal = e & 0x7FF0u;
-                draw_tile(fb, fbw, fbh, v, pattern, pal, tx * TILE, ty * TILE);
+                if (four_bit) {
+                    tile = ((uint32_t)(e & 0x3FFFu) << 1)
+                         | (uint32_t)((e >> 15) & 1u);
+                    pattern = tile * TILE_BYTES;
+                    pal = e & 0x7FF0u;
+                } else {
+                    /* Eight-bit: the whole low fifteen bits are the pattern
+                     * number and a tile is 64 bytes, so the byte offset
+                     * comes out the same. The palette is the top seven of
+                     * those bits and the pixel supplies the low eight. */
+                    pattern = (uint32_t)(e & 0x7FFFu) * (TILE_BYTES * 2u);
+                    pal = e & 0x7F00u;
+                }
+                draw_tile(fb, fbw, fbh, v, pattern, pal, tx * TILE, ty * TILE,
+                          four_bit);
             }
         }
     }

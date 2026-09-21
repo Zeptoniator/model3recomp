@@ -91,12 +91,18 @@ void model3recomp_end_frame(void)
         fprintf(stderr, "[model3recomp] field %llu\n",
                 (unsigned long long)g_frames);
 
-    /* The 3D scene first -- it clears the buffer -- then the tilemaps over
-     * it. Model 3 can put a tilemap layer behind the 3D as well as in front
-     * of it; this draws them all in front, which is right for attract mode
-     * and for any screen whose 2D is text. */
+    /* Back to front: the tilemap layers the guest has put behind the 3D,
+     * then the 3D, then the ones it has put in front. Which is which is a
+     * field in the tilegen's register 0x20, and until it was read the sky
+     * was drawn over the dinosaur. */
+    {
+        int fw = 0, fh = 0;
+        uint32_t *fb = platform_framebuffer(&fw, &fh);
+        if (fb) memset(fb, 0, (size_t)fw * (size_t)fh * sizeof(uint32_t));
+    }
+    tilegen_render_pass(0);
     real3d_render();
-    tilegen_render();
+    tilegen_render_pass(1);
     platform_present();
     if (g_frame_hook)
         g_frame_hook();

@@ -880,7 +880,8 @@ void real3d_render(void)
 
     flush_texture_fifo();
 
-    memset(fb, 0, (size_t)fw * (size_t)fh * sizeof(uint32_t));
+    /* No clear: the tilemap layers the guest put behind the 3D have
+     * already been drawn into this buffer. */
 
     if (g_zw != fw || g_zh != fh) {
         free(g_zbuf);

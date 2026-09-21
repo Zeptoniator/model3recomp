@@ -11,7 +11,9 @@
 extern "C" {
 #endif
 
-void tilegen_render(void);
+/* One priority pass: the layers the guest has put behind the 3D, or the
+ * ones it has put in front. */
+void tilegen_render_pass(int above);
 
 /* For bring-up: isolate a layer when working out which one holds what. */
 void tilegen_enable_layer(int layer, int on);
