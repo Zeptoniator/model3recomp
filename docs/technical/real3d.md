@@ -424,3 +424,50 @@ faithfully.
 Open question, and the next thing to look at: what the game inverts, and
 why the two vectors it builds the camera basis from are parallel during a
 round and not during attract.
+
+### Where it goes wrong: the overlay scale is in the camera matrix
+
+Two more measurements narrow it further.
+
+The routine the collapsed matrix comes out of, `0x0010E9F8`, is a 3x3
+Gauss-Jordan inverse with partial pivoting, and **it is computing the right
+answer**. Feeding its input through an independent inverse gives the output
+it produced, to five figures:
+
+    input   -12987     82.643   -1.5995e5      det 1.06e9
+             3091     -4509.9    38073        (entries ~1e5, so a
+            14767      1016.6    1.8189e5      well-conditioned matrix
+                                               would have det ~1e15)
+
+    inverse -0.8113   -0.1678   -0.6783    <- rows 0 and 2 parallel
+             1.89e-06 -2.11e-04  4.59e-05     to one part in 1e4
+             0.0659    0.0136    0.0551
+
+So the inverse is fine and its input is already nearly singular. That input
+is the camera's own matrix, stored in the camera object at RAM `0x0010616C`
+(`0x1A616C`), and its row magnitudes give it away:
+
+    |rows| = 1.99e4   4624   2.45e5
+                      68^2   496^2
+
+496 and 68 are the screen-space scales the 2D overlay matrices carry, and
+applying them twice is normal -- attract does it too, and its matrix 394 has
+|rows| 2.46e5, 2.7e3, 1 for exactly that reason. What is not normal is that
+the scale is still in the current matrix when the camera matrix is built.
+In attract, matrix 393 is the overlay (496, 52, 1), 394 is the overlay
+scaled again, and 395 onwards are orthonormal -- the matrix is reset in
+between. In a round it never is: the identity load at `0x0010E9B4` runs
+three times a field in attract and once in a round, and `matrix_set`
+(`0x0010EBB8`, which copies a saved matrix into the current one instead)
+runs four times in a round and not at all in attract.
+
+The camera position itself is worth recording. `M3_FN_ARGS` on the inverse
+prints it, and it jumps between two fields:
+
+    field 4282   -928.97    1048.66    -65.50
+    field 4283    2.276e6  -4936.41     2.154e7
+    field 4284    2.279e6  -4751.45     2.157e7   (+3185, +185, +3015 a field)
+
+After the jump it moves at a constant velocity, which is a camera following
+a path. Whether the jump is the stage-one start position or the same scale
+leaking in has not been established.
