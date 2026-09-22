@@ -113,6 +113,7 @@ static int g_tex_all;
  */
 static int g_textures;
 static float g_ambient = 0.20f;
+static int   g_ambient_forced;
 static int g_light_flip;
 static uint32_t g_scene_hash;
 static uint32_t g_fb_hash;
@@ -966,7 +967,7 @@ void real3d_render(void)
         g_textures = getenv("M3_NO_TEXTURES") == NULL;
         g_light_flip = getenv("M3_LIGHT_FLIP") != NULL;
         e = getenv("M3_AMBIENT");
-        if (e) g_ambient = (float)atof(e);
+        if (e) { g_ambient = (float)atof(e); g_ambient_forced = 1; }
         g_tris = (tri_t *)malloc(sizeof(tri_t) * MAX_TRIS);
         g_sheet = (uint16_t *)calloc(TEX_W * TEX_H, sizeof(uint16_t));
         g_sheet_set = (uint8_t *)calloc(TEX_W * TEX_H, 1);
@@ -1021,12 +1022,26 @@ void real3d_render(void)
         sx = (fw * 0.5f) / tanf(hf);
         sy = (fh * 0.5f) / tanf(vf);
 
+        /* Words 0x04..0x06 are the sun vector in that order. Supermodel
+         * takes it as (w5, w6, w4), and both readings are unit vectors in
+         * every scene dumped, so only a lit picture tells them apart: on
+         * the jungle floor this order lights the tree trunks and the
+         * signpost, and the other leaves them flat black. */
         light[0] = f32_of(rd32le(vp + 0x04 * 4));
         light[1] = f32_of(rd32le(vp + 0x05 * 4));
         light[2] = f32_of(rd32le(vp + 0x06 * 4));
         if (g_light_flip) { light[0] = -light[0];
             light[1] = -light[1]; light[2] = -light[2]; }
         g_vp07 = f32_of(rd32le(vp + 0x07 * 4));
+
+        /* Ambient comes from the scene, not from a constant. Word 0x24
+         * bits 8..15 over 255: this game writes 0x5A, so 0.353, where
+         * the invented constant here was 0.20 and left the jungle floor
+         * black. M3_AMBIENT still overrides, for comparing. */
+        if (!g_ambient_forced) {
+            unsigned a24 = (rd32le(vp + 0x24 * 4) >> 8) & 0xFFu;
+            if (a24) g_ambient = (float)a24 / 255.0f;
+        }
         if (light[0] == 0.0f && light[1] == 0.0f && light[2] == 0.0f) {
             light[0] = 0.3f; light[1] = 0.5f; light[2] = -0.81f;
         }

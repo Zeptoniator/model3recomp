@@ -298,6 +298,13 @@ void tilegen_render_pass(int above)
                     rg[0x20/4],
                     ((rg[0x20/4] & 0xFFu) << 24) | ((rg[0x20/4] & 0xFF00u) << 8) |
                     ((rg[0x20/4] >> 8) & 0xFF00u) | ((rg[0x20/4] >> 24) & 0xFFu));
+            { int L;
+              for (L = 0; L < LAYERS; L++)
+                  fprintf(stderr, "          L%d scroll %08X  enabled %d"
+                                  "  4bpp %d  above3d %d\n",
+                          L, reg(0x60u + (unsigned)L * 4u),
+                          layer_enabled(L), layer_4bpp(L),
+                          layer_above_3d(L)); }
             fflush(stderr);
         }
     }
