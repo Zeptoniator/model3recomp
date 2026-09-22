@@ -60,8 +60,7 @@
 #define MAX_DEPTH  24
 #define AMBIENT    g_ambient
 
-/* The vertex fixed-point scale: the 24-bit coordinate field over 4096,
- * which is twelve fractional bits and twelve integer ones.
+/* The vertex fixed-point scale: the 24-bit coordinate field over 2048.
  *
  * It was 256 for a long time, on a check that looked sound: a frame of
  * attract mode resolved into rocks and a cliff face at 1/256 and into
@@ -71,10 +70,18 @@
  * one's scale. A wrong scale in the matrices and a wrong scale here
  * cancelled, and the frame looked right.
  *
- * With the push fixed both scenes agree on 4096, and both now have a
- * subject in them: attract is a textured T-Rex roaring in the rain, and a
- * round is a jungle floor with trees, a horizon and figures in the
- * distance. At 1/1024 the same round is one black box filling the screen.
+ * With the push fixed the scale could be measured at all, and "the frame
+ * looks like a scene" put it at 4096. That is a weak test: a scene looks
+ * plausible over a wide range, and the range is wide because everything
+ * in it scales together.
+ *
+ * A model either joins up or it does not, and that is a sharp test. Only
+ * the vertices scale here -- the node translations that place a model's
+ * parts are floats in world units and do not -- so at the wrong scale a
+ * jointed model comes apart. The human figure and the jeep beside it on
+ * the jungle floor are whole at 2048, spaced out at 4096 and scattered
+ * into confetti at 8192. The T-Rex in attract survives any of them
+ * because it is one rigid model, which is why it never showed the fault.
  *
  * Supermodel takes a scale per model rather than a constant, so this may
  * yet turn out to be the common case rather than the rule.
@@ -95,7 +102,7 @@
  * a wrong scale -- it just draws something -- so the only thing that settles
  * it is a frame with a recognisable subject in it. M3_VERTEX_SCALE overrides.
  */
-#define VERTEX_SCALE_DEFAULT 4096.0f
+#define VERTEX_SCALE_DEFAULT 2048.0f
 
 static float g_vertex_scale = VERTEX_SCALE_DEFAULT;
 static int g_tex_size_mode;

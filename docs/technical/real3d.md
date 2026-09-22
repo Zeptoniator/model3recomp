@@ -559,3 +559,32 @@ Ruled out, each by measurement:
 Also open, and not yet looked at: the human figures in a round are
 fragmented -- torso, arms and legs drawn in the right colours but not joined
 up, with loose pieces beside them.
+
+### The vertex scale is 2048, and a jointed model is what proves it
+
+"The frame looks like a scene" put the scale at 4096. That is a weak test:
+a scene looks plausible over a wide range, because everything in it scales
+together.
+
+A model either joins up or it does not. Only the vertices scale -- the node
+translations that place a model's parts are floats in world units and do
+not -- so at the wrong scale a jointed model comes apart while the world
+around it stays put. On the jungle floor:
+
+    1024   camera inside the geometry, one flat wash
+    2048   a man in a blue shirt standing beside a green jeep, whole
+    4096   the same man in pieces, limbs spaced apart
+    8192   confetti
+
+The T-Rex in attract survives any of them, which is why it never showed the
+fault: it is one rigid model, so the scale only changes how big it looks.
+That is worth remembering when picking a subject to check against -- a
+single-piece model cannot tell you about scale, and a green jeep cannot tell
+you about red and blue.
+
+### The attract scene really is that dark
+
+Its viewport asks for an ambient of 10/255, which is 0.039, against 0.353
+for the jungle, and a sun intensity of 0.913. Flipping the sun vector makes
+it darker still -- mean frame brightness 2.0 against 0.6 -- so the direction
+is right and the night scene is lit the way the game asks.
