@@ -19,6 +19,10 @@ extern "C" {
 /* Draw the scene into the framebuffer. Clears it; the tilemaps go on top. */
 void real3d_render(void);
 
+/* The VROM texture port at 0x90000000: three registers, and the write to
+ * the last one loads a texture that is already in VROM. */
+void real3d_vrom_texture(uint32_t addr, uint32_t header, uint32_t ctrl);
+
 /* Triangles submitted by the last frame, for the harness. */
 unsigned real3d_last_tri_count(void);
 

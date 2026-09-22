@@ -588,3 +588,34 @@ Its viewport asks for an ambient of 10/255, which is 0.039, against 0.353
 for the jungle, and a sun intensity of 0.913. Flipping the sun vector makes
 it darker still -- mean frame brightness 2.0 against 0.6 -- so the direction
 is right and the night scene is lit the way the game asks.
+
+### The upper half of texture memory comes from VROM, not the FIFO
+
+Every terrain and tree polygon in a round asked for texture page 1, and no
+FIFO upload in a whole boot ever set the page bit. Six readings of the page
+and origin fields were tried and each fixed one scene by breaking the other,
+because the premise was wrong: **page 1 is not filled by the FIFO at all.**
+
+`0x90000000..0x9000000B` is the Real3D VROM texture port. The game writes
+three registers there -- an address, a header and a control word -- and the
+chip fetches a texture that is already in VROM rather than having its pixels
+pushed through the FIFO. That is how a stage's scenery is loaded, and it is
+why the FIFO stops growing at field 1500 and never moves again.
+
+Three things hid it:
+
+  * The SCRIPTS DMA guard did not map `0x90000000`, so the twelve-byte
+    transfers were rejected as out of range before anything saw them.
+  * The port needs real storage. The guest writes it a byte at a time, a
+    byte store is a read-modify-write, and a port that reads back as zero
+    keeps only the last byte of each register.
+  * The address counts 16-bit texels and the port is written byte-reversed
+    like every other Real3D register. Read as bytes, or little-endian, the
+    sheet fills with noise; read this way it fills with planks, gravel,
+    foliage and rock, and the jungle floor has a floor.
+
+    248727 texels from the sheet, 0 never uploaded (it was 240850).
+
+Still wrong, and now the obvious next thing: the textures repeat many times
+across each surface, so the size the polygon asks for does not match the
+size that was uploaded.

@@ -81,6 +81,11 @@ static int mapped(uint32_t a, uint32_t len)
      * in range by definition -- the address never advances. */
     if ((a & 0xFF000000u) == M3_R3D_TEXFIFO) return 1;
     if (a >= 0x9C000000u && end <= 0x9D000000u) return 1;   /* R3D texture */
+    /* 0x90000000..0x9000000B: the VROM texture port. Twelve bytes at a
+     * time, and rejecting them is why a stage's scenery has no textures:
+     * the game names a texture already in VROM here instead of pushing
+     * its pixels through the FIFO. */
+    if (a >= 0x90000000u && end <= 0x90000010u) return 1;  /* VROM tex   */
     return 0;
 }
 

@@ -265,9 +265,18 @@ static const unsigned char DETILE[64] = {
 };
 
 static uint16_t *g_sheet;
+/* The size of whatever was uploaded to each 32x32 slot of the sheet.
+ * M3_TEX_WRAP_UPLOAD=1 wraps by this instead of by the size in the
+ * polygon header, which is a way of asking whether the header size is
+ * the only thing still wrong. */
+static uint16_t g_slot_w[64 * 64], g_slot_h[64 * 64];
 static uint8_t  *g_sheet_set;          /* TEX_W * TEX_H texels */
 static size_t    g_fifo_seen;      /* how much of the FIFO has been drained */
 static unsigned  g_tex_uploads;
+
+/* Set while a VROM texture is being loaded: that source is big-endian,
+ * the FIFO is not. */
+static int g_src_be;
 
 static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
 {
@@ -277,14 +286,12 @@ static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
      * with w*h*2 on every accepted entry, which is what pins the two size
      * exponents.
      *
-     * The page is the open question. Bit 20 is never set in a whole boot
-     * of this game, so nothing is ever uploaded to the upper half of
-     * texture memory, and every polygon in a round asks for it. Bit 6
-     * (set in 460 of 464 uploads), bit 5 (set in none of the early ones
-     * and 200 of the late ones) and reading y as six bits instead of
-     * five-plus-a-page were all tried: bit 6 changes nothing, bit 5 is
-     * worse, and six bits of y fixes the round and breaks attract, which
-     * finds every one of its texels today. */
+     * The page is bit 20, and the reason it is never set in a FIFO
+     * header is that the FIFO only ever fills the lower half. The upper
+     * half comes from the VROM texture port; see real3d_vrom_texture().
+     * Before that was found, bit 6 (set in 460 of 464 FIFO uploads), bit
+     * 5, and reading y as six bits instead of five-plus-a-page were all
+     * tried, and each fixed one scene by breaking the other. */
     uint32_t x = 32u * (header & 0x3Fu);
     uint32_t y = 32u * ((header >> 7) & 0x1Fu);
     uint32_t page = (header >> 20) & 1u;
@@ -312,7 +319,9 @@ static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
                     uint16_t t;
                     if (sixteen) {
                         if ((si + 1) * 2 > avail) continue;
-                        t = (uint16_t)(src[si*2] | (src[si*2 + 1] << 8));
+                        t = g_src_be
+                          ? (uint16_t)((src[si*2] << 8) | src[si*2 + 1])
+                          : (uint16_t)(src[si*2] | (src[si*2 + 1] << 8));
                     } else {
                         if (si >= avail) continue;
                         /* 8-bit: the byte is an intensity until the palette
@@ -332,7 +341,52 @@ static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
             off += 64;
         }
     }
+    {
+        unsigned sx = x / 32u, sy = y / 32u, a1, b1;
+        for (b1 = 0; b1 < h / 32u && sy + b1 < 64u; b1++)
+            for (a1 = 0; a1 < w / 32u && sx + a1 < 64u; a1++) {
+                g_slot_w[(sy + b1) * 64u + sx + a1] = (uint16_t)w;
+                g_slot_h[(sy + b1) * 64u + sx + a1] = (uint16_t)h;
+            }
+    }
     g_tex_uploads++;
+}
+
+/* The VROM texture port at 0x90000000.
+ *
+ * Three registers. The game writes an address and a header and the third
+ * write loads a texture that is already in VROM, rather than pushing its
+ * pixels through the FIFO. A stage's scenery comes this way: in a round
+ * the FIFO stops growing at field 1500 and every terrain and tree polygon
+ * then looks for a texture that was never uploaded.
+ *
+ * Which register is which is worked out from what the game writes; see
+ * M3_VROMTEX_TRACE. */
+static uint32_t bswap32_(uint32_t v)
+{
+    return ((v >> 24) & 0xFFu) | ((v >> 8) & 0xFF00u)
+         | ((v << 8) & 0xFF0000u) | ((v << 24) & 0xFF000000u);
+}
+
+void real3d_vrom_texture(uint32_t addr, uint32_t header, uint32_t ctrl)
+{
+    size_t n = 0;
+    const uint8_t *v = bus_vrom(&n);
+    /* The guest writes this port byte-reversed, the way it writes every
+     * other Real3D register, and the address counts 16-bit texels. Read
+     * as bytes, or little-endian, the sheet fills with noise; this way
+     * it fills with planks, gravel, foliage and rock. */
+    uint32_t a = bswap32_(addr), h = bswap32_(header);
+    size_t off;
+    if (getenv("M3_VROMTEX_TRACE"))
+        fprintf(stderr, "[vromtex] load addr %08X header %08X ctrl %08X\n",
+                a, h, bswap32_(ctrl));
+    if (!v) return;
+    off = (size_t)a * 2u;
+    if (off >= n) return;
+    g_src_be = 1;                  /* VROM is big-endian; the FIFO is not */
+    upload_texture(h, v + off, n - off);
+    g_src_be = 0;
 }
 
 /* Drain whatever the guest has put in the FIFO since last time. */
@@ -463,6 +517,69 @@ static void draw_model(uint32_t addr, const mat_t *m)
     }
     if (!mem) return;
 
+    /* M3_MODEL_DUMP=<n>: the first n models drawn, with where they live,
+     * how many polygons they have, the biggest raw coordinate in them and
+     * the OR and AND of every polygon header word. Two models that want
+     * different vertex scales differ in a header bit, and this is what
+     * shows which. */
+    {
+        static long cap = -2;
+        static unsigned told;
+        static uint64_t m3_model_from;
+        if (cap == -2) { const char *e = getenv("M3_MODEL_DUMP");
+                         const char *f2 = getenv("M3_NODE_FROM");
+                         m3_model_from = f2 ? strtoull(f2, NULL, 0) : 0;
+                         cap = e ? strtol(e, NULL, 0) : 0; }
+        if (cap > 0 && told < (unsigned)cap
+            && model3recomp_frame_count() >= m3_model_from) {
+            uint32_t hor[7], han[7];
+            long biggest = 0;
+            unsigned polys = 0, kk, g2;
+            size_t j2 = i;
+            for (kk = 0; kk < 7; kk++) { hor[kk] = 0; han[kk] = 0xFFFFFFFFu; }
+            for (g2 = 0; g2 < 20000u; g2++) {
+                uint32_t h2[7]; unsigned nv2, new2, q;
+                if (j2 + 28u > n) break;
+                for (kk = 0; kk < 7; kk++) h2[kk] = rd(mem + j2 + kk * 4);
+                { float nn[3]; float l2;
+                  for (kk = 0; kk < 3; kk++)
+                      nn[kk] = (float)sx24(h2[kk + 1]) / 4194304.0f;
+                  l2 = nn[0]*nn[0] + nn[1]*nn[1] + nn[2]*nn[2];
+                  if (l2 < 0.98f || l2 > 1.02f) break; }
+                for (kk = 0; kk < 7; kk++) { hor[kk] |= h2[kk]; han[kk] &= h2[kk]; }
+                nv2 = (h2[0] & 0x40u) ? 4u : 3u;
+                new2 = nv2;
+                for (kk = 0; kk < 4; kk++) if ((h2[0] >> kk) & 1u) new2--;
+                for (q = 0; q < new2; q++) {
+                    size_t o2 = j2 + 28u + (size_t)q * 16u;
+                    unsigned c2;
+                    if (o2 + 12u > n) break;
+                    for (c2 = 0; c2 < 3; c2++) {
+                        long v2 = sx24(rd(mem + o2 + c2 * 4));
+                        if (v2 < 0) v2 = -v2;
+                        if (v2 > biggest) biggest = v2;
+                    }
+                }
+                j2 += 28u + (size_t)new2 * 16u;
+                polys++;
+                if (h2[1] & 4u) break;
+            }
+            told++;
+            fprintf(stderr, "[model] @%06X %4u polys  biggest raw %8ld"
+                            "  (%.2f units at 1/%g)\n",
+                    addr, polys, biggest,
+                    (double)biggest / (double)g_vertex_scale,
+                    (double)g_vertex_scale);
+            fprintf(stderr, "          placed at %.1f %.1f %.1f\n",
+                    (double)m->m[0][3], (double)m->m[1][3],
+                    (double)m->m[2][3]);
+            fprintf(stderr, "          hdr or  %08X %08X %08X %08X %08X %08X %08X\n",
+                    hor[0], hor[1], hor[2], hor[3], hor[4], hor[5], hor[6]);
+            fprintf(stderr, "          hdr and %08X %08X %08X %08X %08X %08X %08X\n",
+                    han[0], han[1], han[2], han[3], han[4], han[5], han[6]);
+        }
+    }
+
     for (guard = 0; guard < 20000u; guard++) {
         uint32_t ph[7];
         float nrm[3], vs[4][3], vn[4][3], uv[4][2];
@@ -550,14 +667,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
         td.x    = (32u * (((ph[4] & 0x1Fu) << 1)
                           | ((ph[5] >> 7) & 1u))) & 2047u;
         td.y    = (32u * (ph[5] & 0x1Fu)) & 2047u;
-        /* M3_TEX_PAGE=0|1 forces the page. Every polygon in a round asks
-         * for page 1 and no upload in a whole boot sets the page bit, so
-         * one of the two fields is misread and this says which. */
-        { static long force = -2;
-          if (force == -2) { const char *e = getenv("M3_TEX_PAGE");
-                             force = e ? strtol(e, NULL, 0) : -1; }
-          td.page = force >= 0 ? (uint32_t)force
-                               : ((ph[4] & 0x40u) >> 6); }
+        td.page = (ph[4] & 0x40u) >> 6;
         /* Bit 16 of word 6 disables lighting for the polygon:
          * it is drawn at full brightness. */
         td.lum  = (ph[6] & 0x00010000u) != 0;
@@ -600,6 +710,7 @@ static void descend(uint32_t addr, const mat_t *m, int depth);
 int m3_node_dump;
 uint64_t m3_node_from;
 static unsigned g_mat_loads, g_mat_max, g_mat_zero, g_mat_bigi;
+static unsigned g_node_translate, g_node_matrix, g_node_neither;
 static float    g_mat_bigt;
 
 /* A pointer's top byte says what it points at: bit 24 a model, bit 26 a
@@ -657,6 +768,10 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
      * and wrong for every node that has the other, because a node with
      * the bit set still has something in its matrix field and it is not
      * a matrix index. */
+    /* How the scene places things: a node carries either a translation or
+     * a matrix, and this counts which. */
+    if (rd32le(node) & 0x10u) g_node_translate++; else if (mo) g_node_matrix++;
+    else g_node_neither++;
     if (rd32le(node) & 0x10u) {
         mat_t t = IDENT;
         t.m[0][3] = tx; t.m[1][3] = ty; t.m[2][3] = tz;
@@ -673,9 +788,12 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
           extern uint64_t m3_node_from;
           if (m3_node_dump && model3recomp_frame_count() >= m3_node_from
               && told++ < (unsigned)m3_node_dump)
-            fprintf(stderr, "[node] @%06X w0=%08X w3=%08X mo=%u"
+            fprintf(stderr, "[node] @%06X w0=%08X w1=%08X w2=%08X"
+                            " w3=%08X w9=%08X mo=%u"
                             "  |rows| %.3g %.3g %.3g  t %.4g %.4g %.4g\n",
-                    addr, rd32le(node), rd32le(node + 3 * 4), mo,
+                    addr, rd32le(node), rd32le(node + 1 * 4),
+                    rd32le(node + 2 * 4), rd32le(node + 3 * 4),
+                    rd32le(node + 9 * 4), mo,
                     (double)sqrtf(mm.m[0][0]*mm.m[0][0]+mm.m[0][1]*mm.m[0][1]+mm.m[0][2]*mm.m[0][2]),
                     (double)sqrtf(mm.m[1][0]*mm.m[1][0]+mm.m[1][1]*mm.m[1][1]+mm.m[1][2]*mm.m[1][2]),
                     (double)sqrtf(mm.m[2][0]*mm.m[2][0]+mm.m[2][1]*mm.m[2][1]+mm.m[2][2]*mm.m[2][2]),
@@ -946,6 +1064,17 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                             long ui = (long)uu, vi = (long)vv;
                             unsigned tw = tr->tw ? tr->tw : 32u;
                             unsigned th = tr->th ? tr->th : 32u;
+                            { static long useup = -2;
+                              if (useup == -2) {
+                                  const char *e = getenv("M3_TEX_WRAP_UPLOAD");
+                                  useup = e ? strtol(e, NULL, 0) : 0; }
+                              if (useup) {
+                                  unsigned s = (tr->ty / 32u) * 64u
+                                             + (tr->tx / 32u);
+                                  if (s < 64u * 64u && g_slot_w[s]) {
+                                      tw = g_slot_w[s];
+                                      th = g_slot_h[s];
+                                  } } }
                             uint32_t t;
                             ui %= (long)tw; if (ui < 0) ui += tw;
                             vi %= (long)th; if (vi < 0) vi += th;
@@ -1204,6 +1333,11 @@ void real3d_render(void)
                                 " %u, %u all-zero, biggest |t| %.0f at %u\n",
                         g_mat_loads, g_mat_max, g_mat_zero, g_mat_bigt,
                         g_mat_bigi);
+            if (getenv("M3_REAL3D_STATS"))
+                fprintf(stderr, "[real3d]     nodes: %u by translation,"
+                                "  %u by matrix,  %u with neither\n",
+                        g_node_translate, g_node_matrix, g_node_neither);
+            g_node_translate = g_node_matrix = g_node_neither = 0;
             g_mat_loads = g_mat_max = g_mat_zero = g_mat_bigi = 0;
             g_mat_bigt = 0.0f;
         }

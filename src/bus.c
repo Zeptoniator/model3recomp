@@ -10,6 +10,7 @@
  * See docs/technical/execution-model.md.
  */
 #include "model3recomp/bus.h"
+#include "model3recomp/real3d.h"
 #include "model3recomp/platform.h"
 #define M3_NL "\n"
 #include "model3recomp/irq.h"
@@ -92,6 +93,7 @@ const uint32_t *bus_tilegen_regs(void) { return g_tilegen_regs; }
  * addresses. */
 #define TEXFIFO_CAP 0x400000u
 static uint8_t *g_texfifo;
+static uint32_t g_vromtex[4];    /* the VROM texture port at 0x90000000 */
 static size_t   g_texfifo_used;
 
 /* Real3D culling and polygon RAM. Not yet consumed by a renderer, but the
@@ -415,6 +417,10 @@ static uint32_t dev_read_word(uint32_t w, int side_effects);
 static uint32_t dev_read_word(uint32_t w, int side_effects)
 {
     g_dev_reads[(w >> 16) & 0xFFu]++;
+    /* The VROM texture port reads back what was written, so a byte store
+     * assembles instead of clearing the other three. */
+    if ((w & 0xFF000000u) == 0x90000000u)
+        return g_vromtex[(w >> 2) & 3u];
     /* System controller / interrupt controller. */
     if ((w & 0xFFFFFFC0u) == M3_SYSCTL_BASE) {
         switch (w & 0x3C) {
@@ -766,6 +772,20 @@ static void dev_write_word(uint32_t w, uint32_t v)
      * it is thrown away. Count it by page, because a region the guest
      * writes megabytes to and we ignore looks exactly like a region the
      * guest never writes. */
+    /* 0x90000000..0x9000000B: the Real3D VROM texture port. The game
+     * names a texture already in VROM instead of pushing its pixels
+     * through the FIFO, which is how a stage's scenery is loaded. */
+    if ((w & 0xFF000000u) == 0x90000000u) {
+        unsigned r = (w >> 2) & 3u;
+        g_vromtex[r] = v;
+        if (getenv("M3_VROMTEX_TRACE"))
+            fprintf(stderr, "[vromtex] reg %u = %08X  (%08X %08X %08X)"
+                    M3_NL, r * 4u, v,
+                    g_vromtex[0], g_vromtex[1], g_vromtex[2]);
+        if (r == 2)
+            real3d_vrom_texture(g_vromtex[0], g_vromtex[1], g_vromtex[2]);
+        return;
+    }
     if ((w & 0xFF000000u) == 0x9C000000u) {
         if (getenv("M3_TEXPORT_TRACE"))
             fprintf(stderr, "[texport] %08X = %08X" M3_NL, w, v);
