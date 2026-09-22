@@ -264,6 +264,20 @@ static unsigned  g_tex_uploads;
 
 static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
 {
+    /* The origin and size of an upload. Dumping the sheet to a PNG shows
+     * a coherent atlas -- jeeps, Ian and Sarah, dinosaur hide, INGEN
+     * signage -- so these fields are right, and the payload length agrees
+     * with w*h*2 on every accepted entry, which is what pins the two size
+     * exponents.
+     *
+     * The page is the open question. Bit 20 is never set in a whole boot
+     * of this game, so nothing is ever uploaded to the upper half of
+     * texture memory, and every polygon in a round asks for it. Bit 6
+     * (set in 460 of 464 uploads), bit 5 (set in none of the early ones
+     * and 200 of the late ones) and reading y as six bits instead of
+     * five-plus-a-page were all tried: bit 6 changes nothing, bit 5 is
+     * worse, and six bits of y fixes the round and breaks attract, which
+     * finds every one of its texels today. */
     uint32_t x = 32u * (header & 0x3Fu);
     uint32_t y = 32u * ((header >> 7) & 0x1Fu);
     uint32_t page = (header >> 20) & 1u;
@@ -336,14 +350,6 @@ static void flush_texture_fifo(void)
         i += (size_t)words * 4u;
     }
     g_fifo_seen = used;
-    if (getenv("M3_TEX_DUMP")) {
-        static int done;
-        if (!done && g_tex_uploads > 100) {
-            FILE *f = fopen(getenv("M3_TEX_DUMP"), "wb");
-            done = 1;
-            if (f) { fwrite(g_sheet, 2, (size_t)TEX_W * TEX_H, f); fclose(f); }
-        }
-    }
     if (getenv("M3_TEX_TRACE"))
         fprintf(stderr, "[tex] fifo %u bytes, %u uploads so far%s",
                 (unsigned)used, g_tex_uploads, "\n");
@@ -365,10 +371,17 @@ static uint32_t sheet_texel(unsigned x, unsigned y, int *transparent)
     }
     if (c & 0x8000u) return 0;
     *transparent = 0;
-    /* Blue is the top field and red the bottom, the same way round as the
-     * tilemap palette. Read the other way the game's green jeep comes out
-     * purple, which is how this was settled. */
-    b = (c >> 10) & 0x1Fu; g = (c >> 5) & 0x1Fu; r = c & 0x1Fu;
+    /* Red is the top field and blue the bottom -- the opposite way round
+     * to the tilemap palette.
+     *
+     * This was settled once on the game's green jeep, which is exactly the
+     * wrong subject: swapping red and blue leaves green alone, so the jeep
+     * looks right either way. Dumping the sheet to an image and looking at
+     * it settles it in one glance -- Ian and Sarah's faces are natural
+     * skin this way round and cyanotic the other, the dinosaur hide is
+     * brown rather than blue, and the T-Rex in attract stops being a blue
+     * silhouette. Use a subject with a colour that a swap can change. */
+    r = (c >> 10) & 0x1Fu; g = (c >> 5) & 0x1Fu; b = c & 0x1Fu;
     r = (r << 3) | (r >> 2); g = (g << 3) | (g >> 2); b = (b << 3) | (b >> 2);
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
@@ -523,9 +536,21 @@ static void draw_model(uint32_t addr, const mat_t *m)
         }
         td.fmt  = (ph[6] >> 7) & 7u;
         td.on   = g_textures && (ph[6] & 0x400u) != 0;
-        td.x    = (32u * (((ph[4] & 0x1Fu) << 1) | ((ph[5] >> 7) & 1u))) & 2047u;
+        /* x is five bits of word 4 with its low bit borrowed from the top
+         * of word 5, which looks odd and is right: reading it as six
+         * contiguous bits of word 4, the way the upload header carries
+         * it, drops a round from 89678 texels found to 18841. */
+        td.x    = (32u * (((ph[4] & 0x1Fu) << 1)
+                          | ((ph[5] >> 7) & 1u))) & 2047u;
         td.y    = (32u * (ph[5] & 0x1Fu)) & 2047u;
-        td.page = (ph[4] & 0x40u) >> 6;
+        /* M3_TEX_PAGE=0|1 forces the page. Every polygon in a round asks
+         * for page 1 and no upload in a whole boot sets the page bit, so
+         * one of the two fields is misread and this says which. */
+        { static long force = -2;
+          if (force == -2) { const char *e = getenv("M3_TEX_PAGE");
+                             force = e ? strtol(e, NULL, 0) : -1; }
+          td.page = force >= 0 ? (uint32_t)force
+                               : ((ph[4] & 0x40u) >> 6); }
         /* Bit 16 of word 6 disables lighting for the polygon:
          * it is drawn at full brightness. */
         td.lum  = (ph[6] & 0x00010000u) != 0;
@@ -690,6 +715,23 @@ static int clip_near(const float v[3][5], float out[4][5])
 }
 
 static unsigned g_cull_back, g_cull_near, g_cull_degen, g_cull_off;
+static unsigned g_tex_tris, g_flat_tris, g_tex_px, g_flat_px;
+static unsigned g_texel_hit, g_texel_clear, g_texel_missing;
+/* Where the polygons that find nothing are looking. */
+enum { MISS_SLOTS = 24 };
+static struct { unsigned x, y, page, w, h, n; } g_miss[MISS_SLOTS];
+static void note_miss(const tri_t *t)
+{
+    unsigned k;
+    for (k = 0; k < MISS_SLOTS; k++) {
+        if (g_miss[k].n && (g_miss[k].x != t->tx || g_miss[k].y != t->ty
+                            || g_miss[k].page != t->page))
+            continue;
+        g_miss[k].x = t->tx; g_miss[k].y = t->ty; g_miss[k].page = t->page;
+        g_miss[k].w = t->tw; g_miss[k].h = t->th; g_miss[k].n++;
+        return;
+    }
+}
 
 static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                    const float L[3], float intensity)
@@ -850,6 +892,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
         if (x1 > fw - 1) x1 = fw - 1;
         if (y1 > fh - 1) y1 = fh - 1;
         if (x1 < x0 || y1 < y0) { g_cull_off++; continue; }
+        if (tr->textured) g_tex_tris++; else g_flat_tris++;
 
         /* M3_TRI_MAX=n: drop any triangle whose screen bounding box is
          * bigger than n pixels, and say what it was. A scene that comes
@@ -902,8 +945,9 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                             t = sheet_texel(tr->tx + (unsigned)ui,
                                             tr->ty + tr->page * 1024u
                                                    + (unsigned)vi, &tp);
-                            if (tp > 0) continue;   /* transparent texel */
-                            if (tp == 0) c = t;     /* tp < 0: never loaded */
+                            if (tp > 0) { g_texel_clear++; continue; }
+                            if (tp == 0) { c = t; g_texel_hit++; }
+                            else { g_texel_missing++; note_miss(tr); }
                         }
                     }
                     /* Gouraud: interpolate the vertex normals across the
@@ -940,6 +984,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                           | ((uint32_t)gg << 8) | (uint32_t)bb;
                     }
                     g_zbuf[o] = (float)z; fb[o] = c; g_drawn++;
+                    if (tr->textured) g_tex_px++; else g_flat_px++;
                 }
             }
         }
@@ -991,6 +1036,23 @@ void real3d_render(void)
         for (i = 0; i < nn; i++) g_zbuf[i] = 1e30f;
     }
 
+    /* M3_TEX_DUMP=<file>, M3_TEX_DUMP_AT=<field>: write the texture
+     * sheet once. It used to fire after the hundredth upload, which
+     * is during the boot, and made the sheet look as though only its
+     * first 256 columns were ever written. */
+    if (getenv("M3_TEX_DUMP")) {
+        static int done, probed;
+        static uint64_t at;
+        if (!probed) { const char *e = getenv("M3_TEX_DUMP_AT");
+                       probed = 1;
+                       at = e ? strtoull(e, NULL, 0) : 0; }
+        if (!done && g_sheet && model3recomp_frame_count() >= at) {
+            FILE *fp = fopen(getenv("M3_TEX_DUMP"), "wb");
+            done = 1;
+            if (fp) { fwrite(g_sheet, 2, (size_t)TEX_W * TEX_H, fp);
+                      fclose(fp); }
+        }
+    }
     g_drawn = 0;
     { static int probed; if (!probed) { probed = 1;
         { const char *e = getenv("M3_NODE_DUMP");
@@ -1110,6 +1172,26 @@ void real3d_render(void)
                         rd32le(vp + 0x14 * 4), rd32le(vp + 0x1A * 4),
                         g_ntris, g_drawn - before,
                         g_cull_back, g_cull_near, g_cull_degen, g_cull_off);
+            if (getenv("M3_REAL3D_STATS"))
+                fprintf(stderr, "[real3d]     textured %u tris / %u px,"
+                                "  flat %u tris / %u px\n",
+                        g_tex_tris, g_tex_px, g_flat_tris, g_flat_px);
+            if (getenv("M3_REAL3D_STATS"))
+                fprintf(stderr, "[real3d]     texels: %u from the sheet,"
+                                "  %u transparent,  %u never uploaded\n",
+                        g_texel_hit, g_texel_clear, g_texel_missing);
+            if (getenv("M3_REAL3D_STATS")) {
+                unsigned k;
+                for (k = 0; k < MISS_SLOTS; k++)
+                    if (g_miss[k].n)
+                        fprintf(stderr, "[real3d]       miss at %4u,%4u"
+                                        " page %u  %ux%u  x%u\n",
+                                g_miss[k].x, g_miss[k].y, g_miss[k].page,
+                                g_miss[k].w, g_miss[k].h, g_miss[k].n);
+                memset(g_miss, 0, sizeof g_miss);
+            }
+            g_texel_hit = g_texel_clear = g_texel_missing = 0;
+            g_tex_tris = g_flat_tris = g_tex_px = g_flat_px = 0;
             if (getenv("M3_REAL3D_STATS"))
                 fprintf(stderr, "[real3d]     matrices: %u loads, max index"
                                 " %u, %u all-zero, biggest |t| %.0f at %u\n",

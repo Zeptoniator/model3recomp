@@ -502,3 +502,60 @@ Still open: during a round all four tilemap layers sit above the 3D and
 layer 1 paints a pixel checkerboard of one flat colour over the whole
 screen -- stipple translucency in the tile data, not a depth-bit artefact --
 so the scene is seen through a heavy blue haze.
+
+### Texel channel order: red is the top field
+
+Textures were being read blue-first, the same way round as the tilemap
+palette. They are the other way round.
+
+This was settled once against the game's green jeep, which is exactly the
+wrong subject: swapping red and blue leaves green alone, so the jeep looks
+right either way. Dumping the sheet to a PNG and looking at it settles it in
+one glance -- Ian and Sarah's faces are natural skin one way round and
+cyanotic the other, the dinosaur hide is brown rather than blue, and the
+T-Rex in attract stops being a blue silhouette. Pick a subject with a colour
+a swap can change.
+
+The dump itself had to be fixed first: it fired after the hundredth upload,
+which is during the boot, and made the sheet look as though only its first
+256 columns were ever written. `M3_TEX_DUMP_AT` picks the field, and at
+field 4640 the sheet is 29% full and is a coherent atlas -- jeeps, faces,
+hide, tyres, INGEN signage, "SHOOT OUTSIDE of THE SCREEN!".
+
+### What is still wrong during a round, and what has been ruled out
+
+Attract finds every one of its 15384 texels in the sheet. A round finds
+2228 of 96684: **94406 resolve to texture page 1, and nothing in a whole
+boot is ever uploaded to page 1.** Those polygons fall back to their flat
+header colour, which is the grey leaf canopies, the pale trunks and the
+solid white background.
+
+`M3_TEX_PAGE=0` forces the page and finds 89678 of them -- but the content
+is wrong, because the polygon's texture size often disagrees with the upload
+at the same origin:
+
+    polygon 0,512  128x256      upload at 0,512  is 256x128
+    polygon 0,256  256x256      upload at 0,256  is 256x128
+    polygon 896,896 128x128     upload at 896,896 is  64x32
+
+The origin matches an upload exactly in 12 of the 14 rectangles sampled, so
+the origin decode is right and the size decode is not; the sampler's wrap
+then pulls in whatever texture sits next door, which is the speckled bark.
+
+Ruled out, each by measurement:
+
+  * upload page from bit 6 (set in 460 of 464 uploads): no change.
+  * upload page from bit 5 (set in none of the early uploads and 200 of the
+    late ones): worse, 80026 missing.
+  * y as six bits instead of five plus a page: fixes the round and breaks
+    attract, which then finds none of its texels.
+  * polygon origin x as six contiguous bits of word 4, the way the upload
+    header carries it: 89678 found drops to 18841. The borrowed low bit from
+    the top of word 5 is right.
+  * swapping the two polygon size exponents: still wrong, differently.
+  * a UV scale bit in polygon word 1, which Supermodel has: not set on any
+    polygon in this scene.
+
+Also open, and not yet looked at: the human figures in a round are
+fragmented -- torso, arms and legs drawn in the right colours but not joined
+up, with loose pieces beside them.
