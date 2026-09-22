@@ -518,3 +518,49 @@ rather than skipped over. That alone did not fix this -- the destructive move
 was in range and perfectly plausible -- but walking on through 4096 more
 "instructions" of garbage is how a bogus program finds a plausible move in
 the first place.
+
+
+## A lifted function does not always start at its entry
+
+`emit_function()` writes the body in address order, and the entry is not
+always the lowest address in it. A function that ends with a backward branch
+into a block it shares with a routine below it gets that block first, so
+calling the function falls into the wrong code.
+
+The matrix push at `0x0010ED58` is exactly that shape:
+
+    0010ED58  lbz  r4,0x1256(r2)   ; stack depth
+              cmpi r4,20           ; full?
+              ...                  ; depth++, pointer += 48
+    0010ED78  b    0x0010EBBC      ; tail: copy current -> new slot
+
+`0x0010EBBC` is the tail of the copy routine 0x6C bytes below, so the lifted
+function came out as
+
+    void lwram_0010ED58(void)
+    {
+        M3_FN(0x0010ED58u);
+    L_0010EBBC: ;                  <- execution starts here
+        ... the copy ...
+        return;                    <- and returns
+        PPC_R(4) = MEM_R8(...);    <- the push, unreachable
+        ...
+    }
+
+So the stack depth never moved, nothing was ever pushed or popped, and every
+matrix the game built accumulated onto the last one. In a round that put the
+2D overlay's screen-space scales -- 496 and 68 -- into the camera matrix,
+twice, which is why its rows measured 1.99e4, 4624 and 2.45e5: 68 squared
+and 496 squared. The matrix inverse downstream was faithfully inverting an
+ill-conditioned matrix, and every object in the scene came out rank 1.
+
+94 functions in this game are shaped that way.
+
+The fix is one line -- emit `goto L_<entry>;` when the entry is not the
+lowest address -- and the tell was on the build the whole time:
+
+    warning C4102: 'L_00001FDC': unreferenced label
+
+A lifted function whose own entry label is never referenced is one that
+nothing jumps to, including the function itself. Those warnings are worth
+reading.

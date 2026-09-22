@@ -60,14 +60,24 @@
 #define MAX_DEPTH  24
 #define AMBIENT    g_ambient
 
-/* The vertex fixed-point scale: the 24-bit coordinate field over 256.
+/* The vertex fixed-point scale: the 24-bit coordinate field over 4096,
+ * which is twelve fractional bits and twelve integer ones.
  *
- * This finally has a real check behind it. Field 2080 of attract mode hands
- * the renderer 4525 triangles across 55 models, and at 1/256 they resolve
- * into a scene you can recognise -- rocks in the foreground, a cliff face
- * behind. At 1/16 the camera is inside the geometry and the screen is one
- * flat wash; at 1/1024 and beyond every object is sub-pixel and 1262
- * triangles between them light two pixels.
+ * It was 256 for a long time, on a check that looked sound: a frame of
+ * attract mode resolved into rocks and a cliff face at 1/256 and into
+ * nothing recognisable at 1/16 or 1/1024. That check was run while the
+ * matrix stack push was being lifted into unreachable code (see
+ * tools/ppc_lifter.py), so every matrix in the scene carried the previous
+ * one's scale. A wrong scale in the matrices and a wrong scale here
+ * cancelled, and the frame looked right.
+ *
+ * With the push fixed both scenes agree on 4096, and both now have a
+ * subject in them: attract is a textured T-Rex roaring in the rain, and a
+ * round is a jungle floor with trees, a horizon and figures in the
+ * distance. At 1/1024 the same round is one black box filling the screen.
+ *
+ * Supermodel takes a scale per model rather than a constant, so this may
+ * yet turn out to be the common case rather than the rule.
  *
  * Two earlier answers here were wrong, in opposite directions, and both came
  * with reasoning:
@@ -85,7 +95,7 @@
  * a wrong scale -- it just draws something -- so the only thing that settles
  * it is a frame with a recognisable subject in it. M3_VERTEX_SCALE overrides.
  */
-#define VERTEX_SCALE_DEFAULT 256.0f
+#define VERTEX_SCALE_DEFAULT 4096.0f
 
 static float g_vertex_scale = VERTEX_SCALE_DEFAULT;
 static int g_tex_size_mode;

@@ -471,3 +471,34 @@ prints it, and it jumps between two fields:
 After the jump it moves at a constant velocity, which is a camera following
 a path. Whether the jump is the stage-one start position or the same scale
 leaking in has not been established.
+
+### Resolved: the matrix stack push was never executed
+
+The rank-1 matrices were not the game's arithmetic and not the renderer.
+`emit_function()` writes a lifted function's body in address order, and the
+matrix push at `0x0010ED58` ends with a backward branch into the copy
+routine below it -- so the emitted function began with the copy, returned,
+and left the push itself after a `return;`, unreachable. See
+docs/technical/execution-model.md.
+
+Nothing was ever pushed or popped, every matrix accumulated onto the last,
+and the 2D overlay's screen-space scales ended up squared inside the camera
+matrix. With the push restored:
+
+    view bounds   x -1158..1060   y -225..1571   z -1066..669
+    biggest |t|   423             (it was 63,090,096)
+
+and the scene appears. Attract is a textured T-Rex roaring in the rain; a
+round is a jungle floor with trees, a horizon and figures in the distance.
+
+The vertex scale moved with it. 1/256 had been checked against an attract
+frame that resolved into rocks and a cliff face -- but that check ran with
+the push broken, so a wrong scale in the matrices and a wrong scale here
+cancelled out. Both scenes now agree on **1/4096**, twelve fractional bits
+and twelve integer ones, and both have a recognisable subject at it. At
+1/1024 the same round is one black box filling the screen.
+
+Still open: during a round all four tilemap layers sit above the 3D and
+layer 1 paints a pixel checkerboard of one flat colour over the whole
+screen -- stipple translucency in the tile data, not a depth-bit artefact --
+so the scene is seen through a heavy blue haze.

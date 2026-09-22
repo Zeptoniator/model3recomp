@@ -95,6 +95,18 @@ static int layer_4bpp(int layer)
  * nibble is 3, so layers 2 and 3 are eight-bit, and they have to be, or
  * the sky comes out as stripes. The high nibble is F, so everything is in
  * front of the 3D, which costs nothing on a screen with no 3D on it. */
+/* Depth and priority share a byte and read the same through most of
+ * attract, so the two were once swapped here. Taking priority from the
+ * low nibble instead turns attract from a scene into a flat wash --
+ * 186266 lit pixels in 1250 colours where the right way round gives a
+ * T-Rex -- so this is settled, and swapping them is not the explanation
+ * for anything.
+ *
+ * During a round all four layers are above the 3D (register 0x20 reads
+ * 0xF300) and layer 1 paints exactly half the screen: a pixel
+ * checkerboard of one flat colour, which is stipple translucency in the
+ * tile data and not an artefact of the depth bit -- reading that bit the
+ * other way round changes the count by thirty pixels in 190464. */
 static int layer_above_3d(int layer)
 {
     return (reg(0x20) >> (12 + layer)) & 1u;
@@ -297,6 +309,17 @@ void tilegen_render_pass(int above)
 
         if (!g_enable_layer[layer] || !layer_enabled(layer))
             continue;
+        /* M3_LAYER_MASK=<bits>: draw only the layers whose bit is set.
+         * Four layers share the screen and three of them are usually
+         * transparent where it matters; this says which one is painting
+         * over the 3D. */
+        {
+            static int probed; static unsigned mask = 0xFu;
+            if (!probed) { const char *e = getenv("M3_LAYER_MASK");
+                           probed = 1;
+                           if (e) mask = (unsigned)strtoul(e, NULL, 0); }
+            if (!((mask >> layer) & 1u)) continue;
+        }
         if (layer_above_3d(layer) != (above != 0))
             continue;
         four_bit = layer_4bpp(layer);

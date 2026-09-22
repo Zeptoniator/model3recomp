@@ -1000,6 +1000,26 @@ def emit_function(em, fn, prefix, entries):
            "{",
            "    M3_FN(0x%08Xu);" % fn.entry]
 
+    # The body is emitted in address order, and the entry is not always the
+    # lowest address in it: a function that ends with a backward branch --
+    # `b` to a block it shares with a routine below it -- has that block
+    # first, so falling into the body runs the wrong code.
+    #
+    # The matrix push at 0x0010ED58 is exactly that. It ends with
+    # `b 0x0010EBBC`, the tail of the copy routine 0x6C bytes below it, so
+    # the lifted function began with the copy, returned, and left the push
+    # itself after a `return;` -- unreachable. The stack depth never moved,
+    # nothing was ever saved or restored, and every matrix the game built
+    # accumulated onto the last one.
+    #
+    # 94 functions in this game are shaped that way. The symptom is an
+    # "unreferenced label" warning on the entry, which is worth knowing: a
+    # lifted function whose own entry label is never used is one nothing
+    # jumps to, including the function itself.
+    if fn.insns and fn.insns[0][0] != fn.entry:
+        fn.labels.add(fn.entry)
+        out.append("    goto L_%08X;" % fn.entry)
+
     # `blr` is ambiguous. Usually it is a return, and the C call stack mirrors
     # the guest's, so `return;` is right. But PowerPC also uses mtlr+blr as a
     # computed jump, and The Lost World's boot ends exactly that way:
