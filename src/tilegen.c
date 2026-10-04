@@ -35,6 +35,8 @@
 #include <stdlib.h>
 
 #define VRAM_PATTERN      0x000000u
+#define VRAM_LINESCROLL   0x0F6000u
+#define VRAM_STENCIL      0x0F7000u
 #define VRAM_NAME_BASE    0x0F8000u
 #define VRAM_PALETTE      0x100000u
 #define VRAM_END          0x120000u
@@ -46,6 +48,7 @@
 #define TILE_BYTES   32u              /* 8x8 at 4bpp */
 
 static int g_enable_layer[LAYERS] = {1, 1, 1, 1};
+static unsigned g_layer_mask = 0xFu;
 
 void tilegen_enable_layer(int layer, int on)
 {
@@ -69,47 +72,20 @@ static int layer_enabled(int layer)
     return (reg(0x60u + (unsigned)layer * 4u) >> 31) & 1u;
 }
 
-/* And four bits of register 0x20 say how deep each layer's pixels are: set
- * means four bits per pixel, clear means eight.
- *
- * This was derived wrongly once, as an enable rather than a depth, from a
- * register that takes only four values across a whole attract cycle. The
- * fit was unique and it was still wrong, because the thing it was fitted to
- * -- "layer 0 draws and layer 2 does not" -- has a different cause. What
- * settles it is that the values agree with what the screens plainly are:
- * 0xF300 during the boot report says all four layers are four-bit, and the
- * report is text; 0x3300 during attract says layers 0 and 1 are four-bit
- * and 2 and 3 are eight, and that is text over a photograph.
- */
+/* Register 0x20: bits 12..15 say a layer is four bits a pixel (clear means
+ * eight), bits 8..11 that it is drawn in front of the 3D. This follows
+ * Supermodel, and it was the other way round here for a while: through most
+ * of attract both nibbles read 3, so the two orders agree. They part at
+ * 0x3200, which Lost World sets for its title logo and its credits roll --
+ * read backwards, layer 0 decodes as eight-bit and both screens are noise. */
 static int layer_4bpp(int layer)
 {
-    return (reg(0x20) >> (8 + layer)) & 1u;
+    return (reg(0x20) >> (12 + layer)) & 1u;
 }
 
-/* And four more say whether the layer sits in front of the 3D or behind it.
- *
- * These two fields share a byte and were conflated at first, and then
- * swapped, because through most of attract mode both nibbles read 3 and
- * either assignment explains the picture. What separates them is 0xF300,
- * which the guest sets while a photographic sky is on screen: the low
- * nibble is 3, so layers 2 and 3 are eight-bit, and they have to be, or
- * the sky comes out as stripes. The high nibble is F, so everything is in
- * front of the 3D, which costs nothing on a screen with no 3D on it. */
-/* Depth and priority share a byte and read the same through most of
- * attract, so the two were once swapped here. Taking priority from the
- * low nibble instead turns attract from a scene into a flat wash --
- * 186266 lit pixels in 1250 colours where the right way round gives a
- * T-Rex -- so this is settled, and swapping them is not the explanation
- * for anything.
- *
- * During a round all four layers are above the 3D (register 0x20 reads
- * 0xF300) and layer 1 paints exactly half the screen: a pixel
- * checkerboard of one flat colour, which is stipple translucency in the
- * tile data and not an artefact of the depth bit -- reading that bit the
- * other way round changes the count by thirty pixels in 190464. */
 static int layer_above_3d(int layer)
 {
-    return (reg(0x20) >> (12 + layer)) & 1u;
+    return (reg(0x20) >> (8 + layer)) & 1u;
 }
 
 /* A name-table entry. Two of them share each 32-bit word, and the whole word
@@ -158,51 +134,62 @@ static uint32_t palette_argb(const uint8_t *v, unsigned index, int *transparent)
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
-/* One 8x8 4bpp tile. A row is four bytes read as one little-endian word with
- * the leftmost pixel in the top nibble, so the byte the leftmost pixel lives
- * in is the last of the four. Read the row the other way round and every
- * glyph comes out mirrored -- which is invisible on T, H, O and X, and is why
- * this was worth checking against letters that are not symmetric.
- */
-static void draw_tile(uint32_t *fb, int fbw, int fbh,
-                      const uint8_t *v, uint32_t pattern,
-                      unsigned pal_base, int px, int py, int four_bit)
+/* The palette index of one pixel of a layer, scroll already applied: (sx, sy)
+ * is a position in the layer's 512x512 map. A 4bpp row is four bytes read as
+ * one little-endian word with the leftmost pixel in the top nibble, so the
+ * byte the leftmost pixel lives in is the last of the four -- read the other
+ * way round every glyph comes out mirrored, invisible on T, H, O and X. An
+ * 8bpp row is two such words, a byte a pixel, same reversal.
+ *
+ * Name entries: in 4bpp, bits 14..1 are the tile number and bit 15 its low
+ * bit, and bits 14..4 are also the top of the colour index. In 8bpp the low
+ * fourteen bits are the tile (64 bytes each) and bits 14..8 the palette. The
+ * palette field is why the boot report is the wrong thing to check a decode
+ * against: all its entries carry palette 0x20. */
+static int layer_pixel(const uint8_t *v, int layer, int four_bit,
+                       unsigned sx, unsigned sy)
 {
-    int row, col;
-    uint32_t span = four_bit ? TILE_BYTES : TILE_BYTES * 2u;
+    uint32_t nt = VRAM_NAME_BASE + (uint32_t)layer * LAYER_STRIDE;
+    unsigned e = name_entry(v, nt, (sy / TILE) * MAP_W + sx / TILE);
+    unsigned row = sy & 7u, col = sx & 7u;
+    uint32_t pattern;
 
-    if (pattern + span > VRAM_NAME_BASE)
-        return;
-
-    for (row = 0; row < TILE; row++) {
-        int y = py + row;
-        if (y < 0 || y >= fbh)
-            continue;
-        for (col = 0; col < TILE; col++) {
-            int x = px + col;
-            uint8_t byte;
-            unsigned idx;
-            uint32_t argb;
-            int transparent;
-            if (x < 0 || x >= fbw)
-                continue;
-            if (four_bit) {
-                byte = v[pattern + (uint32_t)row * 4u
-                                 + (uint32_t)(3 - (col >> 1))];
-                idx = (col & 1) ? (byte & 0x0Fu) : (byte >> 4);
-            } else {
-                /* Eight bits a pixel: the tile is twice as long and the
-                 * pixel is the whole byte. The byte order inside each
-                 * 32-bit word is reversed, same as the 4bpp case. */
-                byte = v[pattern + (uint32_t)row * 8u + (uint32_t)(col ^ 3)];
-                idx = byte;
-            }
-            argb = palette_argb(v, pal_base + idx, &transparent);
-            if (transparent)
-                continue;
-            fb[y * fbw + x] = argb;
-        }
+    if (!e)
+        return -1;
+    if (four_bit) {
+        uint8_t byte;
+        pattern = (((uint32_t)(e & 0x3FFFu) << 1) | ((e >> 15) & 1u))
+                * TILE_BYTES;
+        byte = v[pattern + row * 4u + (3u - (col >> 1))];
+        return (int)((e & 0x7FF0u) | ((col & 1u) ? (byte & 0x0Fu) : (byte >> 4)));
     }
+    pattern = (uint32_t)(e & 0x3FFFu) * (TILE_BYTES * 2u);
+    return (int)((e & 0x7F00u) | v[pattern + row * 8u + (col ^ 3u)]);
+}
+
+static uint32_t le32(const uint8_t *v, uint32_t off)
+{
+    return (uint32_t)v[off] | ((uint32_t)v[off + 1] << 8) |
+           ((uint32_t)v[off + 2] << 16) | ((uint32_t)v[off + 3] << 24);
+}
+
+/* Registers 0x40 (layers 0/1) and 0x44 (2/3): signed 8-bit offsets added to
+ * every pixel's colour, at twice the palette's resolution. Fades and the
+ * lightning flashes in attract are done with these. */
+static uint32_t offset_colour(uint32_t argb, uint32_t r)
+{
+    int o[3], c[3], i;
+    o[0] = (int8_t)(r & 0xFFu) * 2;           /* red */
+    o[1] = (int8_t)((r >> 8) & 0xFFu) * 2;    /* green */
+    o[2] = (int8_t)((r >> 16) & 0xFFu) * 2;   /* blue */
+    c[0] = (int)((argb >> 16) & 0xFFu);
+    c[1] = (int)((argb >> 8) & 0xFFu);
+    c[2] = (int)(argb & 0xFFu);
+    for (i = 0; i < 3; i++) {
+        c[i] += o[i];
+        if (c[i] < 0) c[i] = 0; else if (c[i] > 255) c[i] = 255;
+    }
+    return 0xFF000000u | ((uint32_t)c[0] << 16) | ((uint32_t)c[1] << 8) | (uint32_t)c[2];
 }
 
 #ifdef M3_TILEGEN_DUMP
@@ -240,7 +227,7 @@ void tilegen_render_pass(int above)
     int fbw = 0, fbh = 0;
     uint32_t *fb = platform_framebuffer(&fbw, &fbh);
     const uint8_t *v = bus_vram(NULL);
-    int layer;
+    int x, y;
 
     if (!fb || !v)
         return;
@@ -309,59 +296,61 @@ void tilegen_render_pass(int above)
         }
     }
 
-    for (layer = LAYERS - 1; layer >= 0; layer--) {
-        uint32_t nt = VRAM_NAME_BASE + (uint32_t)layer * LAYER_STRIDE;
-        int ty, tx;
-        int four_bit;
+    /* M3_LAYER_MASK=<bits>: draw only the layers whose bit is set. */
+    {
+        static int probed;
+        if (!probed) { const char *e = getenv("M3_LAYER_MASK");
+                       probed = 1;
+                       if (e) g_layer_mask = (unsigned)strtoul(e, NULL, 0); }
+    }
 
-        if (!g_enable_layer[layer] || !layer_enabled(layer))
-            continue;
-        /* M3_LAYER_MASK=<bits>: draw only the layers whose bit is set.
-         * Four layers share the screen and three of them are usually
-         * transparent where it matters; this says which one is painting
-         * over the 3D. */
-        {
-            static int probed; static unsigned mask = 0xFu;
-            if (!probed) { const char *e = getenv("M3_LAYER_MASK");
-                           probed = 1;
-                           if (e) mask = (unsigned)strtoul(e, NULL, 0); }
-            if (!((mask >> layer) & 1u)) continue;
-        }
-        if (layer_above_3d(layer) != (above != 0))
-            continue;
-        four_bit = layer_4bpp(layer);
-
-        for (ty = 0; ty * TILE < fbh; ty++) {
-            for (tx = 0; tx * TILE < fbw; tx++) {
-                unsigned e = name_entry(v, nt, (unsigned)(ty * MAP_W + tx));
-                uint32_t pattern, tile;
-                unsigned pal;
-                if (!e)
-                    continue;
-                /* Bits 14..1 are the tile number, and bit 15 is its low
-                 * bit -- the number wraps around the top of the entry rather
-                 * than running off it. Bits 14..4 are also the top eleven bits
-                 * of the colour index, whose low four come from the pixel.
-                 *
-                 * The palette field is why the boot report is the wrong thing
-                 * to check a decode against: its entries all carry palette
-                 * 0x20, so a decode that loses the field entirely still draws
-                 * the report in one flat colour that looks deliberate. */
-                if (four_bit) {
-                    tile = ((uint32_t)(e & 0x3FFFu) << 1)
-                         | (uint32_t)((e >> 15) & 1u);
-                    pattern = tile * TILE_BYTES;
-                    pal = e & 0x7FF0u;
+    /* Supermodel's model: the layers come in pairs, A/A' (0/1) and B/B'
+     * (2/3), and per pixel only one of each pair shows. The stencil at
+     * 0x0F7000 picks which, a word per screen line -- high half for A, low
+     * for B, a bit per 32 pixels, set meaning the primary. The stencil does
+     * not scroll; the layers do, each by its register (Y in bits 24..16, X
+     * in 9..0), or per line from the table at 0x0F6000 when bit 15 is set.
+     * Pair B is drawn first and A over it. */
+    for (y = 0; y < fbh && y < 384; y++) {
+        uint32_t mask_word = le32(v, VRAM_STENCIL + (uint32_t)y * 4u);
+        int pair;
+        for (pair = 1; pair >= 0; pair--) {
+            int lx[2], ly[2], want[2], four[2], k;
+            unsigned lmask = pair ? (mask_word & 0xFFFFu) : (mask_word >> 16);
+            uint32_t coff = reg(0x40u + (unsigned)pair * 4u);
+            for (k = 0; k < 2; k++) {
+                int L = pair * 2 + k;
+                uint32_t sr = reg(0x60u + (unsigned)L * 4u);
+                want[k] = g_enable_layer[L] && layer_enabled(L) &&
+                          ((g_layer_mask >> L) & 1u) &&
+                          layer_above_3d(L) == (above != 0);
+                four[k] = layer_4bpp(L);
+                ly[k] = (int)(((sr >> 16) & 0x1FFu) + (unsigned)y);
+                if (sr & 0x8000u) {
+                    uint32_t w = le32(v, VRAM_LINESCROLL + (uint32_t)L * 0x400u
+                                         + (uint32_t)(y / 2) * 4u);
+                    lx[k] = (int)((y & 1) ? (w & 0xFFFFu) : (w >> 16));
                 } else {
-                    /* Eight-bit: the whole low fifteen bits are the pattern
-                     * number and a tile is 64 bytes, so the byte offset
-                     * comes out the same. The palette is the top seven of
-                     * those bits and the pixel supplies the low eight. */
-                    pattern = (uint32_t)(e & 0x7FFFu) * (TILE_BYTES * 2u);
-                    pal = e & 0x7F00u;
+                    lx[k] = (int)(sr & 0x3FFu);
                 }
-                draw_tile(fb, fbw, fbh, v, pattern, pal, tx * TILE, ty * TILE,
-                          four_bit);
+            }
+            if (!want[0] && !want[1])
+                continue;
+            for (x = 0; x < fbw && x < 496; x++) {
+                int k = ((lmask >> (15 - x / 32)) & 1u) ? 0 : 1;
+                int idx, transparent;
+                uint32_t argb;
+                if (!want[k])
+                    continue;
+                idx = layer_pixel(v, pair * 2 + k, four[k],
+                                  (unsigned)(x + lx[k]) & 511u,
+                                  (unsigned)ly[k] & 511u);
+                if (idx < 0)
+                    continue;
+                argb = palette_argb(v, (unsigned)idx, &transparent);
+                if (transparent)
+                    continue;
+                fb[y * fbw + x] = coff ? offset_colour(argb, coff) : argb;
             }
         }
     }
