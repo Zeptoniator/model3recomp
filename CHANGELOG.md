@@ -18,6 +18,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   stalls. Sound menu: mute (F9) and volume. `M3_WAV`, `M3_NO_SOUND`,
   `M3_SOUND_THREAD=0`, `M3_AUDIO_TRACE`.
 - `THIRD_PARTY.md`: the licences of the code the sound board brings in.
+- `M3_PRESS=field:mask,...` presses buttons for a moment at given fields --
+  how a script walks a game's test menu.
 - **The 93C46 serial EEPROM**, modelled on Supermodel's: bit-banged through
   the I/O board's register 0x00 and read on bit 5 of bank 1, kept in the
   battery RAM file and shared at netplay connect. It replaces a toggle that

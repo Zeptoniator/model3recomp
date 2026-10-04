@@ -85,6 +85,8 @@ static unsigned long env_ul(const char *name, unsigned long dflt)
  *   M3_PRESS_FIELDS  how long "a moment" is, 8 fields by default
  *   M3_GUN_X/Y       pin player 1's gun to raw board coordinates
  *   M3_FIRE_EVERY    pull player 1's trigger for 4 fields every N
+ *   M3_PRESS         field:mask[,field:mask...] -- press buttons for a moment
+ *                    at those fields, e.g. a walk through the test menu
  *   M3_CHEATS        a mask of the game's cheats to start with
  *   M3_OPTIONS       the game options, four bits a slot
  *
@@ -96,6 +98,9 @@ static void scripted(m3_input_t *in, uint64_t f)
 {
     static int probed;
     static unsigned long held, coin_at, start_at, press, gx, gy, fire;
+    static unsigned long at[64], mask[64];
+    static int npress;
+    int k;
     if (!probed) {
         probed = 1;
         held = env_ul("M3_BUTTONS", 0);
@@ -105,7 +110,17 @@ static void scripted(m3_input_t *in, uint64_t f)
         gx = env_ul("M3_GUN_X", 0);
         gy = env_ul("M3_GUN_Y", 0);
         fire = env_ul("M3_FIRE_EVERY", 0);
-        g_scripted = held || coin_at || start_at || gx || gy || fire;
+        {
+            const char *e = getenv("M3_PRESS");
+            while (e && *e && npress < 64) {
+                char *end;
+                at[npress] = strtoul(e, &end, 0);
+                if (*end != ':') break;
+                mask[npress++] = strtoul(end + 1, &end, 0);
+                e = *end == ',' ? end + 1 : end;
+            }
+        }
+        g_scripted = held || coin_at || start_at || gx || gy || fire || npress;
     }
     if (fire && f % fire < 4)
         in->buttons |= M3_BTN_TRIG1;
@@ -114,6 +129,9 @@ static void scripted(m3_input_t *in, uint64_t f)
         in->buttons |= M3_BTN_COIN1;
     if (start_at && f >= start_at && f < start_at + press)
         in->buttons |= M3_BTN_START1 | M3_BTN_TRIG1;
+    for (k = 0; k < npress; k++)
+        if (f >= at[k] && f < at[k] + press)
+            in->buttons |= (uint32_t)mask[k];
     if (gx) in->gun_x[0] = (uint16_t)(gx & 0x3FFu);
     if (gy) in->gun_y[0] = (uint16_t)(gy & 0x3FFu);
 }
