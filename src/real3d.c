@@ -265,11 +265,6 @@ static const unsigned char DETILE[64] = {
 };
 
 static uint16_t *g_sheet;
-/* The size of whatever was uploaded to each 32x32 slot of the sheet.
- * M3_TEX_WRAP_UPLOAD=1 wraps by this instead of by the size in the
- * polygon header, which is a way of asking whether the header size is
- * the only thing still wrong. */
-static uint16_t g_slot_w[64 * 64], g_slot_h[64 * 64];
 static uint8_t  *g_sheet_set;          /* TEX_W * TEX_H texels */
 static size_t    g_fifo_seen;      /* how much of the FIFO has been drained */
 static unsigned  g_tex_uploads;
@@ -298,6 +293,11 @@ static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
     uint32_t w = 32u << ((header >> 14) & 7u);
     uint32_t h = 32u << ((header >> 17) & 7u);
     int sixteen = (header >> 23) & 1u;
+    /* An 8-bit upload writes one byte of each 16-bit texel: bit 21 the low
+     * byte, bit 22 the high, so two 8-bit textures can share one spot of
+     * the sheet. Neither bit means nothing is written. */
+    unsigned bytesel = ((header >> 21) & 1u) | (((header >> 22) & 1u) << 1);
+    static const uint16_t keep[4] = { 0xFFFFu, 0xFF00u, 0x00FFu, 0x0000u };
     uint32_t tx, ty, yy, xx;
     size_t off = 0;
 
@@ -307,6 +307,13 @@ static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
      * that. Uploading the chain as though it were the base is what turned
      * every surface into coloured static. */
     if (!g_sheet || w > 1024u || h > 1024u) return;
+    /* The top byte says what the payload is: 0x00 a texture and its mip
+     * chain, 0x01 the texture alone, 0x02 the chain alone (0x80 is a gamma
+     * table). The size check below only screens FIFO entries -- a VROM load
+     * has the rest of the ROM after it -- so without this a mip-only load
+     * from VROM was written over the texture it belongs to. Mips are not
+     * sampled, so only the base level is stored. */
+    if ((header >> 24) > 1u) return;
     if (avail < (size_t)w * h * (sixteen ? 2u : 1u)) return;
     y += page * 1024u;                      /* two 2048x1024 pages, stacked */
     if (x + w > TEX_W || y + h > TEX_H) return;
@@ -315,39 +322,39 @@ static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
         for (tx = 0; tx < w; tx += 8u) {
             for (yy = 0; yy < 8u; yy++) {
                 for (xx = 0; xx < 8u; xx++) {
-                    size_t si = off + DETILE[yy * 8u + xx];
+                    size_t o = (size_t)(y + ty + yy) * TEX_W + (x + tx + xx);
+                    size_t si;
                     uint16_t t;
                     if (sixteen) {
+                        si = off + DETILE[yy * 8u + xx];
                         if ((si + 1) * 2 > avail) continue;
                         t = g_src_be
                           ? (uint16_t)((src[si*2] << 8) | src[si*2 + 1])
                           : (uint16_t)(src[si*2] | (src[si*2 + 1] << 8));
                     } else {
-                        if (si >= avail) continue;
-                        /* 8-bit: the byte is an intensity until the palette
-                         * path exists, which keeps the shape visible rather
-                         * than drawing noise. */
-                        uint32_t v = src[si] >> 3;
-                        t = (uint16_t)((v << 10) | (v << 5) | v);
+                        /* Supermodel's 8-bit path: the same tile map with
+                         * its rows and columns paired the other way, two
+                         * texels to a 16-bit word, even column in the high
+                         * byte. A tile is 32 words rather than 64. */
+                        unsigned idx = ((yy ^ 1u) * 8u) + (xx ^ 1u);
+                        unsigned sh = 8u * ((xx & 1u) ^ 1u);
+                        uint16_t w;
+                        if (!bytesel) continue;
+                        si = off / 2u + DETILE[idx] / 2u;
+                        if ((si + 1) * 2 > avail) continue;
+                        w = g_src_be
+                          ? (uint16_t)((src[si*2] << 8) | src[si*2 + 1])
+                          : (uint16_t)(src[si*2] | (src[si*2 + 1] << 8));
+                        t = (uint16_t)((w >> sh) & 0xFFu);
+                        t = (uint16_t)((g_sheet[o] & keep[bytesel])
+                                       | ((t | (t << 8)) & (uint16_t)~keep[bytesel]));
                     }
-                    {
-                        size_t o = (size_t)(y + ty + yy) * TEX_W
-                                 + (x + tx + xx);
-                        g_sheet[o] = t;
-                        if (g_sheet_set) g_sheet_set[o] = 1;
-                    }
+                    g_sheet[o] = t;
+                    if (g_sheet_set) g_sheet_set[o] = 1;
                 }
             }
             off += 64;
         }
-    }
-    {
-        unsigned sx = x / 32u, sy = y / 32u, a1, b1;
-        for (b1 = 0; b1 < h / 32u && sy + b1 < 64u; b1++)
-            for (a1 = 0; a1 < w / 32u && sx + a1 < 64u; a1++) {
-                g_slot_w[(sy + b1) * 64u + sx + a1] = (uint16_t)w;
-                g_slot_h[(sy + b1) * 64u + sx + a1] = (uint16_t)h;
-            }
     }
     g_tex_uploads++;
 }
@@ -382,8 +389,11 @@ void real3d_vrom_texture(uint32_t addr, uint32_t header, uint32_t ctrl)
         fprintf(stderr, "[vromtex] load addr %08X header %08X ctrl %08X\n",
                 a, h, bswap32_(ctrl));
     if (!v) return;
-    off = (size_t)a * 2u;
-    if (off >= n) return;
+    /* The address counts 32-bit words, like a model pointer: consecutive
+     * loads step by exactly one texture's size in words. The image is 32 MB
+     * and the addresses reach past it, so it is mirrored -- the way bit 23
+     * of a model address selects VROM and is then dropped. */
+    off = ((size_t)a * 4u) % n;
     g_src_be = 1;                  /* VROM is big-endian; the FIFO is not */
     upload_texture(h, v + off, n - off);
     g_src_be = 0;
@@ -416,39 +426,71 @@ static void flush_texture_fifo(void)
                 (unsigned)used, g_tex_uploads, "\n");
 }
 
-static uint32_t sheet_texel(unsigned x, unsigned y, int *transparent)
+/* The raw 16-bit texel, or -1 where nothing was ever uploaded. */
+static int sheet_word(unsigned x, unsigned y)
 {
-    uint16_t c;
-    uint32_t r, g, b;
-    *transparent = 1;
-    if (!g_sheet) return 0;
-    {
-        size_t o = (size_t)(y & (TEX_H - 1u)) * TEX_W + (x & (TEX_W - 1u));
-        /* Never uploaded. Say so rather than drawing the cleared sheet,
-         * which is opaque black and turns every untextured surface into a
-         * silhouette. */
-        if (g_sheet_set && !g_sheet_set[o]) { *transparent = -1; return 0; }
-        c = g_sheet[o];
-    }
-    if (c & 0x8000u) return 0;
-    *transparent = 0;
-    /* Red is the top field and blue the bottom -- the opposite way round
-     * to the tilemap palette.
-     *
-     * This was settled once on the game's green jeep, which is exactly the
-     * wrong subject: swapping red and blue leaves green alone, so the jeep
-     * looks right either way. Dumping the sheet to an image and looking at
-     * it settles it in one glance -- Ian and Sarah's faces are natural
-     * skin this way round and cyanotic the other, the dinosaur hide is
-     * brown rather than blue, and the T-Rex in attract stops being a blue
-     * silhouette. Use a subject with a colour that a swap can change. */
-    r = (c >> 10) & 0x1Fu; g = (c >> 5) & 0x1Fu; b = c & 0x1Fu;
-    r = (r << 3) | (r >> 2); g = (g << 3) | (g >> 2); b = (b << 3) | (b >> 2);
-    return 0xFF000000u | (r << 16) | (g << 8) | b;
+    size_t o;
+    if (!g_sheet) return -1;
+    o = (size_t)(y & (TEX_H - 1u)) * TEX_W + (x & (TEX_W - 1u));
+    if (g_sheet_set && !g_sheet_set[o]) return -1;
+    return g_sheet[o];
 }
 
+/* A texel in one of the twelve formats (Supermodel's ExtractColour), as
+ * 0xAARRGGBB. Format 0 is 1-5-5-5 with red the top field -- the opposite
+ * way round to the tilemap palette, which a green jeep cannot show and
+ * Ian and Sarah's faces can. The rest are greyscale with alpha packed in
+ * one byte or nibble of the texel: 1-4 four-bit luminance and alpha, 5-6
+ * eight-bit luminance with full white transparent, 7 RGBA4, 8-11 four-bit
+ * luminance with the top value transparent. */
+static uint32_t texel_argb(unsigned fmt, unsigned v)
+{
+    unsigned r, g, b, a = 255;
+    switch (fmt) {
+    case 0:
+        r = (v >> 10) & 0x1Fu; g = (v >> 5) & 0x1Fu; b = v & 0x1Fu;
+        r = (r << 3) | (r >> 2); g = (g << 3) | (g >> 2); b = (b << 3) | (b >> 2);
+        a = (v & 0x8000u) ? 0 : 255;
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    case 1: r = (v & 0xFu) * 17u;         a = ((v >> 4) & 0xFu) * 17u;  break;
+    case 2: r = ((v >> 4) & 0xFu) * 17u;  a = (v & 0xFu) * 17u;         break;
+    case 3: r = ((v >> 8) & 0xFu) * 17u;  a = ((v >> 12) & 0xFu) * 17u; break;
+    case 4: r = ((v >> 12) & 0xFu) * 17u; a = ((v >> 8) & 0xFu) * 17u;  break;
+    case 5: r = v & 0xFFu;          a = r == 255u ? 0 : 255; break;
+    case 6: r = (v >> 8) & 0xFFu;   a = r == 255u ? 0 : 255; break;
+    case 7:
+        r = ((v >> 12) & 0xFu) * 17u; g = ((v >> 8) & 0xFu) * 17u;
+        b = ((v >> 4) & 0xFu) * 17u;  a = (v & 0xFu) * 17u;
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    case 8:  r = (v & 0xFu) * 17u;         a = r == 255u ? 0 : 255; break;
+    case 9:  r = ((v >> 4) & 0xFu) * 17u;  a = r == 255u ? 0 : 255; break;
+    case 10: r = ((v >> 8) & 0xFu) * 17u;  a = r == 255u ? 0 : 255; break;
+    default: r = ((v >> 12) & 0xFu) * 17u; a = r == 255u ? 0 : 255; break;
+    }
+    return (a << 24) | (r << 16) | (r << 8) | r;
+}
+
+/* One texel coordinate, wrapped: a mirrored axis runs forwards then
+ * backwards, so odd repeats are reflected. */
+static unsigned wrap_axis(long i, unsigned size, int mirror)
+{
+    long n = (long)size;
+    if (mirror) {
+        i %= 2 * n; if (i < 0) i += 2 * n;
+        return (unsigned)(i < n ? i : 2 * n - 1 - i);
+    }
+    i %= n; if (i < 0) i += n;
+    return (unsigned)i;
+}
+
+/* Bilinear, the way Supermodel samples (the hardware filters too). Each
+ * texel's colour is first taken from whichever neighbour is more opaque,
+ * so a cut-out's transparent texels do not bleed dark into its edge.
+ * Returns -1 when the texture was never uploaded. */
+static int64_t sample(const struct tri_s *tr, double u, double v);
+
 /* ---- the triangle queue ------------------------------------------------ */
-typedef struct {
+typedef struct tri_s {
     float v[3][3];          /* view space */
     float n[3];             /* the polygon's own normal, from the header */
     float vn[3][3];         /* per-vertex normals, for Gouraud */
@@ -458,13 +500,53 @@ typedef struct {
     uint8_t page;
     uint8_t textured;
     uint8_t luminous;
+    uint8_t two_sided;
+    uint8_t alpha;          /* 255 opaque */
+    uint8_t fmt;            /* texel format, 0..11 */
+    uint8_t alpha_test;     /* contour: drop low-alpha texels */
+    uint8_t tex_alpha;      /* texel alpha makes it see-through */
+    uint8_t mirror;         /* bit 0 mirror v, bit 1 mirror u (header word 2) */
     uint8_t r, g, b;
 } tri_t;
 
 static tri_t *g_tris;
+
+static int64_t sample(const tri_t *tr, double u, double v)
+{
+    unsigned tw = tr->tw ? tr->tw : 32u, th = tr->th ? tr->th : 32u;
+    double fu = u - 0.5, fv = v - 0.5;
+    long u0 = (long)floor(fu), v0 = (long)floor(fv);
+    double a = fu - (double)u0, b = fv - (double)v0;
+    uint32_t px[4];
+    double out[4] = { 0, 0, 0, 0 }, wgt[4];
+    int k, c;
+
+    for (k = 0; k < 4; k++) {
+        unsigned x = wrap_axis(u0 + (k & 1), tw, tr->mirror & 2u);
+        unsigned y = wrap_axis(v0 + (k >> 1), th, tr->mirror & 1u);
+        int w = sheet_word(tr->tx + x, ((tr->ty + y) & 1023u) + tr->page * 1024u);
+        if (w < 0) return -1;
+        px[k] = texel_argb(tr->fmt, (unsigned)w);
+    }
+    /* Opaque colour wins at the edges. */
+    for (k = 0; k < 4; k++) {
+        int j, best = k;
+        for (j = 0; j < 4; j++)
+            if ((px[j] >> 24) > (px[best] >> 24)) best = j;
+        if ((px[k] >> 24) < (px[best] >> 24))
+            px[k] = (px[k] & 0xFF000000u) | (px[best] & 0x00FFFFFFu);
+    }
+    wgt[0] = (1 - a) * (1 - b); wgt[1] = a * (1 - b);
+    wgt[2] = (1 - a) * b;       wgt[3] = a * b;
+    for (k = 0; k < 4; k++)
+        for (c = 0; c < 4; c++)
+            out[c] += wgt[k] * (double)((px[k] >> (c * 8)) & 0xFFu);
+    return (int64_t)(((uint32_t)(out[3] + 0.5) << 24) | ((uint32_t)(out[2] + 0.5) << 16)
+                   | ((uint32_t)(out[1] + 0.5) << 8) | (uint32_t)(out[0] + 0.5));
+}
 static unsigned g_ntris;
 
-typedef struct { int on, lum; unsigned x, y, page, w, h, fmt; } texdesc_t;
+typedef struct { int on, lum, two_sided, alpha, alpha_test, tex_alpha, mirror; unsigned x, y, page, w, h, fmt; } texdesc_t;
 
 static void emit(const float a[3], const float b[3], const float c[3],
                  const float n[3], uint32_t rgb,
@@ -487,6 +569,12 @@ static void emit(const float a[3], const float b[3], const float c[3],
     memcpy(t->uv[2], uc, sizeof t->uv[2]);
     t->textured = (uint8_t)(td->on ? 1 : 0);
     t->luminous = (uint8_t)(td->lum ? 1 : 0);
+    t->two_sided = (uint8_t)(td->two_sided ? 1 : 0);
+    t->alpha = (uint8_t)td->alpha;
+    t->fmt = (uint8_t)td->fmt;
+    t->alpha_test = (uint8_t)td->alpha_test;
+    t->tex_alpha = (uint8_t)td->tex_alpha;
+    t->mirror = (uint8_t)td->mirror;
     t->tx = (uint16_t)td->x; t->ty = (uint16_t)td->y;
     t->tw = (uint16_t)td->w; t->th = (uint16_t)td->h;
     t->page = (uint8_t)td->page;
@@ -496,6 +584,12 @@ static void emit(const float a[3], const float b[3], const float c[3],
 }
 
 /* ---- models ------------------------------------------------------------ */
+/* Texture offset inherited down the node tree (node word 2): added to every
+ * polygon's texture origin below it, and its page bit flips the polygon's.
+ * The same model is drawn with different skins this way. */
+static unsigned g_texoff_x, g_texoff_y, g_texoff_page;
+static uint32_t g_ctab;     /* colour table, a word index into polygon RAM */
+
 static void draw_model(uint32_t addr, const mat_t *m)
 {
     const uint8_t *mem;
@@ -629,17 +723,26 @@ static void draw_model(uint32_t addr, const mat_t *m)
             vn[slot][1] = (float)(int8_t)(wy & 0xFFu);
             vn[slot][2] = (float)(int8_t)(wz & 0xFFu);
             {
-                /* Word 3 of a vertex is u in the high half and v in the low.
-                 * The spans land on 512, 1024 and 4096, so the unit is an
-                 * eighth of a texel. */
+                /* Word 3 of a vertex is u in the high half and v in the low,
+                 * in eighths of a texel -- or whole texels when bit 6 of
+                 * header word 1 is set (Supermodel's UVScale). */
                 uint32_t wt = rd(mem + o + 12);
-                uv[slot][0] = (float)((wt >> 16) & 0xFFFFu) / 8.0f;
-                uv[slot][1] = (float)(wt & 0xFFFFu) / 8.0f;
+                float us = (ph[1] & 0x40u) ? 1.0f : 0.125f;
+                uv[slot][0] = (float)((wt >> 16) & 0xFFFFu) * us;
+                uv[slot][1] = (float)(wt & 0xFFFFu) * us;
             }
         }
 
         rgb = (((ph[4] >> 24) & 0xFFu) << 16) | (((ph[4] >> 16) & 0xFFu) << 8)
             | ((ph[4] >> 8) & 0xFFu);
+        /* Bit 1 of word 1 clear: the colour is an index into a table in
+         * polygon RAM that a culling node above set up. */
+        if (!(ph[1] & 2u)) {
+            size_t pn = 0;
+            const uint8_t *pr = bus_poly(&pn);
+            size_t co = ((size_t)g_ctab + ((ph[4] >> 8) & 0xFFFu)) * 4u;
+            if (pr && co + 4u <= pn) rgb = rd32le(pr + co) & 0xFFFFFFu;
+        }
 
         /* The texture descriptor. Bit 26 of word 6 is the enable: it is set
          * on 1749 of the 1780 polygons in one model and clear on the rest.
@@ -659,6 +762,12 @@ static void draw_model(uint32_t addr, const mat_t *m)
             td.h = 32u << hs;
         }
         td.fmt  = (ph[6] >> 7) & 7u;
+        td.alpha_test = (ph[6] & 0x80000000u) != 0;
+        td.tex_alpha  = (ph[6] & 7u) != 0;
+        td.mirror     = ph[2] & 3u;
+        /* Contour on: formats 1-4 trade their alpha nibble for a 1-bit
+         * test, which Supermodel models as formats 8-11. */
+        if (td.alpha_test && td.fmt >= 1u && td.fmt <= 4u) td.fmt += 7u;
         td.on   = g_textures && (ph[6] & 0x400u) != 0;
         /* x is five bits of word 4 with its low bit borrowed from the top
          * of word 5, which looks odd and is right: reading it as six
@@ -667,14 +776,26 @@ static void draw_model(uint32_t addr, const mat_t *m)
         td.x    = (32u * (((ph[4] & 0x1Fu) << 1)
                           | ((ph[5] >> 7) & 1u))) & 2047u;
         td.y    = (32u * (ph[5] & 0x1Fu)) & 2047u;
-        td.page = (ph[4] & 0x40u) >> 6;
+        td.page = ((ph[4] & 0x40u) >> 6) ^ g_texoff_page;
+        td.x    = (td.x + g_texoff_x) & 2047u;
+        td.y    = (td.y + g_texoff_y) & 1023u;
         /* Bit 16 of word 6 disables lighting for the polygon:
          * it is drawn at full brightness. */
         td.lum  = (ph[6] & 0x00010000u) != 0;
+        /* Supermodel's reading of the rest. Bit 23 of word 6 set is opaque;
+         * clear, bits 23..18 are the opacity in 32nds. The attract title
+         * sequence puts a 40% mist sheet in front of the photographic
+         * backdrop -- drawn opaque, it is 800 fields of flat grey. */
+        td.alpha = (ph[6] & 0x00800000u) ? 255
+                 : (int)(((ph[6] >> 18) & 0x3Fu) * 255u / 32u);
+        if (td.alpha > 255) td.alpha = 255;
+        td.two_sided = (ph[1] & 0x10u) != 0;
         if (td.w > 2048u) td.w = 2048u;
         if (td.h > 2048u) td.h = 2048u;
 
-        if (slot >= 3) {
+        /* Both discard bits set: the polygon is in the list but not drawn.
+         * Its vertices still count for the next polygon's reuse. */
+        if (slot >= 3 && (ph[0] & 0x300u) != 0x300u) {
             float wv[4][3], wn[3], wvn[4][3];
             for (j = 0; j < slot; j++) {
                 mat_point(m, vs[j], wv[j]);
@@ -713,8 +834,11 @@ static unsigned g_mat_loads, g_mat_max, g_mat_zero, g_mat_bigi;
 static unsigned g_node_translate, g_node_matrix, g_node_neither;
 static float    g_mat_bigt;
 
-/* A pointer's top byte says what it points at: bit 24 a model, bit 26 a
- * pointer list, and otherwise another culling node. */
+
+/* A child pointer's top byte says what it points at: bit 24 a model, bit 26
+ * a pointer list, neither another culling node (Supermodel's DescendNodePtr).
+ * Entries of a pointer list are always culling nodes; bit 24 on one means
+ * the list is empty from there, bit 25 that it is the last. */
 static void follow(uint32_t p, const mat_t *m, int depth)
 {
     uint32_t a = p & 0x00FFFFFFu;
@@ -722,9 +846,11 @@ static void follow(uint32_t p, const mat_t *m, int depth)
     if (a == 0 || a == 0x800800u)           /* 0x800800 is the dummy entry */
         return;
 
-    if (p & 0x01000000u) {
+    switch ((p >> 24) & 5u) {
+    case 1:
         draw_model(a, m);
-    } else if (p & 0x04000000u) {
+        break;
+    case 4: {
         unsigned k;
         if (depth >= MAX_DEPTH) return;
         for (k = 0; k < 256u; k++) {
@@ -732,30 +858,57 @@ static void follow(uint32_t p, const mat_t *m, int depth)
             uint32_t v;
             if (!e) break;
             v = rd32le(e);
-            /* Both flag bits together is a skip -- not an entry, and not an
-             * end either. Treating it as an end stops the list at its first
-             * element, which is exactly what an attract-mode list starts
-             * with, and loses every model in it. */
-            if ((v & 0x03000000u) == 0x03000000u)
-                continue;
-            follow(v, m, depth + 1);
-            if (v & 0x02000000u)            /* last entry: after, not before */
-                break;
+            if (v & 0x01000000u) break;
+            descend(v & 0x00FFFFFFu, m, depth + 1);
+            if (v & 0x02000000u) break;
         }
-    } else {
+        break;
+    }
+    case 0:
         descend(a, m, depth + 1);
+        break;
+    default:
+        break;
     }
 }
 
+/* One culling node and then its siblings. Siblings share the parent's
+ * transform, not this node's, and are always culling nodes -- bit 24 on the
+ * sibling pointer means there is none. They are walked in a loop: a level of
+ * scenery is a long sibling chain, and recursing on it ran into MAX_DEPTH
+ * and dropped the tail of the chain. */
 static void descend(uint32_t addr, const mat_t *m, int depth)
 {
-    const uint8_t *node = cull_at(addr, 10);
-    mat_t cur, mm;
-    uint32_t mo;
-    float tx, ty, tz;
+    unsigned chain;
 
-    if (!node || depth >= MAX_DEPTH) return;
-    cur = *m;
+    if (depth >= MAX_DEPTH) return;
+    for (chain = 0; addr && chain < 4096u; chain++) {
+        const uint8_t *node = cull_at(addr, 10);
+        mat_t cur, mm;
+        uint32_t mo, w0, child, sib;
+        unsigned sx_ = g_texoff_x, sy_ = g_texoff_y, sp_ = g_texoff_page;
+        float tx, ty, tz;
+
+        if (!node) return;
+        cur = *m;
+        w0 = rd32le(node);
+        /* Both discard bits: the node and everything after it is hidden. */
+        if ((w0 & 0x300u) == 0x300u) return;
+        sib = rd32le(node + 8 * 4) & 0x01FFFFFFu;
+        if (w0 & 4u)
+            g_ctab = ((rd32le(node + 3 * 4) >> 19)
+                    | ((rd32le(node + 7 * 4) >> 28) << 13)
+                    | ((rd32le(node + 8 * 4) >> 25) << 17)) & 0xFFFFFu;
+        if ((w0 & 7u) == 6u) sib = 0;      /* colour-table node: no siblings */
+
+        {
+            uint32_t w2 = rd32le(node + 2 * 4);
+            if (w2 & 0x8000u) {
+                g_texoff_x = 32u * ((w2 >> 7) & 0x3Fu);
+                g_texoff_y = 32u * (w2 & 0x1Fu);
+                g_texoff_page = (w2 >> 14) & 1u;
+            }
+        }
 
     mo = rd32le(node + 3 * 4) & 0xFFFu;
     tx = f32_of(rd32le(node + 4 * 4));
@@ -770,9 +923,9 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
      * a matrix index. */
     /* How the scene places things: a node carries either a translation or
      * a matrix, and this counts which. */
-    if (rd32le(node) & 0x10u) g_node_translate++; else if (mo) g_node_matrix++;
+    if (w0 & 0x10u) g_node_translate++; else if (mo) g_node_matrix++;
     else g_node_neither++;
-    if (rd32le(node) & 0x10u) {
+    if (w0 & 0x10u) {
         mat_t t = IDENT;
         t.m[0][3] = tx; t.m[1][3] = ty; t.m[2][3] = tz;
         cur = mat_mul(m, &t);
@@ -806,8 +959,34 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
         cur = mat_mul(m, &mm);
     }
 
-    follow(rd32le(node + 7 * 4), &cur, depth);
-    follow(rd32le(node + 8 * 4), &cur, depth);
+        child = rd32le(node + 7 * 4) & 0x07FFFFFFu;
+        if (w0 & 0x08u) {
+            /* A four-entry LOD table: take the most detailed level that
+             * exists. Supermodel picks by distance; the nearest level is
+             * what a 496-pixel screen wants almost always. */
+            const uint8_t *lod = cull_at(child & 0x00FFFFFFu, 4);
+            if (lod) {
+                unsigned k;
+                uint32_t e = 0;
+                for (k = 0; k < 4u; k++) {
+                    e = rd32le(lod + k * 4);
+                    if (e & 0x01000000u) break;
+                }
+                if (rd32le(node + 3 * 4) & 0x20000000u)
+                    descend(e & 0x00FFFFFFu, &cur, depth + 1);
+                else
+                    draw_model(e & 0x00FFFFFFu, &cur);
+            }
+        } else {
+            follow(child, &cur, depth);
+        }
+
+        g_texoff_x = sx_; g_texoff_y = sy_; g_texoff_page = sp_;
+        /* 0x800800 is the dummy node, and an unused node is all dummy
+         * words, so its sibling is itself: stop rather than spin. */
+        sib = (sib & 0x01000000u) ? 0 : (sib & 0x00FFFFFFu);
+        addr = (sib == addr || sib == 0x800800u) ? 0 : sib;
+    }
 }
 
 /* ---- rasteriser -------------------------------------------------------- */
@@ -842,6 +1021,8 @@ static int clip_near(const float v[3][5], float out[4][5])
 static unsigned g_cull_back, g_cull_near, g_cull_degen, g_cull_off;
 static unsigned g_tex_tris, g_flat_tris, g_tex_px, g_flat_px;
 static unsigned g_texel_hit, g_texel_clear, g_texel_missing;
+/* M3_PICK=x,y: which polygon last wrote that pixel, and its texture. */
+static long g_pick = -1, g_pick_tri = -1;
 /* Where the polygons that find nothing are looking. */
 enum { MISS_SLOTS = 24 };
 static struct { unsigned x, y, page, w, h, n; } g_miss[MISS_SLOTS];
@@ -904,8 +1085,10 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
         g_cull_back = g_cull_near = g_cull_degen = g_cull_off = 0;
     }
 
-    for (t = 0; t < g_ntris; t++) {
-        const tri_t *tr = &g_tris[t];
+    /* Opaque first, then the translucent ones over them in submission
+     * order, blended and leaving the depth buffer alone. */
+    for (t = 0; t < 2u * g_ntris; t++) {
+        const tri_t *tr = &g_tris[t % g_ntris];
         /* Screen-space vertices in double. A projected triangle here can
          * reach coordinates in the hundreds of thousands -- the scene runs
          * well past the edges of a 496-pixel screen -- and in float the
@@ -917,6 +1100,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
         float clipped[4][5], src[3][5];
         double d;
         float lit, sh;
+        if ((tr->alpha < 255) != (t >= g_ntris)) continue;
         int nclip, fan;
         int x0, x1, y0, y1, x, y, k;
         int r, g, b;
@@ -938,7 +1122,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
             float cx = (tr->v[0][0] + tr->v[1][0] + tr->v[2][0]) / 3.0f;
             float cy = (tr->v[0][1] + tr->v[1][1] + tr->v[2][1]) / 3.0f;
             float cz = (tr->v[0][2] + tr->v[1][2] + tr->v[2][2]) / 3.0f;
-            if (tr->n[0]*cx + tr->n[1]*cy + tr->n[2]*cz > 0.0f)
+            if (!tr->two_sided && tr->n[0]*cx + tr->n[1]*cy + tr->n[2]*cz > 0.0f)
                 { g_cull_back++; continue; }
         }
 
@@ -1060,30 +1244,23 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                         if (iz > 1e-12) {
                             double uu = (l0*q[0][0] + l1*q[1][0] + l2*q[2][0]) / iz;
                             double vv = (l0*q[0][1] + l1*q[1][1] + l2*q[2][1]) / iz;
-                            int tp;
-                            long ui = (long)uu, vi = (long)vv;
-                            unsigned tw = tr->tw ? tr->tw : 32u;
-                            unsigned th = tr->th ? tr->th : 32u;
-                            { static long useup = -2;
-                              if (useup == -2) {
-                                  const char *e = getenv("M3_TEX_WRAP_UPLOAD");
-                                  useup = e ? strtol(e, NULL, 0) : 0; }
-                              if (useup) {
-                                  unsigned s = (tr->ty / 32u) * 64u
-                                             + (tr->tx / 32u);
-                                  if (s < 64u * 64u && g_slot_w[s]) {
-                                      tw = g_slot_w[s];
-                                      th = g_slot_h[s];
-                                  } } }
-                            uint32_t t;
-                            ui %= (long)tw; if (ui < 0) ui += tw;
-                            vi %= (long)th; if (vi < 0) vi += th;
-                            t = sheet_texel(tr->tx + (unsigned)ui,
-                                            tr->ty + tr->page * 1024u
-                                                   + (unsigned)vi, &tp);
-                            if (tp > 0) { g_texel_clear++; continue; }
-                            if (tp == 0) { c = t; g_texel_hit++; }
-                            else { g_texel_missing++; note_miss(tr); }
+                            int64_t w = sample(tr, uu, vv);
+                            if (w < 0) { g_texel_missing++; note_miss(tr); }
+                            else {
+                                uint32_t t = (uint32_t)w;
+                                /* Format 0's transparent bit has always
+                                 * been honoured here; the others only
+                                 * when the polygon asks for it. */
+                                if ((tr->fmt == 0 || tr->alpha_test || tr->tex_alpha)
+                                    && (t >> 24) < 128u) { g_texel_clear++; continue; }
+                                /* Modulated by the polygon colour: that is
+                                 * what tints the greyscale formats. */
+                                c = 0xFF000000u
+                                  | ((((t >> 16) & 0xFFu) * tr->r / 255u) << 16)
+                                  | ((((t >> 8) & 0xFFu) * tr->g / 255u) << 8)
+                                  | ((t & 0xFFu) * tr->b / 255u);
+                                g_texel_hit++;
+                            }
                         }
                     }
                     /* Gouraud: interpolate the vertex normals across the
@@ -1119,8 +1296,19 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                         c = 0xFF000000u | ((uint32_t)rr << 16)
                           | ((uint32_t)gg << 8) | (uint32_t)bb;
                     }
-                    g_zbuf[o] = (float)z; fb[o] = c; g_drawn++;
+                    if (tr->alpha < 255) {
+                        uint32_t a = tr->alpha, d0 = fb[o], m = 0;
+                        int sh2;
+                        for (sh2 = 0; sh2 < 24; sh2 += 8)
+                            m |= ((((c >> sh2) & 0xFFu) * a
+                                  + ((d0 >> sh2) & 0xFFu) * (255u - a)) / 255u) << sh2;
+                        fb[o] = 0xFF000000u | m;
+                    } else {
+                        g_zbuf[o] = (float)z; fb[o] = c;
+                    }
+                    g_drawn++;
                     if (tr->textured) g_tex_px++; else g_flat_px++;
+                    if (o == g_pick) g_pick_tri = (long)(t % g_ntris);
                 }
             }
         }
@@ -1298,7 +1486,23 @@ void real3d_render(void)
                               only = e ? strtol(e, NULL, 0) : -1; }
             if (only < 0 || (long)guard == only) {
                 descend(rd32le(vp + 0x02 * 4) & 0x00FFFFFFu, &cam, 0);
+                { const char *e = getenv("M3_PICK");
+                  g_pick = -1; g_pick_tri = -1;
+                  if (e) { int px = atoi(e), py = 0; const char *c = strchr(e, ',');
+                           if (c) py = atoi(c + 1);
+                           g_pick = (long)py * fw + px; } }
                 raster(fb, fw, fh, sx, sy, light, intensity);
+                if (g_pick_tri >= 0) {
+                    const tri_t *p = &g_tris[g_pick_tri];
+                    fprintf(stderr, "[pick] vp%u tri %ld tex %d at %u,%u page %u"
+                            " %ux%u fmt %u alpha %u test %u texalpha %u lum %u"
+                            " rgb %02X%02X%02X uv %.1f,%.1f %.1f,%.1f %.1f,%.1f\n",
+                            guard, g_pick_tri, p->textured, p->tx, p->ty,
+                            p->page, p->tw, p->th, p->fmt, p->alpha,
+                            p->alpha_test, p->tex_alpha, p->luminous,
+                            p->r, p->g, p->b, p->uv[0][0], p->uv[0][1],
+                            p->uv[1][0], p->uv[1][1], p->uv[2][0], p->uv[2][1]);
+                }
             }
             if (getenv("M3_REAL3D_STATS"))
                 fprintf(stderr, "[real3d]   vp%u @%06X rect %08X/%08X"
