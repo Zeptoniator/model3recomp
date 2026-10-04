@@ -28,10 +28,8 @@ The Sound menu is waiting for it.
   tilemaps over it is the obvious shape.
 - Netplay over UDP with rollback, if lockstep's input delay proves too much
   over the internet. Lockstep over TCP is right for a LAN and for Tailscale.
-- Netplay across the internet rather than a LAN, and over Tailscale, on
-  recomp-netlab: the LAN scenario passes; a NAT'd pair is next.
-- Building on the farm: its clang-cl builders need SDL2 for the window
-  layer.
+- Netplay across the internet rather than a LAN, and over Tailscale: two
+  machines on a LAN stay identical; a NAT'd pair is next.
 
 ## Deferred
 

@@ -11,11 +11,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   the I/O board's register 0x00 and read on bit 5 of bank 1, kept in the
   battery RAM file and shared at netplay connect. It replaces a toggle that
   only satisfied the boot's handshake; games keep their settings in it.
-- **Game options** (`m3_option_add()`, a Game menu) and **one-shot cheat
+- **Game options** (`m3_option_add()`, under Debug; changing one restarts the game) and **one-shot cheat
   actions** (`m3_cheat_add_action()`), both carried in the input record so a
   netplay host's choices hold on both machines.
 - Netplay logs its RAM hash every ten seconds, for comparing two machines'
-  logs (recomp-netlab's LAN scenario does).
+  logs.
 - **A menu bar** on Windows: File (save/load state, slots, reset, quit),
   Video (window size, fullscreen, sharp or bilinear, scanlines, 4:3),
   Sound (a placeholder until there is sound), Controls (mouse, gamepad,

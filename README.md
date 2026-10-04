@@ -342,8 +342,7 @@ and the hotkeys work everywhere.
 | Video | window size 1–4x, fullscreen (F11, Alt+Enter), sharp or bilinear, scanlines, 4:3 or square pixels |
 | Sound | nothing yet |
 | Controls | mouse aims player 1; gamepad as player 1 or 2; cursor hidden, crosshair or pointer; Sinden border |
-| Game | the game's own options, registered with `m3_option_add()` -- The Lost World's region |
-| Debug | the game's own cheats: toggles (`m3_cheat_add()`) and one-shot actions (`m3_cheat_add_action()`) |
+| Debug | the game's own cheats: toggles (`m3_cheat_add()`) and one-shot actions (`m3_cheat_add_action()`); and its options (`m3_option_add()`, The Lost World's region), which restart the game when changed |
 | Multiplayer | host, join, disconnect, input delay |
 
 Holding **Tab** runs flat out. A **Sinden** light gun works as an absolute
@@ -394,10 +393,8 @@ A session starts at power-on, because the guest cannot be reset in place:
 the menu's Host and Join restart the program. Game options and cheats travel
 in the input record, so the host's choices hold on both machines.
 
-It is tested across machines on
-[recomp-netlab](https://github.com/sp00nznet/recomp-netlab): one PC hosts,
-a lab VM joins over the LAN, both play a script, and each logs its RAM hash
-every ten seconds -- the scenario passes when the two logs agree.
+It is tested across two machines on a LAN: both play a script, each logs
+its RAM hash every ten seconds, and the two logs agree.
 
 ### The one routing you cannot get wrong
 

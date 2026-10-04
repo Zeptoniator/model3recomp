@@ -188,7 +188,7 @@ static void note_item(HMENU m, const char *label)
 static void build_menu(void)
 {
     HWND h = hwnd();
-    HMENU bar, file, slot, video, size, sound, ctl, pad, cur, sind, dbg, mp, dly, game;
+    HMENU bar, file, slot, video, size, sound, ctl, pad, cur, sind, dbg, mp, dly;
     HMENU old;
     char b[64];
     int i, any = 0;
@@ -225,23 +225,6 @@ static void build_menu(void)
     item(video, ID_ASPECTSQ, "Square pixels (496 x 384)", !opt.aspect43);
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)video, "&Video");
 
-    game = CreatePopupMenu();
-    {
-        unsigned sl, c, anyopt = 0;
-        for (sl = 0; sl < 8u; sl++) {
-            HMENU sub;
-            if (!m3_option_label(sl)) continue;
-            sub = CreatePopupMenu();
-            for (c = 0; c < m3_option_count(sl); c++)
-                item(sub, ID_OPTION + sl * 16u + c, m3_option_choice(sl, c), m3_option_local(sl) == c);
-            AppendMenuA(game, MF_POPUP, (UINT_PTR)sub, m3_option_label(sl));
-            anyopt = 1;
-        }
-        if (!anyopt) note_item(game, "This game offers no options");
-        note_item(game, "(applies from the next field; the host's choice wins in netplay)");
-    }
-    AppendMenuA(bar, MF_POPUP, (UINT_PTR)game, "&Game");
-
     sound = CreatePopupMenu();
     note_item(sound, "No sound yet: the board's 68000 and SCSPs are not emulated");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)sound, "&Sound");
@@ -276,6 +259,23 @@ static void build_menu(void)
     }
     if (!any) note_item(dbg, "This game offers no cheats");
     if (netplay_role() == 2) note_item(dbg, "(during netplay the host's cheats apply)");
+    {
+        unsigned sl, c;
+        for (sl = 0; sl < 8u; sl++) {
+            HMENU sub;
+            char lbl[96];
+            if (!m3_option_label(sl)) continue;
+            sub = CreatePopupMenu();
+            for (c = 0; c < m3_option_count(sl); c++)
+                AppendMenuA(sub, MF_STRING | (m3_option_local(sl) == c ? MF_CHECKED : 0)
+                                 | (netplay_active() ? MF_GRAYED : 0),
+                            ID_OPTION + sl * 16u + c, m3_option_choice(sl, c));
+            if (netplay_active()) note_item(sub, "(not during netplay: changing it restarts the game)");
+            snprintf(lbl, sizeof lbl, "%s  (restarts the game)", m3_option_label(sl));
+            if (sl == 0) AppendMenuA(dbg, MF_SEPARATOR, 0, NULL);
+            AppendMenuA(dbg, MF_POPUP, (UINT_PTR)sub, lbl);
+        }
+    }
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)dbg, "&Debug");
 
     mp = CreatePopupMenu(); dly = CreatePopupMenu();
@@ -424,7 +424,16 @@ static int on_command(unsigned id)
         if (m3_cheat_is_action(bit)) m3_cheat_pulse(bit);
         else m3_cheats_set_local(m3_cheats_local() ^ (1u << bit));
     }
-    else if (id >= ID_OPTION && id < ID_OPTION + 128) m3_option_set_local((id - ID_OPTION) / 16u, (id - ID_OPTION) % 16u);
+    else if (id >= ID_OPTION && id < ID_OPTION + 128 && !netplay_active()) {
+        unsigned sl = (id - ID_OPTION) / 16u, v = (id - ID_OPTION) % 16u;
+        /* A game option is the board's configuration, so it is applied the
+         * way an operator would: change it and power the machine back on.
+         * relaunch() saves the settings first. */
+        if (m3_option_local(sl) != v) {
+            m3_option_set_local(sl, v);
+            relaunch(NULL, opt.net_delay);
+        }
+    }
     else if (id > ID_DELAY && id <= ID_DELAY + 10) opt.net_delay = (int)(id - ID_DELAY);
     else if (id == ID_DISCONNECT) { netplay_shutdown(); platform_set_status("netplay: disconnected"); }
     else if (id == ID_HOST) {
