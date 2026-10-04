@@ -29,6 +29,10 @@ uint64_t platform_ticks_us(void);
 
 unsigned platform_buttons(void);
 
+/* Where the player is pointing, in framebuffer pixels. 0 when the host has
+ * no pointer, and the gun then sits at the centre of the screen. */
+int platform_pointer(int *x, int *y);
+
 /* The framebuffer renderers draw into: w*h pixels, 0xAARRGGBB. */
 uint32_t *platform_framebuffer(int *w, int *h);
 

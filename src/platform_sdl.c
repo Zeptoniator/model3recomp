@@ -99,10 +99,52 @@ static unsigned scripted_buttons(void)
     return b;
 }
 
+/* Reload is pointing off screen and pulling the trigger. One press does
+ * both, Supermodel's way: off screen for ten fields, the trigger held for
+ * the last five of them, so the game sees the gun leave the screen first. */
+static unsigned reload(int held)
+{
+    static int was;
+    static uint64_t start = (uint64_t)-1;
+    uint64_t f = model3recomp_frame_count();
+    unsigned b = 0;
+    if (held && !was) start = f;
+    was = held;
+    if (start != (uint64_t)-1 && f - start < 10u) {
+        b |= M3_BTN_OFFSCR1;
+        if (f - start >= 5u) b |= M3_BTN_TRIG1;
+    }
+    return b;
+}
+
+int platform_pointer(int *x, int *y)
+{
+    int wx, wy;
+    float lx, ly;
+    SDL_GetMouseState(&wx, &wy);
+    /* Window pixels to framebuffer pixels, through the letterboxing. */
+    SDL_RenderWindowToLogical(g_ren, wx, wy, &lx, &ly);
+    if (lx < 0) lx = 0;
+    if (ly < 0) ly = 0;
+    if (lx > g_w - 1) lx = (float)(g_w - 1);
+    if (ly > g_h - 1) ly = (float)(g_h - 1);
+    *x = (int)lx; *y = (int)ly;
+    { static uint64_t last; uint64_t f = model3recomp_frame_count();
+      if (getenv("M3_PTR_TRACE") && f / 60 != last) { last = f / 60;
+        fprintf(stderr, "[ptr] f=%llu win %d,%d -> %d,%d\n", (unsigned long long)f, wx, wy, *x, *y); } }
+    return 1;
+}
+
 unsigned platform_buttons(void)
 {
     const Uint8 *k = SDL_GetKeyboardState(NULL);
     unsigned b = scripted_buttons();
+    Uint32 m = SDL_GetMouseState(NULL, NULL);
+    /* The mouse is the gun: left fires, right points it off screen, which
+     * is how this game reloads. */
+    if (m & SDL_BUTTON(SDL_BUTTON_LEFT))  b |= M3_BTN_TRIG1;
+    b |= reload((m & SDL_BUTTON(SDL_BUTTON_RIGHT)) ||
+                (k && k[SDL_SCANCODE_LSHIFT]));
     if (!k) return b;
     if (k[SDL_SCANCODE_5]) b |= M3_BTN_COIN1;
     if (k[SDL_SCANCODE_6]) b |= M3_BTN_COIN2;
@@ -113,8 +155,27 @@ unsigned platform_buttons(void)
     if (k[SDL_SCANCODE_SPACE] || k[SDL_SCANCODE_LCTRL])
         b |= M3_BTN_TRIG1;
     if (k[SDL_SCANCODE_RCTRL]) b |= M3_BTN_TRIG2;
-    if (k[SDL_SCANCODE_LSHIFT]) b |= M3_BTN_OFFSCR1;
     return b;
+}
+
+/* Hold the display to the board's 57.524 Hz. Fields are paced by guest
+ * work, not the clock, so without this the game runs as fast as the host
+ * can draw it. M3_NOTHROTTLE turns it off, for scripted captures. */
+static void throttle(void)
+{
+    static int probed, off;
+    static uint64_t next;
+    uint64_t now;
+    if (!probed) { probed = 1; off = getenv("M3_NOTHROTTLE") != NULL; }
+    if (off) return;
+    now = platform_ticks_us();
+    if (!next || now > next + 100000u)  /* first field, or fell far behind */
+        next = now;
+    next += 17384u;                     /* 1e6 / 57.524 */
+    while ((now = platform_ticks_us()) < next) {
+        if (next - now > 2000u)
+            SDL_Delay((Uint32)((next - now) / 1000u - 1u));
+    }
 }
 
 void platform_present(void)
@@ -123,6 +184,7 @@ void platform_present(void)
     SDL_RenderClear(g_ren);
     SDL_RenderCopy(g_ren, g_tex, NULL, NULL);
     SDL_RenderPresent(g_ren);
+    throttle();
 }
 
 uint64_t platform_ticks_us(void)

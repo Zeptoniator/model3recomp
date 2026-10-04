@@ -48,6 +48,8 @@ uint32_t *platform_framebuffer(int *w, int *h)
 
 int platform_poll(void) { return 1; }
 
+int platform_pointer(int *x, int *y) { (void)x; (void)y; return 0; }
+
 void platform_present(void) { }
 
 /* Pacing off calls alone stalls: the guest spends long stretches polling

@@ -66,15 +66,23 @@ static uint64_t g_dev_reads[256];
  * shoot stays up forever, which is exactly where this got stuck. */
 static uint32_t g_serial1, g_serial2, g_gun_reg;
 
-/* Where the gun is pointing. Centre of the screen until a host supplies a
- * real one; M3_GUN_X and M3_GUN_Y override. The board reports ten bits. */
-static unsigned gun_axis(const char *env, unsigned dflt)
+/* Where the gun is pointing: the host's pointer, mapped onto the span the
+ * board reports across the screen -- X 150..651 left to right, Y 80..465
+ * top to bottom, Supermodel's calibration for its light-gun games. With no
+ * pointer it sits at the centre. M3_GUN_X and M3_GUN_Y override, raw. */
+static unsigned gun_axis(const char *env, int horiz)
 {
     const char *e = getenv(env);
-    return e ? (unsigned)strtoul(e, NULL, 0) & 0x3FFu : dflt;
+    int px, py, w = 0, h = 0;
+    if (e) return (unsigned)strtoul(e, NULL, 0) & 0x3FFu;
+    platform_framebuffer(&w, &h);
+    if (w < 2 || h < 2 || !platform_pointer(&px, &py))
+        return horiz ? 400u : 272u;
+    return horiz ? (unsigned)(150 + px * (651 - 150) / (w - 1))
+                 : (unsigned)(80 + py * (465 - 80) / (h - 1));
 }
-static unsigned gun_x(void) { return gun_axis("M3_GUN_X", 512u); }
-static unsigned gun_y(void) { return gun_axis("M3_GUN_Y", 512u); }
+static unsigned gun_x(void) { return gun_axis("M3_GUN_X", 1); }
+static unsigned gun_y(void) { return gun_axis("M3_GUN_Y", 0); }
 static uint8_t *g_vram;
 
 /* The tilegen's own register file, 0xF1180000..0xF11800FF. Only the ack at
