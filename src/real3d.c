@@ -46,6 +46,7 @@
  * direction is invented outright, and there are no textures.
  */
 #include "model3recomp/real3d.h"
+#include "model3recomp/savestate.h"
 #include "model3recomp/bus.h"
 #include "model3recomp/platform.h"
 #include "model3recomp/model3recomp.h"
@@ -122,6 +123,7 @@ static int g_textures;
 static float g_ambient = 0.20f;
 static int   g_ambient_forced;
 static int g_light_flip;
+static int g_old_proj;      /* M3_OLD_PROJ: the symmetric whole-screen projection */
 static uint32_t g_scene_hash;
 static uint32_t g_fb_hash;
 static float g_vp07;
@@ -474,13 +476,12 @@ static uint32_t texel_argb(unsigned fmt, unsigned v)
  * backwards, so odd repeats are reflected. */
 static unsigned wrap_axis(long i, unsigned size, int mirror)
 {
-    long n = (long)size;
-    if (mirror) {
-        i %= 2 * n; if (i < 0) i += 2 * n;
-        return (unsigned)(i < n ? i : 2 * n - 1 - i);
-    }
-    i %= n; if (i < 0) i += n;
-    return (unsigned)i;
+    /* Texture sizes are 32 << n, so a mask wraps -- two's complement makes
+     * it right for negative coordinates too. */
+    unsigned u = (unsigned)i, m = size - 1u;
+    if (mirror && (u & size))
+        return m - (u & m);
+    return u & m;
 }
 
 /* Bilinear, the way Supermodel samples (the hardware filters too). Each
@@ -515,34 +516,43 @@ static int64_t sample(const tri_t *tr, double u, double v)
 {
     unsigned tw = tr->tw ? tr->tw : 32u, th = tr->th ? tr->th : 32u;
     double fu = u - 0.5, fv = v - 0.5;
-    long u0 = (long)floor(fu), v0 = (long)floor(fv);
-    double a = fu - (double)u0, b = fv - (double)v0;
-    uint32_t px[4];
-    double out[4] = { 0, 0, 0, 0 }, wgt[4];
-    int k, c;
+    double flu = floor(fu), flv = floor(fv);
+    long u0 = (long)flu, v0 = (long)flv;
+    /* Weights in 8.8 fixed point: the sum of four products fits easily,
+     * and it is a good deal cheaper than doing this in doubles per pixel. */
+    unsigned wa = (unsigned)((fu - flu) * 256.0), wb = (unsigned)((fv - flv) * 256.0);
+    unsigned w[4], all, k, c;
+    uint32_t px[4], out;
+    unsigned x0 = wrap_axis(u0, tw, tr->mirror & 2u), x1 = wrap_axis(u0 + 1, tw, tr->mirror & 2u);
+    unsigned y0 = wrap_axis(v0, th, tr->mirror & 1u), y1 = wrap_axis(v0 + 1, th, tr->mirror & 1u);
+    unsigned base = tr->page * 1024u;
+    int t;
 
-    for (k = 0; k < 4; k++) {
-        unsigned x = wrap_axis(u0 + (k & 1), tw, tr->mirror & 2u);
-        unsigned y = wrap_axis(v0 + (k >> 1), th, tr->mirror & 1u);
-        int w = sheet_word(tr->tx + x, ((tr->ty + y) & 1023u) + tr->page * 1024u);
-        if (w < 0) return -1;
-        px[k] = texel_argb(tr->fmt, (unsigned)w);
+    t = sheet_word(tr->tx + x0, ((tr->ty + y0) & 1023u) + base); if (t < 0) return -1; px[0] = texel_argb(tr->fmt, (unsigned)t);
+    t = sheet_word(tr->tx + x1, ((tr->ty + y0) & 1023u) + base); if (t < 0) return -1; px[1] = texel_argb(tr->fmt, (unsigned)t);
+    t = sheet_word(tr->tx + x0, ((tr->ty + y1) & 1023u) + base); if (t < 0) return -1; px[2] = texel_argb(tr->fmt, (unsigned)t);
+    t = sheet_word(tr->tx + x1, ((tr->ty + y1) & 1023u) + base); if (t < 0) return -1; px[3] = texel_argb(tr->fmt, (unsigned)t);
+
+    /* Where the four are not all opaque, each takes its colour from the
+     * most opaque of them, so a cut-out's clear texels do not bleed dark
+     * into its edge. */
+    all = px[0] & px[1] & px[2] & px[3];
+    if ((all >> 24) != 255u) {
+        unsigned best = 0;
+        for (k = 1; k < 4; k++) if ((px[k] >> 24) > (px[best] >> 24)) best = k;
+        for (k = 0; k < 4; k++)
+            if ((px[k] >> 24) < (px[best] >> 24))
+                px[k] = (px[k] & 0xFF000000u) | (px[best] & 0x00FFFFFFu);
     }
-    /* Opaque colour wins at the edges. */
-    for (k = 0; k < 4; k++) {
-        int j, best = k;
-        for (j = 0; j < 4; j++)
-            if ((px[j] >> 24) > (px[best] >> 24)) best = j;
-        if ((px[k] >> 24) < (px[best] >> 24))
-            px[k] = (px[k] & 0xFF000000u) | (px[best] & 0x00FFFFFFu);
+    w[0] = (256u - wa) * (256u - wb); w[1] = wa * (256u - wb);
+    w[2] = (256u - wa) * wb;          w[3] = wa * wb;
+    out = 0;
+    for (c = 0; c < 32u; c += 8u) {
+        unsigned acc = 0;
+        for (k = 0; k < 4; k++) acc += w[k] * ((px[k] >> c) & 0xFFu);
+        out |= ((acc + 32768u) >> 16) << c;
     }
-    wgt[0] = (1 - a) * (1 - b); wgt[1] = a * (1 - b);
-    wgt[2] = (1 - a) * b;       wgt[3] = a * b;
-    for (k = 0; k < 4; k++)
-        for (c = 0; c < 4; c++)
-            out[c] += wgt[k] * (double)((px[k] >> (c * 8)) & 0xFFu);
-    return (int64_t)(((uint32_t)(out[3] + 0.5) << 24) | ((uint32_t)(out[2] + 0.5) << 16)
-                   | ((uint32_t)(out[1] + 0.5) << 8) | (uint32_t)(out[0] + 0.5));
+    return (int64_t)out;
 }
 static unsigned g_ntris;
 
@@ -990,7 +1000,7 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
 }
 
 /* ---- rasteriser -------------------------------------------------------- */
-static unsigned g_drawn;
+static _Thread_local unsigned g_drawn;
 static float *g_zbuf;
 static int g_zw, g_zh;
 
@@ -1018,14 +1028,18 @@ static int clip_near(const float v[3][5], float out[4][5])
     return n;
 }
 
-static unsigned g_cull_back, g_cull_near, g_cull_degen, g_cull_off;
-static unsigned g_tex_tris, g_flat_tris, g_tex_px, g_flat_px;
-static unsigned g_texel_hit, g_texel_clear, g_texel_missing;
+/* Thread-local: each band of the screen is rasterised on its own thread
+ * (see raster_bands), and these are diagnostics. With M3_REAL3D_STATS or
+ * M3_PICK set the whole screen is one band, so they stay exact. */
+static _Thread_local unsigned g_cull_back, g_cull_near, g_cull_degen, g_cull_off;
+static _Thread_local unsigned g_tex_tris, g_flat_tris, g_tex_px, g_flat_px;
+static _Thread_local unsigned g_texel_hit, g_texel_clear, g_texel_missing;
 /* M3_PICK=x,y: which polygon last wrote that pixel, and its texture. */
-static long g_pick = -1, g_pick_tri = -1;
+static long g_pick = -1;
+static _Thread_local long g_pick_tri = -1;
 /* Where the polygons that find nothing are looking. */
 enum { MISS_SLOTS = 24 };
-static struct { unsigned x, y, page, w, h, n; } g_miss[MISS_SLOTS];
+static _Thread_local struct { unsigned x, y, page, w, h, n; } g_miss[MISS_SLOTS];
 static void note_miss(const tri_t *t)
 {
     unsigned k;
@@ -1039,8 +1053,12 @@ static void note_miss(const tri_t *t)
     }
 }
 
+/* Where a viewport's view space lands on the screen: pixel = a * (X/Z) + b,
+ * and the rectangle it may draw in. */
+static struct { double ax, bx, ay, by; int x0, y0, x1, y1; } g_proj;
+
 static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
-                   const float L[3], float intensity)
+                   const float L[3], float intensity, int by0, int by1)
 {
     /* The light comes from the viewport now, not from an invention.
      * Words 0x04..0x06 are a unit vector -- (-0.72288, -0.16226, -0.67156)
@@ -1064,7 +1082,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
     /* Where the geometry actually is, in view space. A scene that comes
      * out empty is usually not a rasteriser problem: it is geometry that
      * never reaches the screen, and the bounds say so in one line. */
-    if (getenv("M3_REAL3D_STATS") && g_ntris) {
+    if (by0 == 0 && getenv("M3_REAL3D_STATS") && g_ntris) {
         float lo[3], hi[3];
         unsigned i, k, behind = 0;
         for (k = 0; k < 3; k++) { lo[k] = 1e30f; hi[k] = -1e30f; }
@@ -1098,7 +1116,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
          * were deliberately stippled for translucency. */
         double p[3][3], q[3][3];
         float clipped[4][5], src[3][5];
-        double d;
+        double d, invd;
         float lit, sh;
         if ((tr->alpha < 255) != (t >= g_ntris)) continue;
         int nclip, fan;
@@ -1145,8 +1163,8 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
 
         for (k = 0; k < 3; k++) {
             double iz = 1.0 / cv[k][2];
-            p[k][0] = fw * 0.5 + (double)cv[k][0] * iz * sx;
-            p[k][1] = fh * 0.5 - (double)cv[k][1] * iz * sy;
+            p[k][0] = g_proj.ax * (double)cv[k][0] * iz + g_proj.bx;
+            p[k][1] = g_proj.ay * (double)cv[k][1] * iz + g_proj.by;
             p[k][2] = cv[k][2];
             /* Perspective correction: interpolate u/z, v/z and 1/z linearly
              * in screen space and divide at the end. Interpolating u and v
@@ -1196,10 +1214,12 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
             y1 = hi < 0 ? 0 : (hi > fh - 1 ? fh - 1 : (int)hi + 1);
             if (y1 > fh - 1) y1 = fh - 1;
         }
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (x1 > fw - 1) x1 = fw - 1;
-        if (y1 > fh - 1) y1 = fh - 1;
+        if (x0 < g_proj.x0) x0 = g_proj.x0;
+        if (y0 < g_proj.y0) y0 = g_proj.y0;
+        if (y0 < by0) y0 = by0;
+        if (y1 > by1) y1 = by1;
+        if (x1 > g_proj.x1) x1 = g_proj.x1;
+        if (y1 > g_proj.y1) y1 = g_proj.y1;
         if (x1 < x0 || y1 < y0) { g_cull_off++; continue; }
         if (tr->textured) g_tex_tris++; else g_flat_tris++;
 
@@ -1225,14 +1245,15 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
             }
         }
 
+        invd = 1.0 / d;
         for (y = y0; y <= y1; y++) {
             for (x = x0; x <= x1; x++) {
                 double l0, l1, l2, z;
                 int o;
                 l0 = ((p[1][1]-p[2][1])*(x-p[2][0])
-                    + (p[2][0]-p[1][0])*(y-p[2][1])) / d;
+                    + (p[2][0]-p[1][0])*(y-p[2][1])) * invd;
                 l1 = ((p[2][1]-p[0][1])*(x-p[2][0])
-                    + (p[0][0]-p[2][0])*(y-p[2][1])) / d;
+                    + (p[0][0]-p[2][0])*(y-p[2][1])) * invd;
                 l2 = 1.0f - l0 - l1;
                 if (l0 < 0 || l1 < 0 || l2 < 0) continue;
                 z = l0*p[0][2] + l1*p[1][2] + l2*p[2][2];
@@ -1316,13 +1337,152 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
     }
 }
 
+/* ---- rasterising on every core -----------------------------------------
+ *
+ * The rasteriser is software and was the whole frame budget on its own in a
+ * busy scene. The screen is cut into horizontal bands, one per thread, and
+ * each thread draws every triangle clipped to its rows, in the same order --
+ * so the picture is byte-identical to drawing it on one thread, the depth
+ * buffer and the translucent pass included. Nothing here feeds back into
+ * the guest, so netplay and save states are untouched.
+ */
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+typedef SRWLOCK            m3_lock;
+typedef CONDITION_VARIABLE m3_cond;
+#  define LOCK(l)       AcquireSRWLockExclusive(l)
+#  define UNLOCK(l)     ReleaseSRWLockExclusive(l)
+#  define WAIT(c, l)    SleepConditionVariableSRW(c, l, INFINITE, 0)
+#  define WAKE_ALL(c)   WakeAllConditionVariable(c)
+#else
+#  include <pthread.h>
+#  include <unistd.h>
+typedef pthread_mutex_t m3_lock;
+typedef pthread_cond_t  m3_cond;
+#  define LOCK(l)       pthread_mutex_lock(l)
+#  define UNLOCK(l)     pthread_mutex_unlock(l)
+#  define WAIT(c, l)    pthread_cond_wait(c, l)
+#  define WAKE_ALL(c)   pthread_cond_broadcast(c)
+#endif
+
+#define MAX_BANDS 16
+static struct {
+    int      bands;             /* threads + 1: the caller draws band 0 */
+    m3_lock  lock;
+    m3_cond  go, done;
+    unsigned gen, pending;
+    uint32_t *fb; int fw, fh; float sx, sy, L[3], intensity;
+    int      y0, y1;            /* the rows being banded */
+} g_pool;
+
+static void band_rows(int i, int *by0, int *by1)
+{
+    int rows = g_pool.y1 - g_pool.y0 + 1;
+    *by0 = g_pool.y0 + rows * i / g_pool.bands;
+    *by1 = g_pool.y0 + rows * (i + 1) / g_pool.bands - 1;
+}
+
+#ifdef _WIN32
+static DWORD WINAPI band_worker(LPVOID arg)
+#else
+static void *band_worker(void *arg)
+#endif
+{
+    int i = (int)(intptr_t)arg, by0, by1;
+    unsigned seen = 0;
+    for (;;) {
+        LOCK(&g_pool.lock);
+        while (g_pool.gen == seen) WAIT(&g_pool.go, &g_pool.lock);
+        seen = g_pool.gen;
+        UNLOCK(&g_pool.lock);
+        band_rows(i, &by0, &by1);
+        raster(g_pool.fb, g_pool.fw, g_pool.fh, g_pool.sx, g_pool.sy,
+               g_pool.L, g_pool.intensity, by0, by1);
+        LOCK(&g_pool.lock);
+        if (--g_pool.pending == 0) WAKE_ALL(&g_pool.done);
+        UNLOCK(&g_pool.lock);
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+static void pool_start(void)
+{
+    int n = 0, i;
+    const char *e = getenv("M3_RENDER_THREADS");
+#ifdef _WIN32
+    n = (int)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    InitializeSRWLock(&g_pool.lock);
+    InitializeConditionVariable(&g_pool.go);
+    InitializeConditionVariable(&g_pool.done);
+#else
+    n = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    pthread_mutex_init(&g_pool.lock, NULL);
+    pthread_cond_init(&g_pool.go, NULL);
+    pthread_cond_init(&g_pool.done, NULL);
+#endif
+    /* One core is the guest's; the rest draw, up to MAX_BANDS in all. */
+    n = n > 2 ? n - 1 : 1;
+    if (e) n = atoi(e);
+    if (n < 1) n = 1;
+    if (n > MAX_BANDS) n = MAX_BANDS;
+    g_pool.bands = n;
+    for (i = 1; i < n; i++) {
+#ifdef _WIN32
+        HANDLE h = CreateThread(NULL, 0, band_worker, (LPVOID)(intptr_t)i, 0, NULL);
+        if (!h) { g_pool.bands = i; break; }
+        CloseHandle(h);
+#else
+        pthread_t t;
+        if (pthread_create(&t, NULL, band_worker, (void *)(intptr_t)i)) { g_pool.bands = i; break; }
+        pthread_detach(t);
+#endif
+    }
+}
+
+static void raster_bands(uint32_t *fb, int fw, int fh, float sx, float sy,
+                         const float L[3], float intensity)
+{
+    static int started;
+    int by0, by1;
+    if (getenv("M3_REAL3D_STATS") || g_pick >= 0) {
+        raster(fb, fw, fh, sx, sy, L, intensity, 0, fh - 1);
+        return;
+    }
+    if (!started) { started = 1; pool_start(); }
+    if (g_pool.bands <= 1) {
+        raster(fb, fw, fh, sx, sy, L, intensity, 0, fh - 1);
+        return;
+    }
+    LOCK(&g_pool.lock);
+    g_pool.fb = fb; g_pool.fw = fw; g_pool.fh = fh; g_pool.sx = sx; g_pool.sy = sy;
+    g_pool.L[0] = L[0]; g_pool.L[1] = L[1]; g_pool.L[2] = L[2];
+    g_pool.intensity = intensity;
+    g_pool.y0 = g_proj.y0; g_pool.y1 = g_proj.y1;
+    g_pool.pending = (unsigned)g_pool.bands - 1u;
+    g_pool.gen++;
+    WAKE_ALL(&g_pool.go);
+    UNLOCK(&g_pool.lock);
+
+    band_rows(0, &by0, &by1);
+    raster(fb, fw, fh, sx, sy, L, intensity, by0, by1);
+
+    LOCK(&g_pool.lock);
+    while (g_pool.pending) WAIT(&g_pool.done, &g_pool.lock);
+    UNLOCK(&g_pool.lock);
+}
+
 /* ---- entry point ------------------------------------------------------- */
 void real3d_render(void)
 {
     int fw = 0, fh = 0;
     uint32_t *fb = platform_framebuffer(&fw, &fh);
     uint32_t vpaddr;
-    unsigned guard, total = 0;
+    unsigned guard, total = 0, prio;
     static int inited;
 
     if (!fb) return;
@@ -1335,11 +1495,12 @@ void real3d_render(void)
         g_tex_all = getenv("M3_TEX_ALL") != NULL;
         g_textures = getenv("M3_NO_TEXTURES") == NULL;
         g_light_flip = getenv("M3_LIGHT_FLIP") != NULL;
+        g_old_proj = getenv("M3_OLD_PROJ") != NULL;
         e = getenv("M3_AMBIENT");
         if (e) { g_ambient = (float)atof(e); g_ambient_forced = 1; }
         g_tris = (tri_t *)malloc(sizeof(tri_t) * MAX_TRIS);
-        g_sheet = (uint16_t *)calloc(TEX_W * TEX_H, sizeof(uint16_t));
-        g_sheet_set = (uint8_t *)calloc(TEX_W * TEX_H, 1);
+        if (!g_sheet) g_sheet = (uint16_t *)calloc(TEX_W * TEX_H, sizeof(uint16_t));
+        if (!g_sheet_set) g_sheet_set = (uint8_t *)calloc(TEX_W * TEX_H, 1);
         inited = 1;
     }
     if (!g_tris) return;
@@ -1383,6 +1544,9 @@ void real3d_render(void)
           m3_node_dump = e ? (int)strtol(e, NULL, 0) : 0;
           e = getenv("M3_NODE_FROM");
           m3_node_from = e ? strtoull(e, NULL, 0) : 0; } } }
+    /* Viewports are drawn lowest priority first (word 0 bits 3..4), and a
+     * viewport with bit 5 set is switched off. */
+    for (prio = 0; prio < 4u; prio++) {
     vpaddr = 0x800000u;
     for (guard = 0; guard < 16u && vpaddr; guard++) {
         const uint8_t *vp = cull_at(vpaddr, 0x20);
@@ -1391,6 +1555,12 @@ void real3d_render(void)
         uint32_t next;
 
         if (!vp) break;
+        if (((rd32le(vp) >> 3) & 3u) != prio || (rd32le(vp) & 0x20u)) {
+            next = rd32le(vp + 0x01 * 4) & 0x00FFFFFFu;
+            if (next == vpaddr) break;
+            vpaddr = next;
+            continue;
+        }
         g_matbase = rd32le(vp + 0x16 * 4) & 0x00FFFFFFu;
 
         /* Words 0x0C and 0x0E are the sines of the horizontal and vertical
@@ -1407,6 +1577,43 @@ void real3d_render(void)
         if (hf < 1e-3f || vf < 1e-3f) { hf = 0.338f; vf = 0.262f; }
         sx = (fw * 0.5f) / tanf(hf);
         sy = (fh * 0.5f) / tanf(vf);
+        g_proj.ax = sx; g_proj.bx = fw * 0.5;
+        g_proj.ay = -sy; g_proj.by = fh * 0.5;
+        g_proj.x0 = 0; g_proj.y0 = 0; g_proj.x1 = fw - 1; g_proj.y1 = fh - 1;
+
+        /* Supermodel's reading, which replaces the above when the words are
+         * there: words 8..0xB give an asymmetric frustum as tangents --
+         * 1/(right-left), 1/(top-bottom) and where the centre sits in each
+         * -- and words 0x1A / 0x14 the viewport's own rectangle on the
+         * screen, X/Y in 12.4 and width/height in 14.2. A HUD is a viewport
+         * of its own; projected as though it were the whole screen, its
+         * counters land somewhere they cannot be seen. */
+        {
+            float cvv = f32_of(rd32le(vp + 0x08 * 4)), cww = f32_of(rd32le(vp + 0x09 * 4));
+            float io = f32_of(rd32le(vp + 0x0A * 4)), jo = f32_of(rd32le(vp + 0x0B * 4));
+            uint32_t w14 = rd32le(vp + 0x14 * 4), w1a = rd32le(vp + 0x1A * 4);
+            double vx = (w1a & 0xFFFFu) / 16.0, vy = (w1a >> 16) / 16.0;
+            double vw = (w14 & 0xFFFFu) / 4.0, vh = (w14 >> 16) / 4.0;
+            if (cvv > 1e-6f && cww > 1e-6f && vw >= 1.0 && vh >= 1.0 && !g_old_proj) {
+                double l = (0.0 - jo) / cvv, r = (1.0 - jo) / cvv;
+                double b = -(1.0 - io) / cww, t = io / cww;
+                g_proj.ax = vw / (r - l);
+                g_proj.bx = vx - l * g_proj.ax;
+                g_proj.ay = -vh / (t - b);
+                g_proj.by = vy + t * vh / (t - b);
+                g_proj.x0 = (int)vx; g_proj.y0 = (int)vy;
+                g_proj.x1 = (int)(vx + vw) - 1; g_proj.y1 = (int)(vy + vh) - 1;
+                if (g_proj.x0 < 0) g_proj.x0 = 0;
+                if (g_proj.y0 < 0) g_proj.y0 = 0;
+                if (g_proj.x1 > fw - 1) g_proj.x1 = fw - 1;
+                if (g_proj.y1 > fh - 1) g_proj.y1 = fh - 1;
+            }
+            if (getenv("M3_VP_TRACE"))
+                fprintf(stderr, "[vp] %u w0 %08X prio %u%s cv %g cw %g io %g jo %g rect %g,%g %gx%g\n",
+                        guard, rd32le(vp), (rd32le(vp) >> 3) & 3u,
+                        (rd32le(vp) & 0x20u) ? " disabled" : "",
+                        cvv, cww, io, jo, vx, vy, vw, vh);
+        }
 
         /* Words 0x04..0x06 are the sun vector in that order. Supermodel
          * takes it as (w5, w6, w4), and both readings are unit vectors in
@@ -1491,7 +1698,7 @@ void real3d_render(void)
                   if (e) { int px = atoi(e), py = 0; const char *c = strchr(e, ',');
                            if (c) py = atoi(c + 1);
                            g_pick = (long)py * fw + px; } }
-                raster(fb, fw, fh, sx, sy, light, intensity);
+                raster_bands(fb, fw, fh, sx, sy, light, intensity);
                 if (g_pick_tri >= 0) {
                     const tri_t *p = &g_tris[g_pick_tri];
                     fprintf(stderr, "[pick] vp%u tri %ld tex %d at %u,%u page %u"
@@ -1551,6 +1758,7 @@ void real3d_render(void)
         if (next == vpaddr) break;
         vpaddr = next;
     }
+    }
     g_tri_count = total;
 
     /* M3_REAL3D_STATS: how much geometry the game handed us, and how much of
@@ -1597,4 +1805,17 @@ void real3d_render(void)
             fflush(stderr);
         }
     }
+}
+
+/* The texture sheet is built from uploads the guest made long ago, so it is
+ * state too: restoring RAM without it leaves every surface wrong. */
+void real3d_state(m3_state_t *st)
+{
+    if (!g_sheet) g_sheet = (uint16_t *)calloc(TEX_W * TEX_H, sizeof(uint16_t));
+    if (!g_sheet_set) g_sheet_set = (uint8_t *)calloc(TEX_W * TEX_H, 1);
+    if (!g_sheet || !g_sheet_set) return;
+    m3_state_io(st, g_sheet, (size_t)TEX_W * TEX_H * sizeof(uint16_t));
+    m3_state_io(st, g_sheet_set, (size_t)TEX_W * TEX_H);
+    M3_STATE_VAR(st, g_fifo_seen);
+    M3_STATE_VAR(st, g_tex_uploads);
 }

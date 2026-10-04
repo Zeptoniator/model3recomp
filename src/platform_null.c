@@ -48,7 +48,6 @@ uint32_t *platform_framebuffer(int *w, int *h)
 
 int platform_poll(void) { return 1; }
 
-int platform_pointer(int *x, int *y) { (void)x; (void)y; return 0; }
 
 void platform_present(void) { }
 
@@ -61,41 +60,8 @@ uint64_t platform_ticks_us(void)
     return g_virtual_us;
 }
 
-/* Headless input, for a harness.
- *
- *   M3_BUTTONS   a mask held down for the whole run
- *   M3_COIN_AT   field number at which to press coin 1 for a moment
- *   M3_START_AT  likewise for start 1
- *
- * The timed ones exist because a coin slot is an edge, not a level: a game
- * counts the transition, so a mask held from the first field to the last may
- * be seen once, or not at all if the guest was not looking yet.
- */
-#define PRESS_FIELDS 8u
+/* No controls of its own: scripted input (M3_BUTTONS, M3_COIN_AT, ...) is
+ * input.c's, so it behaves the same headless and in a window. */
+void platform_sample(m3_input_t *in) { (void)in; }
 
-unsigned platform_buttons(void)
-{
-    static int probed;
-    static unsigned held;
-    static unsigned long coin_at, start_at;
-    unsigned b;
-    unsigned long f;
-
-    if (!probed) {
-        const char *e;
-        probed = 1;
-        e = getenv("M3_BUTTONS");
-        held = e ? (unsigned)strtoul(e, NULL, 0) : 0u;
-        e = getenv("M3_COIN_AT");
-        coin_at = e ? strtoul(e, NULL, 0) : 0u;
-        e = getenv("M3_START_AT");
-        start_at = e ? strtoul(e, NULL, 0) : 0u;
-    }
-    b = held;
-    f = (unsigned long)model3recomp_frame_count();
-    if (coin_at && f >= coin_at && f < coin_at + PRESS_FIELDS)
-        b |= M3_BTN_COIN1;
-    if (start_at && f >= start_at && f < start_at + PRESS_FIELDS)
-        b |= M3_BTN_START1 | M3_BTN_TRIG1;
-    return b;
-}
+void platform_set_status(const char *s) { (void)s; }

@@ -3,6 +3,7 @@
 #define MODEL3RECOMP_PLATFORM_H
 
 #include <stdint.h>
+#include "model3recomp/input.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,24 +15,15 @@ int      platform_poll(void);          /* 0 when the user wants to quit */
 void     platform_present(void);
 uint64_t platform_ticks_us(void);
 
-/* Cabinet buttons the host is holding down, as a bitmask. The board's I/O
- * registers are active low; this is not -- a set bit means pressed. */
-#define M3_BTN_COIN1    0x0001u
-#define M3_BTN_COIN2    0x0002u
-#define M3_BTN_TEST     0x0004u
-#define M3_BTN_SERVICE  0x0008u
-#define M3_BTN_START1   0x0010u
-#define M3_BTN_START2   0x0020u
-#define M3_BTN_TRIG1    0x0040u   /* light gun trigger                    */
-#define M3_BTN_TRIG2    0x0080u
-#define M3_BTN_OFFSCR1  0x0100u   /* pointed off screen, which is reload  */
-#define M3_BTN_OFFSCR2  0x0200u
+/* Sample the host's own controls into a record (input.h): buttons for
+ * player 1 and, with a second device, player 2, and the guns in board
+ * coordinates. The record arrives with the guns centred and nothing
+ * pressed; a platform with no controls leaves it alone. Called once per
+ * field. */
+void platform_sample(m3_input_t *in);
 
-unsigned platform_buttons(void);
-
-/* Where the player is pointing, in framebuffer pixels. 0 when the host has
- * no pointer, and the gun then sits at the centre of the screen. */
-int platform_pointer(int *x, int *y);
+/* A line of status -- netplay, save states -- for the title bar. */
+void platform_set_status(const char *s);
 
 /* The framebuffer renderers draw into: w*h pixels, 0xAARRGGBB. */
 uint32_t *platform_framebuffer(int *w, int *h);

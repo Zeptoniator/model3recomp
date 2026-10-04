@@ -151,6 +151,12 @@ void     m3_timebase_set(unsigned spr, uint32_t v);
  * defines M3_LOOP_GUARD, so a normal build is unchanged; with it, a guest
  * that spins says which of its own functions it is spinning in.
  */
+/* Every lifted function opens with M3_FN. The one at the game's safe point
+ * (savestate.h) is where save states are taken and restored; for every other
+ * function this is one compare against a constant. */
+#include "model3recomp/savestate.h"
+#define M3_SAFEPOINT(a) ((uint32_t)(a) == m3_safepoint_pc ? m3_safepoint() : (void)0)
+
 #ifdef M3_LOOP_GUARD
 extern uint32_t m3_fn_now;
 void m3_loop_guard(uint32_t branch_at);
@@ -161,10 +167,10 @@ extern uint32_t m3_fn_prev;
 #define M3_FN_RING 32u
 extern uint32_t m3_fn_ring[M3_FN_RING];
 extern uint32_t m3_fn_ring_n;
-#define M3_FN(a)        (m3_fn_prev = m3_fn_now, m3_fn_now = (uint32_t)(a), m3_fn_count((uint32_t)(a)))
+#define M3_FN(a)        (m3_fn_prev = m3_fn_now, m3_fn_now = (uint32_t)(a), m3_fn_count((uint32_t)(a)), M3_SAFEPOINT(a))
 #define M3_LOOP_NOTE(a) m3_loop_guard((uint32_t)(a))
 #else
-#define M3_FN(a)        ((void)0)
+#define M3_FN(a)        M3_SAFEPOINT(a)
 #define M3_LOOP_NOTE(a) ((void)0)
 #endif
 
@@ -197,7 +203,7 @@ extern uint32_t m3_fn_ring_n;
 #define M3_LOOP_CREDIT (M3_LOOP_PERIOD / 16u)
 extern uint32_t m3_loop_n;
 void m3_loop_tick(void);
-#define M3_LOOPED(a)                                                       do {                                                                       M3_LOOP_NOTE(a);                                                       if (!(++m3_loop_n & (M3_LOOP_PERIOD - 1u))) m3_loop_tick();        } while (0)
+#define M3_LOOPED(a)                                                       do {                                                                       M3_LOOP_NOTE(a); M3_SAFEPOINT(a);                                                       if (!(++m3_loop_n & (M3_LOOP_PERIOD - 1u))) m3_loop_tick();        } while (0)
 
 /* An instruction the lifter does not translate. Greppable and countable --
  * never a silent wrong answer. See tools/ppc_lifter.py --stats. */

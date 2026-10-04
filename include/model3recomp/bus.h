@@ -74,6 +74,12 @@ void     bus_write64(uint32_t addr, uint64_t v);
 /* Direct RAM window, for DMA engines and the debugger. Bounds-checked. */
 uint8_t *bus_ram(void);
 
+/* Battery-backed RAM, 128 KB: high scores and settings live here. */
+uint8_t *bus_backup(size_t *size);
+
+/* The 93C46 serial EEPROM: 64 sixteen-bit words of game settings. */
+uint16_t *bus_eeprom(void);
+
 /* The work-RAM base, for the inline fast path in lift.h. Valid between
  * bus_init() and bus_shutdown(); NULL outside that. */
 extern uint8_t *m3_ram_base;

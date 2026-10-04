@@ -1,52 +1,46 @@
 # Roadmap
 
-The goal for the first milestone is one specific frame: **The Lost World's
-attract mode**. Everything below is ordered by what that actually requires,
-not by what is most interesting to write.
+The first milestone was one frame of *The Lost World*'s attract mode. That
+is long past: the reference title plays through stage one, two players can
+play it over a network, and it saves and loads its state. What is left is
+ordered by what a player notices.
 
-## Next: close the interpreter/native divergence
+## Next: the rest of the picture
 
-The boot interpreter reaches the game's main loop and the game draws into
-tilemap VRAM under it. The native build does not get that far, despite running
-the same lifted instruction set. One of them is wrong and they can be compared.
+- **Mipmaps.** Uploads carry their mip chains and they are thrown away;
+  distant surfaces shimmer for want of them.
+- **Fog and the viewport's other lighting terms.** Some scenes come out
+  washed out where the hardware would fade to the fog colour.
+- **What still goes missing.** The Lost World's T-Rex is meant to have target
+  circles on it; they are not drawn. Find out whether that is a polygon flag
+  the renderer ignores or a 2D layer.
 
-- Step both from the same reset state and diff the register file and RAM at
-  intervals until they part company. That is the conformance harness the repo
-  owes anyway, and it pays for itself immediately here.
-- Likely suspects, in order: an instruction whose C translation differs from
-  the interpreter's Python, interrupt delivery timing, and the SCSI trigger
-  conditions.
+## Then: sound
 
-Once they agree, everything below is reachable.
+68EC000 plus two SCSPs on a separate board, driven over a latch. Its own
+recompilation (the 68000 program) or an interpreter, and an SCSP renderer.
+The Sound menu is waiting for it.
 
-## Then: something on screen
+## Then: more of the host
 
-- **Tilemap renderer.** Four scroll layers, palette, priority. This is what
-  draws the 2D parts of attract mode and the service menu, and the service
-  menu is the cheapest possible proof that the machine is alive.
-- **Real3D Pro-1000.** The big one: culling-RAM node tree walk, display-list
-  parse, transform and lighting, texture upload and decode from VROM, and a
-  perspective-correct rasterizer. Attract mode is mostly 3D, so this is the
-  gate on the milestone.
-
-## Then: the rest of the board
-
-- Inputs wired into `0xF0040000` so buttons and coins reach the game.
-- Sound: 68EC000 plus two SCSPs. Attract mode has music; it is not needed for
-  a picture.
-- Backup SRAM persistence.
-- Real-time clock.
+- Higher internal resolution for the 3D. The rasteriser is software and
+  fixed at 496x384; rendering the 3D at a multiple and compositing the
+  tilemaps over it is the obvious shape.
+- Netplay over UDP with rollback, if lockstep's input delay proves too much
+  over the internet. Lockstep over TCP is right for a LAN and for Tailscale.
+- Netplay across the internet rather than a LAN, and over Tailscale, on
+  recomp-netlab: the LAN scenario passes; a NAT'd pair is next.
+- Building on the farm: its clang-cl builders need SDL2 for the window
+  layer.
 
 ## Deferred
 
-- **Step 2.x support.** Different CPU clock, Real3D revision and DMA path. The
-  reference title is Step 1.5; generalising before one game works is the
-  classic way to get two half-working things.
+- **Step 2.x support.** Different CPU clock, Real3D revision and DMA path.
 - **Security board (315-5881).** Step 2.x only.
 - **Network board.** Used by the linked-cabinet titles.
 - **Other titles.** *Scud Race*, *Virtua Fighter 3*, *Sega Rally 2* and the
-  rest should follow once the board is real, since none of this is
-  title-specific. They are not a goal until one game runs.
+  rest should follow, since none of this is title-specific -- each needs its
+  lift, its safe point and whatever its board revision differs in.
 
 ## Out of scope
 

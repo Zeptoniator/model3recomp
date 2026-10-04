@@ -19,6 +19,9 @@ set(M3_SOURCES
     src/scenedump.c
     src/real3d.c
     src/tilegen.c
+    src/input.c
+    src/netplay.c
+    src/savestate.c
 )
 if(SDL2_FOUND)
     list(APPEND M3_SOURCES src/platform_sdl.c)
@@ -39,6 +42,10 @@ if(SDL2_FOUND)
     target_link_libraries(model3recomp PUBLIC SDL2::SDL2)
 else()
     message(STATUS "SDL2 not found -- building headless (src/platform_null.c)")
+endif()
+
+if(WIN32)
+    target_link_libraries(model3recomp PUBLIC ws2_32)
 endif()
 
 if(NOT MSVC)

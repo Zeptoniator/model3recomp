@@ -6,35 +6,87 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Known issues
-- **A guest can spin with interrupts disabled waiting on an interrupt-set
-  word.** The Lost World's main loop calls a routine that waits at
-  `0x0011837C` for RAM `0x001C10D0` to change, and only the decrementer
-  handler writes it. The decrementer now exists and that handler does run, but
-  the wait still takes about 13 million iterations per tick, and changing the
-  decrementer's rate over four orders of magnitude does not move it at all --
-  so what gates it is not the rate. `M3_DEC_RATE` tunes that rate for whoever
-  looks next. The hottest backward branch in a 3,000-field run is that one,
-  568 million times.
+### Added
+- **The 93C46 serial EEPROM**, modelled on Supermodel's: bit-banged through
+  the I/O board's register 0x00 and read on bit 5 of bank 1, kept in the
+  battery RAM file and shared at netplay connect. It replaces a toggle that
+  only satisfied the boot's handshake; games keep their settings in it.
+- **Game options** (`m3_option_add()`, a Game menu) and **one-shot cheat
+  actions** (`m3_cheat_add_action()`), both carried in the input record so a
+  netplay host's choices hold on both machines.
+- Netplay logs its RAM hash every ten seconds, for comparing two machines'
+  logs (recomp-netlab's LAN scenario does).
+- **A menu bar** on Windows: File (save/load state, slots, reset, quit),
+  Video (window size, fullscreen, sharp or bilinear, scanlines, 4:3),
+  Sound (a placeholder until there is sound), Controls (mouse, gamepad,
+  cursor, Sinden border), Debug (the game's cheats) and Multiplayer (host,
+  join, disconnect, input delay). Settings persist in an ini file.
+- **Cursor options.** Hidden by default, as on the cabinet; a crosshair or
+  the system pointer if wanted. Gamepads and netplay partners always get a
+  crosshair, having nothing else to aim by.
+- **Gamepads**, as player 1 or 2: the left stick aims, A or the right
+  trigger fires, B or the left trigger reloads, Start, and Back for a coin.
+- **Sinden light gun support**: a white border for the gun to find the
+  screen by; the gun itself is an absolute mouse.
+- **Save states** at a game-supplied safe point (`m3_config_t.safepoint_pc`,
+  `savestate.h`). Exact: a state loaded in a new process reaches
+  byte-identical frames. F5, F6 and F7, or `M3_STATE_SAVE_AT` /
+  `M3_STATE_LOAD` from a script.
+- **Netplay**: two players in lockstep over TCP (`netplay.h`), on a LAN,
+  over Tailscale or through a forwarded port. Battery RAM is shared at
+  connect, cheats come from the host, and a RAM hash every two seconds
+  catches a desync.
+- **Battery RAM persistence** (`m3_config_t.nvram_path`).
+- **Cheats** a title registers with `m3_cheat_add()`; they travel in the
+  input record so both netplay machines apply them.
+- `M3_FIRE_EVERY`, `M3_CHEATS` and `M3_PICK=x,y` (which polygon painted a
+  pixel) for harnesses and debugging.
 
-- **The CROM bank mapping is wrong, so a guest reads zeros for its data.** The
-  banked window is 8 MB of a 32 MB image, so at most two bits of the register
-  can be the bank; the current reading shifts the whole byte, and The Lost
-  World writes 0xF7 for most of its run, landing at offset 0xF700000 -- far
-  outside the image. Every read through the window then returns zero: 299,984
-  of them in a 2,500-field run, about 1.2 MB of the guest's own data.
-  `tools/rom_loader.py` warns of exactly this in a comment, and the symptom is
-  what it says -- the game boots and then has nothing to show.
+### Changed
+- **Inputs are latched once a field** into an `m3_input_t` (`input.h`),
+  and the bus reads only that. Every read in a field agrees, which lockstep
+  netplay requires. `platform_buttons()` and `platform_pointer()` are gone;
+  a platform implements `platform_sample()` instead.
+- Quitting goes through `model3recomp_quit()`, which saves battery RAM and
+  leaves a netplay session before it exits; Escape used to stop the field
+  clock and leave the window hanging.
+- The SDL build holds the display to 57.524 Hz; `M3_NOTHROTTLE` or holding
+  Tab runs flat out.
 
-  The right mapping is not yet known, so the default is unchanged rather than
-  replaced by a guess. `M3_CROM_BANK` selects between candidate readings and
-  `M3_TRACE_BANK` reports which window offsets a guest reads under which
-  register value: The Lost World reads `0x000000`, `0x010000`, `0x120000`,
-  `0x150000` and `0x400000` under `F1`, `F2`, `F3` and `F5`. Every candidate
-  tried leaves it worse off than zeros do, which says it finds wrong data
-  rather than none.
+- **The rasteriser uses every core.** The screen is cut into bands, one
+  per thread, each drawing every triangle clipped to its rows in the same
+  order, so the picture is byte-identical to one thread. A busy round went
+  from 30 ms of 3D a field -- past the 17.4 ms a field has -- to 7.
+  `M3_RENDER_THREADS` sets the count; `M3_PROFILE` prints where a field's
+  time goes. Bilinear sampling moved to fixed point, with power-of-two
+  wrapping and an opaque fast path.
 
 ### Fixed
+- **Viewports were drawn in list order, not priority order.** The Lost
+  World's HUD is a viewport of priority 3 that comes first in the list, so
+  the scene was painted over it: the ammunition counter, the RELOAD prompt,
+  pickups and cinematic bars all came and went. Viewports are now drawn
+  lowest priority first (word 0 bits 3..4), a disabled one (bit 5) is
+  skipped, and each projects through its own frustum (words 8..0xB) into its
+  own rectangle (0x14, 0x1A), Supermodel's way.
+- **Start 2 never reached the game.** Bit 5 of the input register is start 2
+  in bank 0 and the EEPROM data line in bank 1; the handshake toggle was
+  laid over both, so start 2 flickered on every read and a second player
+  could never join.
+- **Mip-only texture loads overwrote the textures they belong to.** The
+  upload's type byte was ignored. FIFO entries were screened by size, but a
+  VROM load has the rest of the ROM after it, so mip chains landed on the
+  base level -- the noise and stripes over a stage's scenery.
+- **VROM texture addresses count 32-bit words**, and the 32 MB image is
+  mirrored. Read as 16-bit units, every stage texture was noise.
+- **Tilemap depth and priority** were the wrong nibbles of register 0x20;
+  scroll, per-line scroll, the stencil and the colour offsets were missing.
+- **Translucent polygons** were drawn opaque.
+- **Culling-node siblings** took the node's own transform; texture offsets,
+  LOD tables, node discard and colour tables were ignored.
+- Eleven texel formats were missing; textures were not tinted by the polygon
+  colour; no filtering or mirroring.
+
 - **Tilemap layers can be eight bits a pixel, and half of them are.** The
   renderer decoded everything as four, which turns a photograph into
   stripes. Register 0x20 carries a nibble of depth flags -- set means

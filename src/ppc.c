@@ -4,6 +4,7 @@
  * m3_ctx directly through the macros in lift.h. This file owns the storage,
  * the reset state, and the few helpers that need a real function.
  */
+#include "model3recomp/savestate.h"
 #include "model3recomp/ppc.h"
 #include "model3recomp/lift.h"
 #include "model3recomp/model3recomp.h"
@@ -258,4 +259,12 @@ void m3_unimplemented(uint32_t addr, uint32_t raw, const char *mn)
     if (n < SEEN_MAX) seen[n++] = addr;
     fprintf(stderr, "[model3recomp] unimplemented %s at %08X (%08X)\n",
             mn ? mn : "?", addr, raw);
+}
+
+void ppc_state(m3_state_t *st)
+{
+    M3_STATE_VAR(st, m3_ctx);
+    M3_STATE_VAR(st, m3_work);
+    M3_STATE_VAR(st, g_tb_origin);
+    M3_STATE_VAR(st, g_tb_value);
 }

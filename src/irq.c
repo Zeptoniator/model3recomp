@@ -19,6 +19,7 @@
  * that waits on an interrupt-set flag necessarily dispatches through one, so
  * that is where the field advances.
  */
+#include "model3recomp/savestate.h"
 #include "model3recomp/irq.h"
 #include "model3recomp/func_table.h"
 #include "model3recomp/bus.h"
@@ -214,4 +215,13 @@ int irq_dispatch(void)
 
     m3_ctx.msr = saved_msr;            /* the guest's rfi became a return */
     return ran;
+}
+
+void irq_state(m3_state_t *st)
+{
+    M3_STATE_VAR(st, g_pending);
+    M3_STATE_VAR(st, g_enable);
+    M3_STATE_VAR(st, g_field);
+    M3_STATE_VAR(st, g_in_dispatch);
+    M3_STATE_VAR(st, g_dec_work);
 }

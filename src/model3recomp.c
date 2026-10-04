@@ -1,9 +1,12 @@
 /* model3recomp -- library entry points and frame pacing. */
+#include "model3recomp/savestate.h"
 #include "model3recomp/model3recomp.h"
 #include "model3recomp/platform.h"
 #include "model3recomp/ppc.h"
 #include "model3recomp/tilegen.h"
 #include "model3recomp/real3d.h"
+#include "model3recomp/input.h"
+#include "model3recomp/netplay.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,13 +35,52 @@ int model3recomp_init(const m3_config_t *cfg)
     irq_init();
     ppc_reset();
 
+    m3_safepoint_pc = g_cfg.safepoint_pc ? g_cfg.safepoint_pc : 0xFFFFFFFFu;
+    if (g_cfg.nvram_path) {
+        size_t n = 0;
+        uint8_t *b = bus_backup(&n);
+        FILE *f = fopen(g_cfg.nvram_path, "rb");
+        if (f && b) {
+            size_t got = fread(b, 1, n, f);
+            /* The EEPROM follows the battery RAM in the same file. */
+            got += fread(bus_eeprom(), 1, 128, f);
+            fprintf(stderr, "[model3recomp] battery RAM: %u bytes from %s\n",
+                    (unsigned)got, g_cfg.nvram_path);
+        }
+        if (f) fclose(f);
+    }
+
     if (!platform_init(g_cfg.width, g_cfg.height,
                        g_cfg.title ? g_cfg.title : "model3recomp"))
         return 0;
+    /* After the window, so a host waiting for its player 2 is visible. */
+    if (!netplay_init_from_env())
+        fprintf(stderr, "[model3recomp] netplay did not start; playing alone\n");
 
     g_last_field_us = m3_work;
     g_running = 1;
     return 1;
+}
+
+const m3_config_t *model3recomp_config(void) { return &g_cfg; }
+
+void model3recomp_save_nvram(void)
+{
+    /* A joiner's battery RAM came from the host; keep the player's own. */
+    if (g_cfg.nvram_path && netplay_role() != 2) {
+        size_t n = 0;
+        uint8_t *b = bus_backup(&n);
+        FILE *f = b ? fopen(g_cfg.nvram_path, "wb") : NULL;
+        if (f) { fwrite(b, 1, n, f); fwrite(bus_eeprom(), 1, 128, f); fclose(f); }
+    }
+}
+
+void model3recomp_quit(int code)
+{
+    model3recomp_save_nvram();
+    netplay_shutdown();
+    model3recomp_shutdown();
+    exit(code);
 }
 
 void model3recomp_shutdown(void)
@@ -103,14 +145,38 @@ void model3recomp_end_frame(void)
         uint32_t *fb = platform_framebuffer(&fw, &fh);
         if (fb) memset(fb, 0, (size_t)fw * (size_t)fh * sizeof(uint32_t));
     }
-    tilegen_render_pass(0);
-    real3d_render();
-    tilegen_render_pass(1);
-    platform_present();
+    {
+        /* M3_PROFILE: where a field's time goes, printed every 300. */
+        static int on = -1;
+        static uint64_t t_guest, t_2d, t_3d, t_present, last, n;
+        uint64_t t0, t1, t2, t3, t4;
+        if (on < 0) on = getenv("M3_PROFILE") != NULL;
+        t0 = on ? platform_ticks_us() : 0;
+        tilegen_render_pass(0);
+        t1 = on ? platform_ticks_us() : 0;
+        real3d_render();
+        t2 = on ? platform_ticks_us() : 0;
+        tilegen_render_pass(1);
+        t3 = on ? platform_ticks_us() : 0;
+        platform_present();
+        t4 = on ? platform_ticks_us() : 0;
+        if (on) {
+            if (last) t_guest += t0 - last;
+            t_2d += (t1 - t0) + (t3 - t2); t_3d += t2 - t1; t_present += t4 - t3;
+            last = t4;
+            if (++n % 300 == 0) {
+                fprintf(stderr, "[profile] per field: guest %.1f ms  2d %.1f  3d %.1f  present %.1f\n",
+                        t_guest / 300000.0, t_2d / 300000.0, t_3d / 300000.0, t_present / 300000.0);
+                t_guest = t_2d = t_3d = t_present = 0;
+            }
+        }
+    }
     if (g_frame_hook)
         g_frame_hook();
     if (!model3recomp_poll())
-        g_running = 0;
+        model3recomp_quit(0);
+    /* The next field's inputs, fixed now for every read the guest makes. */
+    m3_input_latch();
 }
 
 int model3recomp_poll(void) { return platform_poll(); }
@@ -129,4 +195,10 @@ void model3recomp_run(void)
      * does. Keep presenting so the host does not appear hung. */
     while (g_running)
         model3recomp_end_frame();
+}
+
+void model3recomp_state(m3_state_t *st)
+{
+    M3_STATE_VAR(st, g_last_field_us);
+    M3_STATE_VAR(st, g_frames);
 }

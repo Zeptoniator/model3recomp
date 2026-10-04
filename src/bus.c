@@ -9,9 +9,11 @@
  *
  * See docs/technical/execution-model.md.
  */
+#include "model3recomp/savestate.h"
 #include "model3recomp/bus.h"
 #include "model3recomp/real3d.h"
 #include "model3recomp/platform.h"
+#include "model3recomp/input.h"
 #define M3_NL "\n"
 #include "model3recomp/irq.h"
 #include "model3recomp/scsi.h"
@@ -46,6 +48,101 @@ static uint32_t  g_crom_bank_reg;   /* what was written, which reads back verbat
  * never exits. */
 static uint32_t  g_io_ctrl;
 static uint32_t  g_io_ready;        /* see the serial-handshake note below */
+
+/* The 93C46 serial EEPROM: 64 words, bit-banged through the I/O board's
+ * register 0x00 (bit 6 chip select, bit 7 clock, bit 5 data in) and read
+ * back on bit 5 of register 0x04 in bank 1. Games keep their settings in
+ * it -- The Lost World its country, which decides whether it plays in
+ * Japanese or English. Modelled on Supermodel's 93C46.cpp. */
+static struct {
+    uint16_t regs[64];
+    unsigned cs, clk, di, dout;
+    uint32_t in, out;
+    unsigned bits_out, addr, busy;
+    int      receiving, locked;
+} g_ee;
+
+static uint16_t rev16(uint16_t v)
+{
+    uint16_t o = 0;
+    int i;
+    for (i = 0; i < 16; i++) if (v & (1u << i)) o |= (uint16_t)(1u << (15 - i));
+    return o;
+}
+
+static void eeprom_reset(void)
+{
+    memset(g_ee.regs, 0xFF, sizeof g_ee.regs);
+    g_ee.receiving = 1;
+    g_ee.locked = 1;
+}
+
+static void eeprom_write(unsigned cs, unsigned clk, unsigned di)
+{
+    unsigned prev = g_ee.clk;
+    g_ee.cs = cs; g_ee.clk = clk; g_ee.di = di;
+    if (!cs) {                      /* deselect: ready for a command */
+        g_ee.in = 0;
+        g_ee.receiving = 1;
+        g_ee.busy = 5;
+        return;
+    }
+    if (prev || !clk) return;       /* act on the rising edge only */
+    if (g_ee.receiving) {
+        uint32_t b = g_ee.in = (g_ee.in << 1) | di;
+        if ((b & 0xFFFFFFC0u) == 0x180u) {             /* READ */
+            g_ee.addr = b & 0x3Fu;
+            g_ee.out = rev16(g_ee.regs[g_ee.addr]);
+            g_ee.bits_out = 0;
+            g_ee.receiving = 0;
+        } else if (b == 0x13u) {                         /* WEN */
+            g_ee.locked = 0;
+        } else if (b == 0x10u) {                         /* WDS */
+            g_ee.locked = 1;
+        } else if ((b & 0xFFC00000u) == 0x01400000u) {   /* WRITE */
+            if (getenv("M3_EE_TRACE")) {
+#ifdef M3_LOOP_GUARD
+                extern uint32_t m3_fn_now;
+                fprintf(stderr, "[eeprom] field %llu write %2u = %04X in %08X%s" M3_NL,
+                        (unsigned long long)model3recomp_frame_count(),
+                        (unsigned)((b >> 16) & 0x3Fu), (unsigned)(b & 0xFFFFu), m3_fn_now,
+                        g_ee.locked ? " (locked)" : "");
+#endif
+            }
+            if (!g_ee.locked) g_ee.regs[(b >> 16) & 0x3Fu] = (uint16_t)b;
+            g_ee.dout = 1;
+        } else if ((b & 0xFFF00000u) == 0x01100000u) {   /* WRALL */
+            int i;
+            if (!g_ee.locked) for (i = 0; i < 64; i++) g_ee.regs[i] = (uint16_t)b;
+            g_ee.dout = 1;
+        } else if ((b & 0xFFFFFFC0u) == 0x1C0u) {        /* ERASE */
+            if (!g_ee.locked) g_ee.regs[b & 0x3Fu] = 0xFFFF;
+            g_ee.dout = 1;
+        } else if ((b & 0xFFFFFFF0u) == 0x120u) {        /* ERALL */
+            if (!g_ee.locked) memset(g_ee.regs, 0xFF, sizeof g_ee.regs);
+            g_ee.dout = 1;
+        }
+    } else {
+        g_ee.dout = g_ee.out & 1u;
+        g_ee.out >>= 1;
+        if (++g_ee.bits_out == 16) {                     /* on to the next word */
+            g_ee.addr = (g_ee.addr + 1) & 0x3Fu;
+            g_ee.out = rev16(g_ee.regs[g_ee.addr]);
+            g_ee.bits_out = 0;
+        }
+    }
+}
+
+static unsigned eeprom_read(void)
+{
+    if (g_ee.receiving) {           /* not sending: busy, then ready */
+        if (g_ee.busy) { g_ee.busy--; return 0; }
+        return 1;
+    }
+    return g_ee.dout;
+}
+
+uint16_t *bus_eeprom(void) { return g_ee.regs; }
 static uint32_t  g_pci_addr;        /* PCI CONFIG_ADDRESS latch            */
 static uint32_t  g_r3d_ping;        /* Real3D status, bit 1 is the ping    */
 
@@ -66,23 +163,10 @@ static uint64_t g_dev_reads[256];
  * shoot stays up forever, which is exactly where this got stuck. */
 static uint32_t g_serial1, g_serial2, g_gun_reg;
 
-/* Where the gun is pointing: the host's pointer, mapped onto the span the
- * board reports across the screen -- X 150..651 left to right, Y 80..465
- * top to bottom, Supermodel's calibration for its light-gun games. With no
- * pointer it sits at the centre. M3_GUN_X and M3_GUN_Y override, raw. */
-static unsigned gun_axis(const char *env, int horiz)
-{
-    const char *e = getenv(env);
-    int px, py, w = 0, h = 0;
-    if (e) return (unsigned)strtoul(e, NULL, 0) & 0x3FFu;
-    platform_framebuffer(&w, &h);
-    if (w < 2 || h < 2 || !platform_pointer(&px, &py))
-        return horiz ? 400u : 272u;
-    return horiz ? (unsigned)(150 + px * (651 - 150) / (w - 1))
-                 : (unsigned)(80 + py * (465 - 80) / (h - 1));
-}
-static unsigned gun_x(void) { return gun_axis("M3_GUN_X", 1); }
-static unsigned gun_y(void) { return gun_axis("M3_GUN_Y", 0); }
+/* Buttons and guns come from the record latched for this field (input.c),
+ * never from the host directly: every read in a field must agree, and on a
+ * netplay session both machines must see the same thing. */
+static unsigned buttons_now(void) { return m3_input()->buttons; }
 static uint8_t *g_vram;
 
 /* The tilegen's own register file, 0xF1180000..0xF11800FF. Only the ack at
@@ -146,6 +230,7 @@ void bus_init(const m3_roms_t *roms)
     g_crom_bank_reg = 0;
     g_io_ctrl = 0;
     g_io_ready = 0;
+    eeprom_reset();
     g_pci_addr = 0;
     g_r3d_ping = 0;
     scsi_init();
@@ -158,6 +243,12 @@ void bus_shutdown(void)
     g_ram = g_backup = g_vram = g_cull_lo = g_cull_hi = g_poly = NULL;
     g_texfifo = NULL; g_texfifo_used = 0;
     m3_ram_base = NULL;
+}
+
+uint8_t *bus_backup(size_t *size)
+{
+    if (size) *size = g_backup ? 0x20000u : 0u;
+    return g_backup;
 }
 
 uint8_t *bus_ram(void) { return g_ram; }
@@ -515,7 +606,7 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
              * bit 0 is that player's trigger: 0x08 is player one and 0x0C
              * player two. The game asks you to shoot rather than to press
              * start, so this is what actually begins a credit. */
-            unsigned btn = platform_buttons();
+            unsigned btn = buttons_now();
             uint32_t v = 0xFFu;
             unsigned want = ((w & 0x3Cu) == 0x08u) ? M3_BTN_TRIG1 : M3_BTN_TRIG2;
             if (btn & want) v &= ~0x01u;
@@ -553,17 +644,21 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
             /* Only bank 0 carries the buttons. Bank 1 is the EEPROM and
              * the service straps, and laying button bits over it feeds the
              * guest nonsense whenever a key is held. */
-            unsigned btn = (getenv("M3_NO_BUTTONS") ||
-                            ((g_io_ctrl >> 24) & 1u))
-                         ? 0u : platform_buttons();
-            uint32_t v;
-            g_io_ready ^= 0x20000000u;
-            v = 0xFFFFFFFFu ^ g_io_ready;
+            /* Bit 5 is start 2 in bank 0 and the EEPROM's data line in
+             * bank 1 (Supermodel agrees). The toggle belongs to bank 1
+             * only: laid over bank 0 it made start 2 flicker on every
+             * read, and a second player could never join. */
+            int bank1 = (int)((g_io_ctrl >> 24) & 1u);
+            unsigned btn = (getenv("M3_NO_BUTTONS") || bank1) ? 0u : buttons_now();
+            uint32_t v = 0xFFFFFFFFu;
+            if (bank1 && !eeprom_read())
+                v &= ~0x20000000u;
             if (btn & M3_BTN_COIN1)   v &= ~0x01000000u;
             if (btn & M3_BTN_COIN2)   v &= ~0x02000000u;
             if (btn & M3_BTN_TEST)    v &= ~0x04000000u;
             if (btn & M3_BTN_SERVICE) v &= ~0x08000000u;
             if (btn & M3_BTN_START1)  v &= ~0x10000000u;
+            if (btn & M3_BTN_START2)  v &= ~0x20000000u;
             return v;
         }
         if (0) {
@@ -701,7 +796,12 @@ static void dev_write_word(uint32_t w, uint32_t v)
     }
 
     if ((w & 0xFFFFFFC0u) == M3_INPUTS_BASE) {
-        if ((w & 0x3Cu) == 0x00u) { g_io_ctrl = v; return; }
+        if ((w & 0x3Cu) == 0x00u) {
+            unsigned d = (v >> 24) & 0xFFu;
+            g_io_ctrl = v;
+            eeprom_write((d >> 6) & 1u, (d >> 7) & 1u, (d >> 5) & 1u);
+            return;
+        }
         if ((w & 0x3Cu) == 0x28u) { g_serial2 = (v >> 24) & 0xFFu; return; }
         if ((w & 0x3Cu) == 0x24u) {
             unsigned cmd = (v >> 24) & 0xFFu;
@@ -720,18 +820,18 @@ static void dev_write_word(uint32_t w, uint32_t v)
             if (cmd == 0x00u) {
                 g_gun_reg = g_serial2;
             } else if (cmd == 0x87u) {
-                unsigned x = gun_x(), y = gun_y();
-                unsigned btn = platform_buttons();
+                const m3_input_t *in = m3_input();
+                unsigned btn = in->buttons;
                 g_serial1 = 0;
                 switch (g_gun_reg) {
-                case 0: g_serial2 = y & 0xFFu; break;
-                case 1: g_serial2 = (y >> 8) & 3u; break;
-                case 2: g_serial2 = x & 0xFFu; break;
-                case 3: g_serial2 = (x >> 8) & 3u; break;
-                case 4: g_serial2 = y & 0xFFu; break;
-                case 5: g_serial2 = (y >> 8) & 3u; break;
-                case 6: g_serial2 = x & 0xFFu; break;
-                case 7: g_serial2 = (x >> 8) & 3u; break;
+                case 0: g_serial2 = in->gun_y[0] & 0xFFu; break;
+                case 1: g_serial2 = (in->gun_y[0] >> 8) & 3u; break;
+                case 2: g_serial2 = in->gun_x[0] & 0xFFu; break;
+                case 3: g_serial2 = (in->gun_x[0] >> 8) & 3u; break;
+                case 4: g_serial2 = in->gun_y[1] & 0xFFu; break;
+                case 5: g_serial2 = (in->gun_y[1] >> 8) & 3u; break;
+                case 6: g_serial2 = in->gun_x[1] & 0xFFu; break;
+                case 7: g_serial2 = (in->gun_x[1] >> 8) & 3u; break;
                 /* Offscreen, one bit per player: pointing away from the
                  * screen is how a player reloads. */
                 case 8: g_serial2 = (btn & M3_BTN_OFFSCR2) ? 2u : 0u;
@@ -1008,4 +1108,31 @@ void bus_dma_copy(uint32_t dst, uint32_t src, uint32_t len)
     uint32_t i;
     for (i = 0; i < len; i++)
         bus_write8(dst + i, bus_read8(src + i));
+}
+
+/* Everything the guest can see of the board, for save states. The ROMs are
+ * not state; the texture FIFO is, up to what has been queued. */
+void bus_state(m3_state_t *st)
+{
+    m3_state_io(st, g_ram, M3_RAM_SIZE);
+    m3_state_io(st, g_backup, 0x20000u);
+    m3_state_io(st, g_vram, TILEGEN_VRAM_SIZE);
+    m3_state_io(st, g_cull_lo, CULL_LO_SIZE);
+    m3_state_io(st, g_cull_hi, CULL_HI_SIZE);
+    m3_state_io(st, g_poly, POLY_SIZE);
+    M3_STATE_VAR(st, g_texfifo_used);
+    if (g_texfifo_used <= TEXFIFO_CAP)
+        m3_state_io(st, g_texfifo, g_texfifo_used);
+    M3_STATE_VAR(st, g_crom_bank);
+    M3_STATE_VAR(st, g_crom_bank_reg);
+    M3_STATE_VAR(st, g_io_ctrl);
+    M3_STATE_VAR(st, g_io_ready);
+    M3_STATE_VAR(st, g_ee);
+    M3_STATE_VAR(st, g_pci_addr);
+    M3_STATE_VAR(st, g_r3d_ping);
+    M3_STATE_VAR(st, g_serial1);
+    M3_STATE_VAR(st, g_serial2);
+    M3_STATE_VAR(st, g_gun_reg);
+    M3_STATE_VAR(st, g_tilegen_regs);
+    M3_STATE_VAR(st, g_vromtex);
 }

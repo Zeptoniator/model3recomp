@@ -24,15 +24,19 @@ is being built against, so the worked examples are its.
 
 ## Status
 
-**v0.1.0 — _"Reset Vector"_ (September 2026). Alpha: the toolchain is real and
-verified end to end on a ROM; the board is a skeleton.**
+**Alpha, and it plays a game.** *The Lost World: Jurassic Park* runs on this
+board from the reset vector through its whole attract cycle and through stage
+one to the T-Rex, textured, lit and translucent in 3D, with the tilemaps
+scrolling and fading over it, aimed and fired with a mouse or a gamepad, and
+two players over a network.
 
-What that means concretely: you can take a Lost World romset, assemble it,
-recompile 342,753 PowerPC instructions to C, and compile the result cleanly.
-You cannot yet see a picture, because no renderer is written.
+![The Lost World on model3recomp](https://raw.githubusercontent.com/sp00nznet/lostworld/main/docs/hero.gif)
 
-No screenshots yet — the project does not draw anything. There will be
-screenshots here the moment it does, and not before.
+What it does not do yet: sound (no 68000, no SCSPs), and Step 2.x boards.
+Everything the reference title needs from a Step 1.5 board otherwise works.
+Most of the rendering was settled against
+[Supermodel](https://github.com/trzy/Supermodel)'s source, which is the
+reference for anything this library is unsure of.
 
 ## What Is This?
 
@@ -69,23 +73,31 @@ Honest status. "Done" means it does what the reference title needs so far.
 | PPC 603e decoder | **Done** | 100% of the 603e ISA vs capstone across a 2 MB ROM |
 | PPC 603e -> C lifter | **Done** | 0.048% untranslated; output compiles clean at `/W3` |
 | ROM loader | **Done** | Self-verifying interleave — proves itself against the vector table |
-| CPU context | **Done** | GPR/FPR/CR/XER/LR/CTR/MSR/SPR, with a semantics self-test |
-| Memory bus | **Done** | Full 32-bit map: RAM, CROM fixed and banked, VRAM, culling/polygon RAM, devices |
+| CPU context | **Done** | GPR/FPR/CR/XER/LR/CTR/MSR/SPR, decrementer and time base |
+| Memory bus | **Done** | Full 32-bit map: RAM, CROM fixed, data ROM and banked, VRAM, culling/polygon RAM, devices |
 | Function dispatch | **Done** | Hash table from guest address to native function |
-| Interrupt controller | **Done** | Pending/enable/ack, and the ack-spin the guest depends on |
-| Execution model | **Done** | Field sync at the guest's `0xF0100018` poll; IRQ dispatched there |
-| Platform | **Done** | SDL2 window and timing; headless fallback when SDL2 is absent |
 | Boot interpreter | **Done** | Runs the reset path, recovers the CROM->RAM segment map, snapshots RAM |
 | Computed-jump handling | **Done** | `mtlr`+`blr` told apart from a real return -- the boot handoff depends on it |
 | Indirect-target feedback | **Done** | Runtime func-table misses feed back through `--entries` |
 | Spin diagnosis | **Done** | The bus names the register a stalled guest is polling |
-| Differential conformance | **Done** | Interpreter and lifted code agree over 30,000 device accesses |
+| Differential conformance | **Done** | Interpreter and lifted code agree over 26,000+ device accesses |
+| PCI configuration | **Done** | The Real3D and the 53C810 answer their probes |
+| Interrupt controller | **Done** | Pending/enable/ack, VBlank on a work-paced field clock |
 | I/O board handshake | **Partial** | Strobe latch is right; the serial ready line is toggled, not driven |
-| 53C810 SCSI DMA | **Partial** | SCRIPTS memory move / jump / interrupt, manual-start mode |
-| Tilemap renderer | **Partial** | Draws real pixels from the game's own VRAM; scroll and priority not wired |
-| Real3D | **Not implemented** | Culling and polygon RAM are stored; no geometry or rasterizer |
+| 53C810 SCSI DMA | **Done** | SCRIPTS memory move / jump / interrupt — what Step 1.x uses to feed the Real3D |
+| Tilemap generator | **Done** | Four layers, 4 and 8 bpp, X/Y and per-line scroll, A/A' stencil, priority, colour offsets |
+| Real3D: scene | **Done** | Viewports in priority order with their own frustum and rectangle, culling-node tree with siblings, LOD tables, matrices, texture offsets, colour tables |
+| Real3D: polygons | **Done** | Lighting, Gouraud, translucency, discard and double-sided bits, perspective-correct |
+| Real3D: rasteriser | **Done** | Software, perspective-correct, banded across every core -- byte-identical to one thread |
+| Real3D: textures | **Done** | FIFO and VROM uploads, 8- and 16-bit, all twelve texel formats, bilinear, mirroring |
+| Real3D: not yet | **Partial** | No mipmaps, fog, specular or spotlight |
+| Inputs | **Done** | Buttons, two light guns (mouse, gamepad, Sinden), latched once a field |
+| Light gun board | **Done** | Serial protocol, both guns, off-screen reload |
+| Save states | **Done** | At a game-supplied safe point; exact across processes |
+| Netplay | **Done** | Two players, lockstep over TCP, desync detection |
+| Battery RAM | **Done** | Loaded at boot, saved on quit |
+| 93C46 EEPROM | **Done** | Bit-banged through the I/O board, kept with battery RAM -- where a game keeps its settings and its country |
 | Sound | **Not implemented** | No 68000, no SCSP, no audio |
-| Inputs | **Stub** | Reads as "nothing pressed" |
 | Security board | **Not implemented** | Step 2.x only; the reference title does not use it |
 
 ### Boot: why there is an interpreter in a static recompiler
@@ -109,7 +121,7 @@ The copy is not verbatim, so the RAM layout cannot be recovered by inspecting
 the ROM. The answer is to boot the machine before lifting it: a small PowerPC
 interpreter runs the reset path against the same bus this library provides,
 stops when the guest branches into RAM, and the RAM snapshot is what gets
-lifted. That interpreter is the next milestone, and it doubles as the
+lifted. That interpreter is `tools/ppc_interp.py`, and it doubles as the
 conformance oracle — it and the lifted code are two implementations of one
 instruction set, and they must agree.
 
@@ -306,13 +318,86 @@ int main(void)
     cfg.roms.crom = crom_image;          /* from rom_loader.py */
     cfg.roms.crom_size = crom_size;
 
+    /* All optional. */
+    cfg.ini_path     = "lostworld.ini";  /* window and control settings     */
+    cfg.nvram_path   = "lostworld.nv";   /* battery RAM, kept between runs  */
+    cfg.state_prefix = "lostworld";      /* save states: lostworld.<n>.m3s  */
+    cfg.safepoint_pc = 0x00002100u;      /* see "Save states" below         */
+
     if (!model3recomp_init(&cfg)) return 1;
     lw_register_all();                   /* generated */
     model3recomp_run();                  /* enters at 0xFFF00100 */
-    model3recomp_shutdown();
     return 0;
 }
 ```
+
+### The window
+
+On Windows the window has a menu bar; the same settings live in the ini file
+and the hotkeys work everywhere.
+
+| Menu | |
+|---|---|
+| File | save and load state (F5 / F7, slot F6), reset, quit |
+| Video | window size 1–4x, fullscreen (F11, Alt+Enter), sharp or bilinear, scanlines, 4:3 or square pixels |
+| Sound | nothing yet |
+| Controls | mouse aims player 1; gamepad as player 1 or 2; cursor hidden, crosshair or pointer; Sinden border |
+| Game | the game's own options, registered with `m3_option_add()` -- The Lost World's region |
+| Debug | the game's own cheats: toggles (`m3_cheat_add()`) and one-shot actions (`m3_cheat_add_action()`) |
+| Multiplayer | host, join, disconnect, input delay |
+
+Holding **Tab** runs flat out. A **Sinden** light gun works as an absolute
+mouse: turn on the border so it can find the screen, and map its off-screen
+reload to the right button.
+
+### Inputs
+
+Inputs are latched once a field into an `m3_input_t` (`input.h`) and every
+read the guest makes in that field sees the same record. The platform layer
+reports the host's devices; scripted input for harnesses sits on top
+(`M3_COIN_AT`, `M3_START_AT`, `M3_FIRE_EVERY`, `M3_GUN_X`/`Y`, `M3_BUTTONS`,
+`M3_CHEATS`), and netplay merges the two machines' records into one.
+
+### Save states
+
+A recompiled game keeps half its state on the host's call stack, so a
+snapshot can only be taken where that stack is the same every time: a
+**safe point**, a guest address the game passes once a field from the same
+caller. The lifted code reports function entries (`M3_FN`) and backward
+branches (`M3_LOOPED`); when one matches `safepoint_pc`, a pending save or
+load happens right there. A state is everything the guest can observe -- RAM,
+battery RAM, VRAM, culling and polygon RAM, the texture sheet, the CPU and
+device registers -- packed by zero runs to about 13 MB, and a state saved in
+one process and loaded in another reaches byte-identical frames.
+
+Finding the safe point is a per-title job; The Lost World's is the branch back
+to the top of its state loop. `M3_STATE_SAVE_AT=<field>[,slot]` and
+`M3_STATE_LOAD=<slot>` drive it from a script.
+
+### Netplay
+
+The board is deterministic -- fields are paced by guest work, not the clock --
+so two machines that boot together and see the same inputs on the same
+fields stay identical. Netplay trades inputs and nothing else: each side
+sends its own a few fields ahead and waits for the other's before each field.
+The host is player 1. Battery RAM goes from host to joiner at connect, cheats
+come from the host, and every two seconds both sides compare a hash of guest
+RAM, so a desync is reported the moment it happens.
+
+```
+M3_NETPLAY=host:7777                      # or the menu's Host
+M3_NETPLAY=join:100.101.102.103:7777      # a LAN, Tailscale or forwarded address
+M3_NET_DELAY=3                            # fields; the host's setting wins
+```
+
+A session starts at power-on, because the guest cannot be reset in place:
+the menu's Host and Join restart the program. Game options and cheats travel
+in the input record, so the host's choices hold on both machines.
+
+It is tested across machines on
+[recomp-netlab](https://github.com/sp00nznet/recomp-netlab): one PC hosts,
+a lab VM joins over the LAN, both play a script, and each logs its RAM hash
+every ten seconds -- the scenario passes when the two logs agree.
 
 ### The one routing you cannot get wrong
 

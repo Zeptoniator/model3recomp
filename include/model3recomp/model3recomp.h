@@ -34,10 +34,22 @@ typedef struct m3_config {
     m3_roms_t   roms;
     int         width, height;   /* 0,0 -> 496x384, the board's native mode */
     const char *title;
+
+    /* Optional, all of them; a game fills in what it supports. */
+    const char *ini_path;        /* window and control settings            */
+    const char *nvram_path;      /* battery RAM, loaded at boot, saved on quit */
+    const char *state_prefix;    /* save states go to <prefix>.<slot>.m3s   */
+    uint32_t    safepoint_pc;    /* see savestate.h; 0 means no save states */
 } m3_config_t;
 
 int  model3recomp_init(const m3_config_t *cfg);
 void model3recomp_shutdown(void);
+const m3_config_t *model3recomp_config(void);
+
+/* Save battery RAM, leave a netplay session, close the window and exit.
+ * The guest never returns from its main loop, so this is how a run ends. */
+void model3recomp_quit(int code);
+void model3recomp_save_nvram(void);
 
 /* Frame pacing. These exist and work, but for a game that owns its own loop
  * they are called BY irq_status_read(), not by your main(). Keep a loop over

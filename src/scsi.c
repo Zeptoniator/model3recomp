@@ -12,6 +12,7 @@
  * is byte-reversed relative to the PowerPC. This is visible in the game's own
  * traffic: it writes DSP = 0x4C2C1A00, which is the address 0x001A2C4C.
  */
+#include "model3recomp/savestate.h"
 #include "model3recomp/scsi.h"
 #include "model3recomp/bus.h"
 
@@ -224,4 +225,9 @@ void scsi_write(uint32_t addr, uint32_t v, unsigned size)
         if (dsp)
             scsi_run(dsp);
     }
+}
+
+void scsi_state(m3_state_t *st)
+{
+    M3_STATE_VAR(st, g_reg);
 }
