@@ -33,7 +33,7 @@ extern "C" {
 #define M3_IRQ_VBLANK_START  0x02000000u  /* tilegen, start of vblank  */
 #define M3_IRQ_VBLANK_END    0x01000000u  /* tilegen, end of vblank    */
 #define M3_IRQ_SCSI          0x04000000u
-#define M3_IRQ_SOUND         0x08000000u
+#define M3_IRQ_SOUND         0x40000000u  /* SCSP (MAME: 0x40) */
 #define M3_IRQ_NET           0x10000000u
 
 void     irq_init(void);

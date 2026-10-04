@@ -51,7 +51,9 @@ static struct {
     int net_delay;      /* fields of input delay when hosting */
     int net_port;
     char net_join[128]; /* last address joined */
-} opt = { 2, 0, 0, 0, 1, CUR_HIDDEN, 1, 2, 0, 1, 3, 7777, "" };
+    int volume;         /* percent */
+    int mute;
+} opt = { 2, 0, 0, 0, 1, CUR_HIDDEN, 1, 2, 0, 1, 3, 7777, "", 100, 0 };
 
 static const struct { const char *key; int *v; } k_int[] = {
     { "scale", &opt.scale }, { "fullscreen", &opt.fullscreen },
@@ -59,7 +61,7 @@ static const struct { const char *key; int *v; } k_int[] = {
     { "aspect43", &opt.aspect43 }, { "cursor", &opt.cursor },
     { "mouse", &opt.mouse }, { "pad", &opt.pad }, { "sinden", &opt.sinden },
     { "slot", &opt.slot }, { "net_delay", &opt.net_delay },
-    { "net_port", &opt.net_port },
+    { "net_port", &opt.net_port }, { "volume", &opt.volume }, { "mute", &opt.mute },
 };
 
 static const char *ini_path(void)
@@ -90,6 +92,7 @@ static void settings_load(void)
     if (opt.scale < 1 || opt.scale > 4) opt.scale = 2;
     if (opt.slot < 1 || opt.slot > 9) opt.slot = 1;
     if (opt.net_delay < 1 || opt.net_delay > 10) opt.net_delay = 3;
+    if (opt.volume < 0 || opt.volume > 100) opt.volume = 100;
 }
 
 static void settings_save(void)
@@ -164,6 +167,7 @@ enum {
     ID_MOUSE = 160, ID_PAD = 170, ID_CURSOR = 180, ID_SINDEN = 190,
     ID_CHEAT = 200,                     /* +bit */
     ID_OPTION = 240,                    /* +slot*16+choice */
+    ID_MUTE = 380, ID_VOL = 381,        /* +0..4: 100, 75, 50, 25 */
     ID_HOST = 400, ID_JOIN, ID_DISCONNECT,
     ID_DELAY = 410                      /* +1..10 */
 };
@@ -226,7 +230,13 @@ static void build_menu(void)
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)video, "&Video");
 
     sound = CreatePopupMenu();
-    note_item(sound, "No sound yet: the board's 68000 and SCSPs are not emulated");
+    item(sound, ID_MUTE, "&Mute\tF9", opt.mute);
+    AppendMenuA(sound, MF_SEPARATOR, 0, NULL);
+    for (i = 0; i < 4; i++) {
+        static const int lv[4] = { 100, 75, 50, 25 };
+        snprintf(b, sizeof b, "Volume %d%%", lv[i]);
+        item(sound, ID_VOL + i, b, opt.volume == lv[i]);
+    }
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)sound, "&Sound");
 
     ctl = CreatePopupMenu(); pad = CreatePopupMenu(); cur = CreatePopupMenu(); sind = CreatePopupMenu();
@@ -403,7 +413,12 @@ static void relaunch(const char *netplay, int delay)
 
 static int on_command(unsigned id)
 {
-    if (id == ID_SAVE) m3_state_request_save(opt.slot);
+    if (id == ID_MUTE) opt.mute = !opt.mute;
+    else if (id >= ID_VOL && id < ID_VOL + 4) {
+        static const int lv[4] = { 100, 75, 50, 25 };
+        opt.volume = lv[id - ID_VOL]; opt.mute = 0;
+    }
+    else if (id == ID_SAVE) m3_state_request_save(opt.slot);
     else if (id == ID_LOAD) m3_state_request_load(opt.slot);
     else if (id > ID_SLOT && id <= ID_SLOT + 9) opt.slot = (int)(id - ID_SLOT);
     else if (id == ID_RESET) relaunch(NULL, opt.net_delay);
@@ -528,6 +543,8 @@ int platform_poll(void)
                 break;
             case SDLK_F5: m3_state_request_save(opt.slot); break;
             case SDLK_F7: m3_state_request_load(opt.slot); break;
+            case SDLK_F9: opt.mute = !opt.mute; changed = 1;
+                          platform_set_status(opt.mute ? "sound muted" : "sound on"); break;
             case SDLK_F6: {
                 char b[64];
                 opt.slot = opt.slot % 9 + 1;
@@ -670,6 +687,10 @@ static void crosshair(const SDL_Rect *r, int gx, int gy, Uint8 cr, Uint8 cg, Uin
  * work, not the clock, so without this the game runs as fast as the host
  * can draw it. M3_NOTHROTTLE turns it off for scripted captures; holding
  * Tab does the same for a moment. */
+static SDL_AudioDeviceID g_audio;
+#define AUDIO_BYTES_PER_MS 176u          /* 44.1 kHz, stereo, 16-bit */
+#define AUDIO_TARGET_MS    100u
+
 static void throttle(void)
 {
     static int probed, off;
@@ -681,7 +702,20 @@ static void throttle(void)
     now = platform_ticks_us();
     if (!next || now > next + 100000u)  /* first field, or fell far behind */
         next = now;
-    next += 17384u;                     /* 1e6 / 57.524 */
+    /* 1e6 / 57.524 us a field, nudged by up to 2% to hold the audio queue
+     * at its target: the sound card's clock and this one never quite
+     * agree, and a queue left to drift either runs dry or lags. */
+    {
+        int64_t period = 17384;
+        if (g_audio && SDL_GetAudioDeviceStatus(g_audio) == SDL_AUDIO_PLAYING) {
+            int64_t q = (int64_t)(SDL_GetQueuedAudioSize(g_audio) / AUDIO_BYTES_PER_MS);
+            int64_t adj = (q - (int64_t)AUDIO_TARGET_MS) * 17384 / 2000;   /* 1% per 20 ms off */
+            if (adj > 348) adj = 348;
+            if (adj < -348) adj = -348;
+            period += adj;
+        }
+        next += (uint64_t)period;
+    }
     while ((now = platform_ticks_us()) < next) {
         if (next - now > 2000u)
             SDL_Delay((Uint32)((next - now) / 1000u - 1u));
@@ -735,6 +769,60 @@ void platform_present(void)
 
     SDL_RenderPresent(g_ren);
     throttle();
+}
+
+/* ---- audio -------------------------------------------------------------
+ *
+ * The sound board hands over a field's samples at a time, made in step with
+ * the guest, not pulled by the audio device -- so the device is fed a queue.
+ * Running at 57.524 Hz the queue holds steady; a little latency is kept in
+ * hand (100 ms, held there by the frame limiter), anything beyond 300 ms
+ * (running flat out) is dropped rather than heard late, and a queue that
+ * runs dry pauses to refill rather than crackling.
+ */
+static int g_audio_failed;
+static unsigned g_underruns, g_audio_fields;
+
+void platform_audio(const int16_t *lr, int frames)
+{
+    static int16_t tmp[2 * 1024];
+    Uint32 queued;
+    int i, gain;
+
+    if (g_audio_failed || frames <= 0 || frames > 1024) return;
+    if (!g_audio) {
+        SDL_AudioSpec want, have;
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) { g_audio_failed = 1; return; }
+        memset(&want, 0, sizeof want);
+        want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 512;
+        g_audio = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+        if (!g_audio) {
+            fprintf(stderr, "[model3recomp] no audio device: %s\n", SDL_GetError());
+            g_audio_failed = 1;
+            return;
+        }
+    }
+    queued = SDL_GetQueuedAudioSize(g_audio);
+    if (queued > AUDIO_BYTES_PER_MS * 300u)     /* over 300 ms behind: drop */
+        return;
+    /* Ran dry (the host stalled): stop and refill rather than crackle. */
+    if (queued < AUDIO_BYTES_PER_MS * 4u &&
+        SDL_GetAudioDeviceStatus(g_audio) == SDL_AUDIO_PLAYING) {
+        SDL_PauseAudioDevice(g_audio, 1);
+        g_underruns++;
+    }
+    /* M3_AUDIO_TRACE: the queue's depth once a second, and how often it
+     * ran dry -- the measure of whether the host keeps up. */
+    if (getenv("M3_AUDIO_TRACE") && ++g_audio_fields % 58 == 0)
+        fprintf(stderr, "[audio] queued %u ms  underruns %u\n",
+                (unsigned)(queued / AUDIO_BYTES_PER_MS), g_underruns);
+    gain = opt.mute ? 0 : opt.volume * 256 / 100;
+    for (i = 0; i < 2 * frames; i++) tmp[i] = (int16_t)((lr[i] * gain) >> 8);
+    SDL_QueueAudio(g_audio, tmp, (Uint32)(frames * 4));
+    /* Play once the target is in hand, so a hitch has room to hide in. */
+    if (SDL_GetAudioDeviceStatus(g_audio) != SDL_AUDIO_PLAYING &&
+        SDL_GetQueuedAudioSize(g_audio) >= AUDIO_BYTES_PER_MS * AUDIO_TARGET_MS)
+        SDL_PauseAudioDevice(g_audio, 0);
 }
 
 uint64_t platform_ticks_us(void)

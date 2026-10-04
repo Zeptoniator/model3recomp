@@ -22,6 +22,9 @@ uint64_t platform_ticks_us(void);
  * field. */
 void platform_sample(m3_input_t *in);
 
+/* A field's audio: frames of interleaved stereo 16-bit at 44.1 kHz. */
+void platform_audio(const int16_t *lr, int frames);
+
 /* A line of status -- netplay, save states -- for the title bar. */
 void platform_set_status(const char *s);
 

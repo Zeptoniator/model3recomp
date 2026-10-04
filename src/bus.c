@@ -14,6 +14,7 @@
 #include "model3recomp/real3d.h"
 #include "model3recomp/platform.h"
 #include "model3recomp/input.h"
+#include "model3recomp/sound.h"
 #define M3_NL "\n"
 #include "model3recomp/irq.h"
 #include "model3recomp/scsi.h"
@@ -585,8 +586,11 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
      * the honest model -- the guest's commands go nowhere and it never waits
      * on a reply. Upgrade path: a real 68000 and SCSPs, at which point both
      * bits come from the board instead. */
-    if ((w & 0xFFFFFFFCu) == (M3_SOUND_BASE + 4u))
-        return 0x01000000u;
+    /* The sound board's UART: 0x00 data, 0x04 status (sound.c). The
+     * guest reads these a byte at a time, from the top of the word. */
+    if ((w & 0xFFFF0000u) == M3_SOUND_BASE)
+        return (uint32_t)(side_effects ? sound_uart_read((w >> 2) & 1u)
+                                       : sound_uart_read(1)) << 24;
 
     if ((w & 0xFFFFFFC0u) == M3_INPUTS_BASE) {
         if (getenv("M3_IO_TRACE") &&
@@ -996,6 +1000,12 @@ static void dev_watch(uint32_t a, uint32_t v, unsigned size)
 static void dev_write(uint32_t a, uint32_t v, unsigned size)
 {
     DEV_WATCH(a, v, size);
+
+    if ((a & 0xFFFF0000u) == M3_SOUND_BASE) {
+        io_log('W', a, size, v);
+        sound_uart_write((a >> 2) & 1u, (uint8_t)(v >> (8u * (size - 1u))));
+        return;
+    }
 
     /* The upload FIFO. One port, so the address does not advance and what
      * matters is the order the bytes arrived in. */

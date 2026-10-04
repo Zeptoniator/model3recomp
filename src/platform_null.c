@@ -65,3 +65,5 @@ uint64_t platform_ticks_us(void)
 void platform_sample(m3_input_t *in) { (void)in; }
 
 void platform_set_status(const char *s) { (void)s; }
+
+void platform_audio(const int16_t *lr, int frames) { (void)lr; (void)frames; }

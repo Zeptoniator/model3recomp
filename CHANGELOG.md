@@ -7,6 +7,17 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Sound.** The sound board: a 68000 (Musashi, interpreted), two SCSPs
+  (a C port of MAME's, timers counting samples so it is deterministic) and
+  the i8251 UART between the PowerPC and SCSP 1's MIDI port. It runs a field
+  at a time on its own thread, a field behind the guest, trading UART bytes
+  only at the boundary, so two runs -- and two netplay machines -- produce
+  the same audio and the same game. The Lost World's output matches MAME's
+  section for section. SDL audio is fed a 100 ms queue, held there by
+  nudging the frame limiter, and refills rather than crackles if the host
+  stalls. Sound menu: mute (F9) and volume. `M3_WAV`, `M3_NO_SOUND`,
+  `M3_SOUND_THREAD=0`, `M3_AUDIO_TRACE`.
+- `THIRD_PARTY.md`: the licences of the code the sound board brings in.
 - **The 93C46 serial EEPROM**, modelled on Supermodel's: bit-banged through
   the I/O board's register 0x00 and read on bit 5 of bank 1, kept in the
   battery RAM file and shared at netplay connect. It replaces a toggle that
@@ -62,6 +73,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   wrapping and an opaque fast path.
 
 ### Fixed
+- **The PowerPC's sound interrupt was the wrong bit.** `M3_IRQ_SOUND` was
+  0x08 (a video line); MAME and the board say 0x40.
+- **Scripted runs read whoever was at the machine.** With `M3_COIN_AT`,
+  `M3_FIRE_EVERY` and the like set, the window's mouse still aimed the gun,
+  so two runs of one script parted company. A scripted run now ignores the
+  host's own controls.
 - **Viewports were drawn in list order, not priority order.** The Lost
   World's HUD is a viewport of priority 3 that comes first in the list, so
   the scene was painted over it: the ammunition counter, the RELOAD prompt,

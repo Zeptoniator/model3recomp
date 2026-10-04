@@ -9,7 +9,7 @@
 #include <string.h>
 
 #define STATE_MAGIC   0x5333334Du       /* "M33S" */
-#define STATE_VERSION 1u
+#define STATE_VERSION 2u          /* 2: the sound board */
 
 uint32_t m3_safepoint_pc = 0xFFFFFFFFu;
 
@@ -114,6 +114,7 @@ static void all(m3_state_t *st)
     scsi_state(st);
     real3d_state(st);
     input_state(st);
+    sound_state(st);
 }
 
 /* saving: 1 write, 0 restore, 2 check only. */

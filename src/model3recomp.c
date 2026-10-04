@@ -7,6 +7,7 @@
 #include "model3recomp/real3d.h"
 #include "model3recomp/input.h"
 #include "model3recomp/netplay.h"
+#include "model3recomp/sound.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,8 @@ int model3recomp_init(const m3_config_t *cfg)
     ppc_reset();
 
     m3_safepoint_pc = g_cfg.safepoint_pc ? g_cfg.safepoint_pc : 0xFFFFFFFFu;
+    sound_init(g_cfg.roms.sndrom, g_cfg.roms.sndrom_size,
+               g_cfg.roms.samples, g_cfg.roms.samples_size);
     if (g_cfg.nvram_path) {
         size_t n = 0;
         uint8_t *b = bus_backup(&n);
@@ -165,14 +168,19 @@ void model3recomp_end_frame(void)
             t_2d += (t1 - t0) + (t3 - t2); t_3d += t2 - t1; t_present += t4 - t3;
             last = t4;
             if (++n % 300 == 0) {
-                fprintf(stderr, "[profile] per field: guest %.1f ms  2d %.1f  3d %.1f  present %.1f\n",
-                        t_guest / 300000.0, t_2d / 300000.0, t_3d / 300000.0, t_present / 300000.0);
+                extern uint64_t g_board_us, g_wait_us;
+                fprintf(stderr, "[profile] per field: guest %.1f ms  2d %.1f  3d %.1f  present %.1f"
+                                "  sound %.1f (guest waited %.1f)\n",
+                        t_guest / 300000.0, t_2d / 300000.0, t_3d / 300000.0, t_present / 300000.0,
+                        g_board_us / 300000.0, g_wait_us / 300000.0);
                 t_guest = t_2d = t_3d = t_present = 0;
+                g_board_us = g_wait_us = 0;
             }
         }
     }
     if (g_frame_hook)
         g_frame_hook();
+    sound_run_field();
     if (!model3recomp_poll())
         model3recomp_quit(0);
     /* The next field's inputs, fixed now for every read the guest makes. */

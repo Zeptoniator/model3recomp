@@ -22,6 +22,11 @@ set(M3_SOURCES
     src/input.c
     src/netplay.c
     src/savestate.c
+    src/scsp.c
+    src/sound.c
+    src/m68k/m68kcpu.c
+    src/m68k/m68kops.c
+    src/m68k/softfloat/softfloat.c
 )
 if(SDL2_FOUND)
     list(APPEND M3_SOURCES src/platform_sdl.c)

@@ -27,13 +27,13 @@ is being built against, so the worked examples are its.
 **Alpha, and it plays a game.** *The Lost World: Jurassic Park* runs on this
 board from the reset vector through its whole attract cycle and through stage
 one to the T-Rex, textured, lit and translucent in 3D, with the tilemaps
-scrolling and fading over it, aimed and fired with a mouse or a gamepad, and
-two players over a network.
+scrolling and fading over it, with its music and sound effects, aimed and
+fired with a mouse or a gamepad, and two players over a network.
 
 ![The Lost World on model3recomp](https://raw.githubusercontent.com/sp00nznet/lostworld/main/docs/hero.gif)
 
-What it does not do yet: sound (no 68000, no SCSPs), and Step 2.x boards.
-Everything the reference title needs from a Step 1.5 board otherwise works.
+What it does not do yet: Step 2.x boards. Everything the reference title
+needs from a Step 1.5 board works.
 Most of the rendering was settled against
 [Supermodel](https://github.com/trzy/Supermodel)'s source, which is the
 reference for anything this library is unsure of.
@@ -97,7 +97,7 @@ Honest status. "Done" means it does what the reference title needs so far.
 | Netplay | **Done** | Two players, lockstep over TCP, desync detection |
 | Battery RAM | **Done** | Loaded at boot, saved on quit |
 | 93C46 EEPROM | **Done** | Bit-banged through the I/O board, kept with battery RAM -- where a game keeps its settings and its country |
-| Sound | **Not implemented** | No 68000, no SCSP, no audio |
+| Sound board | **Done** | 68000 (Musashi, interpreted) and two SCSPs (ported from MAME), on their own thread, deterministic; output matches MAME |
 | Security board | **Not implemented** | Step 2.x only; the reference title does not use it |
 
 ### Boot: why there is an interpreter in a static recompiler
@@ -340,7 +340,7 @@ and the hotkeys work everywhere.
 |---|---|
 | File | save and load state (F5 / F7, slot F6), reset, quit |
 | Video | window size 1–4x, fullscreen (F11, Alt+Enter), sharp or bilinear, scanlines, 4:3 or square pixels |
-| Sound | nothing yet |
+| Sound | mute (F9), volume |
 | Controls | mouse aims player 1; gamepad as player 1 or 2; cursor hidden, crosshair or pointer; Sinden border |
 | Debug | the game's own cheats: toggles (`m3_cheat_add()`) and one-shot actions (`m3_cheat_add_action()`); and its options (`m3_option_add()`, The Lost World's region), which restart the game when changed |
 | Multiplayer | host, join, disconnect, input delay |
@@ -443,9 +443,26 @@ Nothing but CMake and a C17 compiler. SDL2 is found if present and skipped if
 not. The Python tools have no dependencies beyond the standard library, except
 `check_decode.py`, which needs capstone.
 
+### Sound
+
+The sound board is a 68000 running a 512 KB driver, two Yamaha SCSPs, and
+an i8251 UART carrying the PowerPC's commands to the first SCSP's MIDI port.
+The 68000 is interpreted ([Musashi](https://github.com/kstenerud/Musashi)):
+it is a separate 11.3 MHz processor and costs a couple of milliseconds a
+field. The SCSPs are a C port of MAME's. The board runs a field at a time on
+its own thread, one field behind the PowerPC, and the two sides trade UART
+bytes only at the field boundary -- so it is as deterministic as the rest of
+the machine, and save states and netplay carry it. Hand the runtime the
+68000 program and the wave ROM in `m3_roms_t.sndrom` / `samples`.
+`M3_WAV=<file>` writes the audio out, `M3_NO_SOUND` leaves the board out.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
 No ROMs, BIOS images, game assets or recompiled output are included in this
 repository, and none ever will be. The tool ships; the output never does.
+
+The sound board includes third-party code under its own licences (Musashi,
+MIT; MAME's SCSP, BSD-3-Clause; SoftFloat) -- see
+[THIRD_PARTY.md](THIRD_PARTY.md).

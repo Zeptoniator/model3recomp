@@ -15,12 +15,6 @@ ordered by what a player notices.
   circles on it; they are not drawn. Find out whether that is a polygon flag
   the renderer ignores or a 2D layer.
 
-## Then: sound
-
-68EC000 plus two SCSPs on a separate board, driven over a latch. Its own
-recompilation (the 68000 program) or an interpreter, and an SCSP renderer.
-The Sound menu is waiting for it.
-
 ## Then: more of the host
 
 - Higher internal resolution for the 3D. The rasteriser is software and

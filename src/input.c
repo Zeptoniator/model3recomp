@@ -90,6 +90,8 @@ static unsigned long env_ul(const char *name, unsigned long dflt)
  *
  * A coin slot counts an edge, not a level, which is why the timed ones
  * exist: a mask held from the first field may be seen once or not at all. */
+static int g_scripted;   /* a script drives player 1: the host's own controls are ignored */
+
 static void scripted(m3_input_t *in, uint64_t f)
 {
     static int probed;
@@ -103,6 +105,7 @@ static void scripted(m3_input_t *in, uint64_t f)
         gx = env_ul("M3_GUN_X", 0);
         gy = env_ul("M3_GUN_Y", 0);
         fire = env_ul("M3_FIRE_EVERY", 0);
+        g_scripted = held || coin_at || start_at || gx || gy || fire;
     }
     if (fire && f % fire < 4)
         in->buttons |= M3_BTN_TRIG1;
@@ -123,8 +126,12 @@ void m3_input_latch(void)
     memset(&local, 0, sizeof local);
     local.gun_x[0] = local.gun_x[1] = (M3_GUN_X0 + M3_GUN_X1) / 2;
     local.gun_y[0] = local.gun_y[1] = (M3_GUN_Y0 + M3_GUN_Y1) / 2;
-    platform_sample(&local);
+    /* A scripted run must not also read whoever is at the machine: a mouse
+     * moved during a capture would aim the scripted shots, and two runs of
+     * one script would part company. */
     scripted(&local, next);
+    if (!g_scripted)
+        platform_sample(&local);
     {
         static int probed;
         if (!probed) { probed = 1; g_cheats_local |= (uint32_t)env_ul("M3_CHEATS", 0); }

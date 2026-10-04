@@ -42,6 +42,7 @@ void ppc_state(m3_state_t *st);
 void real3d_state(m3_state_t *st);
 void model3recomp_state(m3_state_t *st);
 void input_state(m3_state_t *st);
+void sound_state(m3_state_t *st);
 
 #ifdef __cplusplus
 }
