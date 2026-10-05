@@ -19,10 +19,19 @@
  * Uploads are rare (the boot, a change of course); any upload empties the
  * cache.
  *
+ * The tilemap layers. tilegen.c draws each priority pass (behind the 3D,
+ * in front of it) into a 512x512 ARGB1555 texture, alpha clear where no
+ * layer drew; here they are two screen-sized quads, the one behind at the
+ * far end of the depth range in the opaque list, the one in front at the
+ * near end in the punch-through list. They are drawn after pvr_wait_ready(),
+ * so never into a texture the PVR is still reading.
+ *
  * Not yet: per-viewport depth ranges (one depth buffer for all
- * viewports), the tilemap layers. */
+ * viewports). */
 #include "pvr_r3d.h"
 #include "model3recomp/real3d.h"
+#include "model3recomp/tilegen.h"
+#include "model3recomp/bus.h"
 
 #include <kos.h>
 #include <dc/pvr/pvr_regs.h>
@@ -35,7 +44,8 @@
 #define SHEET_W 1024u                  /* the half-size sheet */
 #define SHEET_H 1024u
 #define TEX_SLOTS 256
-#define TEX_BUDGET (2560u * 1024u)     /* PVR memory for converted textures */
+#define TEX_BUDGET (1536u * 1024u)     /* PVR memory for converted textures */
+#define LAYER_W 512u                   /* a 496x384 tilemap pass */
 
 typedef struct {
     uint32_t key;                      /* 0 = free */
@@ -66,6 +76,10 @@ static size_t g_tex_bytes;
 static uint32_t g_frame;
 static unsigned g_tex_made, g_tex_failed;
 static int g_cur_tex = -2, g_cur_flip = -1;   /* last header sent */
+static uint16_t *g_layer[2];                   /* behind, in front of the 3D */
+static pvr_poly_hdr_t g_layer_hdr[2];
+static unsigned g_layer_px[2];
+static unsigned g_layer_redraws;
 
 /* ---- texture cache ----------------------------------------------------- */
 static unsigned log2u(unsigned v) { unsigned n = 0; while (v > 1u) { v >>= 1; n++; } return n; }
@@ -225,12 +239,45 @@ static void tex_scale(int slot, const m3_r3d_texture *t, float *su, float *sv)
     *sv = t ? 1.0f / (float)t->h : 0.0f;
 }
 
+/* One tilemap pass over the whole screen, at depth z (1/z: small is far). */
+static void layer_quad(int which, float z)
+{
+    static const float xs[4] = { 0, 640, 0, 640 }, ys[4] = { 0, 0, 480, 480 };
+    const float um = 496.0f / LAYER_W, vm = 384.0f / LAYER_W;
+    int k;
+    pvr_prim(&g_layer_hdr[which], sizeof g_layer_hdr[which]);
+    for (k = 0; k < 4; k++) {
+        pvr_vertex_t pv;
+        pv.flags = k == 3 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+        pv.x = xs[k]; pv.y = ys[k]; pv.z = z;
+        pv.u = (k & 1) ? um : 0.0f;
+        pv.v = (k & 2) ? vm : 0.0f;
+        pv.argb = 0xFFFFFFFFu; pv.oargb = 0;
+        pvr_prim(&pv, sizeof pv);
+    }
+    g_cur_tex = -2;
+}
+
 static void begin_frame(void)
 {
+    static uint32_t drawn_gen;
+    static int ever;
+    uint32_t gen = bus_tilegen_generation();
     pvr_wait_ready();
+    /* Only when the guest has written tilegen VRAM or a register since:
+     * through most of attract the 2D does not move, and drawing it costs
+     * more than the rest of the field. */
+    if (!ever || gen != drawn_gen) {
+        g_layer_px[0] = tilegen_render_pass_1555(0, g_layer[0], LAYER_W);
+        g_layer_px[1] = tilegen_render_pass_1555(1, g_layer[1], LAYER_W);
+        drawn_gen = gen;
+        ever = 1;
+        g_layer_redraws++;
+    }
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
     g_cur_tex = -2; g_cur_flip = -1;
+    if (g_layer_px[0]) layer_quad(0, 1e-6f);
     g_npt = g_ntr = g_op = 0;
     g_frame++;
     g_open = 1;
@@ -286,6 +333,8 @@ static void flush_kept(pvr_list_t list, const kept_t *k, unsigned n)
         send_header(list, k[i].tex, k[i].flip);
         strip(k[i].v, k[i].n, k[i].argb, 1.0f, 1.0f);
     }
+    if (list == PVR_LIST_PT_POLY && g_layer_px[1])
+        layer_quad(1, 1e6f);
     pvr_list_finish();
 }
 
@@ -310,6 +359,7 @@ unsigned pvr_r3d_last_translucent(void) { return g_last_tr; }
 unsigned pvr_r3d_textures_made(void) { return g_tex_made; }
 unsigned pvr_r3d_textures_failed(void) { return g_tex_failed; }
 unsigned pvr_r3d_texture_kb(void) { return (unsigned)(g_tex_bytes >> 10); }
+unsigned pvr_r3d_layer_redraws(void) { return g_layer_redraws; }
 
 int pvr_r3d_install(void)
 {
@@ -344,10 +394,25 @@ int pvr_r3d_install(void)
     for (p = (uint32_t *)g_sheet, i = 0; i < SHEET_W * SHEET_H / 2u; i++) p[i] = 0;
     real3d_set_sheet(g_sheet, 1);
 
+    for (i = 0; i < 2; i++) {
+        unsigned k;
+        g_layer[i] = (uint16_t *)pvr_mem_malloc(LAYER_W * LAYER_W * 2u);
+        if (!g_layer[i]) return 0;
+        for (p = (uint32_t *)g_layer[i], k = 0; k < LAYER_W * LAYER_W / 2u; k++) p[k] = 0;
+        pvr_poly_cxt_txr(&cx, i ? PVR_LIST_PT_POLY : PVR_LIST_OP_POLY,
+                         PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED,
+                         LAYER_W, LAYER_W, g_layer[i], PVR_FILTER_BILINEAR);
+        cx.gen.culling = PVR_CULLING_NONE;
+        /* In front of everything, whatever the 3D wrote to the depth
+         * buffer; behind everything for the other one. */
+        cx.depth.comparison = i ? PVR_DEPTHCMP_ALWAYS : PVR_DEPTHCMP_GREATER;
+        pvr_poly_compile(&g_layer_hdr[i], &cx);
+    }
+
     g_pt = malloc(sizeof(kept_t) * PT_MAX);
     g_tr = malloc(sizeof(kept_t) * TR_MAX);
     if (!g_pt || !g_tr) return 0;
-    printf("[pvr] sheet 2048 KB in PVR memory, %u KB of it left for textures"
+    printf("[pvr] sheet 2048 KB and tilemap 1024 KB in PVR memory, %u KB left for textures"
            " (budget %u KB)\n", (unsigned)(pvr_mem_available() >> 10),
            TEX_BUDGET >> 10);
     real3d_set_sink(&k_sink);

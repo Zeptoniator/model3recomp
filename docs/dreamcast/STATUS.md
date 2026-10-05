@@ -1,5 +1,21 @@
 # Status
 
+## 2026-10-05 (night) — DC-07 tilemap layers
+
+- **The 2D is on the Dreamcast**: AM2 logo, CREDIT 0, © SEGA 1996 and the
+  SEGA logo over the textured 3D (Flycast, field 1300).
+- tilegen.c draws each priority pass into a 512x512 ARGB1555 texture in
+  PVR memory (`tilegen_render_pass_1555`); the PVR back end shows them as
+  two screen quads, behind (opaque list, far) and in front (punch-through,
+  depth test off).
+- Drawn on the CPU per pixel, the 2D first cost more than the rest of the
+  field (135 → 350 ms). Redrawn now only when the guest changes tilegen
+  VRAM or a register (`bus_tilegen_generation`, value compared on write):
+  Scud rewrites 67 identical bytes and six identical registers every
+  field, and the picture actually changes in ~6 % of attract fields
+  (up to 32 % in places). 40 redraws by field 1400; 152 ms a field.
+- Desktop pictures identical (fields 500–2500).
+
 ## 2026-10-05 (evening) — DC-06 textures
 
 - **Textured 3D on the Dreamcast.** Village course with sky, stone

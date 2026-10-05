@@ -17,4 +17,7 @@ unsigned pvr_r3d_textures_made(void);
 unsigned pvr_r3d_textures_failed(void);
 unsigned pvr_r3d_texture_kb(void);
 
+/* Times the tilemap passes were redrawn (only after the guest writes). */
+unsigned pvr_r3d_layer_redraws(void);
+
 #endif

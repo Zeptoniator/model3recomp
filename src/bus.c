@@ -178,6 +178,17 @@ static uint8_t *g_vram;
 static uint32_t g_tilegen_regs[64];
 
 const uint32_t *bus_tilegen_regs(void) { return g_tilegen_regs; }
+/* Bumped by every write to tilegen VRAM or its registers: a back end that
+ * keeps the 2D picture can skip redrawing it while this stands still. */
+static uint32_t g_tilegen_gen;
+uint32_t bus_tilegen_generation(void) { return g_tilegen_gen; }
+uint32_t g_tg_vram_writes, g_tg_reg_writes, g_tg_reg_changes;  /* diagnostics */
+/* A write that lands in tilegen VRAM and changes it. Writes of what is
+ * already there -- Scud Race rewrites 67 bytes of it every field -- leave
+ * the generation alone. */
+#define IN_VRAM(p) (g_vram && (p) >= g_vram && (p) < g_vram + TILEGEN_VRAM_SIZE)
+#define VRAM_NOTE(p, changed) do { if (IN_VRAM(p)) { g_tg_vram_writes++;   \
+        if (changed) g_tilegen_gen++; } } while (0)
 
 /* The Real3D's upload FIFO at 0x94000000.
  *
@@ -640,8 +651,9 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
         return POLY() + (a - M3_R3D_POLY);
 #endif
 
-    if (a >= M3_TILEGEN_VRAM && a < M3_TILEGEN_VRAM + TILEGEN_VRAM_SIZE)
+    if (a >= M3_TILEGEN_VRAM && a < M3_TILEGEN_VRAM + TILEGEN_VRAM_SIZE) {
         return g_vram + (a - M3_TILEGEN_VRAM);
+    }
 
     if (a >= M3_BACKUP_BASE && a < M3_BACKUP_BASE + 0x20000)
         return g_backup + (a - M3_BACKUP_BASE);
@@ -1184,6 +1196,11 @@ static void dev_write_word(uint32_t w, uint32_t v)
      * 0xF0100018 until it clears -- miss this and the game never leaves its
      * interrupt handler. */
     if ((w & 0xFFFF0000u) == (M3_TILEGEN_REGS & 0xFFFF0000u)) {
+        g_tg_reg_writes++;
+        if (g_tilegen_regs[(w >> 2) & 0x3Fu] != v) {
+            g_tg_reg_changes++;
+            g_tilegen_gen++;
+        }
         g_tilegen_regs[(w >> 2) & 0x3Fu] = v;
         if ((w & 0xFC) == 0x10) irq_ack(v);
         return;
@@ -1396,7 +1413,7 @@ void bus_write8(uint32_t a, uint8_t v)
 {
     BUS_WATCH(a, v, 1);
     uint8_t *p = direct(a, 1, 1);
-    if (p) { *p = v; return; }
+    if (p) { VRAM_NOTE(p, *p != v); *p = v; return; }
     dev_write(a, v, 1);
 }
 
@@ -1404,7 +1421,7 @@ void bus_write16(uint32_t a, uint16_t v)
 {
     BUS_WATCH(a, v, 2);
     uint8_t *p = direct(a, 2, 1);
-    if (p) { wbe16(p, v); return; }
+    if (p) { VRAM_NOTE(p, be16(p) != v); wbe16(p, v); return; }
     dev_write(a, v, 2);
 }
 
@@ -1412,7 +1429,7 @@ void bus_write32(uint32_t a, uint32_t v)
 {
     BUS_WATCH(a, v, 4);
     uint8_t *p = direct(a, 4, 1);
-    if (p) { wbe32(p, v); return; }
+    if (p) { VRAM_NOTE(p, be32(p) != v); wbe32(p, v); return; }
     dev_write(a, v, 4);
 }
 
@@ -1442,6 +1459,7 @@ void bus_dma_copy(uint32_t dst, uint32_t src, uint32_t len)
         s = direct(src, n, 0);
         d = s ? direct(dst, n, 1) : NULL;
         if (s && d) {
+            VRAM_NOTE(d, memcmp(d, s, n) != 0);
             memmove(d, s, n);
         } else {
             uint32_t i;

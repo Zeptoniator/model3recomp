@@ -107,6 +107,26 @@ static const m3_r3d_sink k_count_sink = { sink_begin, sink_poly, sink_end, NULL 
 
 static void on_field(void)
 {
+    if (getenv("M3_TG_COUNT")) {
+        extern uint32_t g_tg_vram_writes, g_tg_reg_writes, g_tg_reg_changes;
+        {
+            static uint32_t last_gen;
+            static unsigned changed_fields;
+            uint32_t gen = bus_tilegen_generation();
+            changed_fields += gen != last_gen;
+            last_gen = gen;
+            if (model3recomp_frame_count() % 100 == 0) {
+                fprintf(stderr, "[tg] field %llu: vram writes %u, reg writes %u, "
+                        "reg changes %u (last field); 2D changed in %u of the "
+                        "last 100 fields\n",
+                        (unsigned long long)model3recomp_frame_count(),
+                        g_tg_vram_writes, g_tg_reg_writes, g_tg_reg_changes,
+                        changed_fields);
+                changed_fields = 0;
+            }
+        }
+        g_tg_vram_writes = g_tg_reg_writes = g_tg_reg_changes = 0;
+    }
     if (getenv("M3_SINK_COUNT") && model3recomp_frame_count() % 100 == 0)
         fprintf(stderr, "[sink] field %llu: %u opaque, %u translucent\n",
                 (unsigned long long)model3recomp_frame_count(),

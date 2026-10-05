@@ -136,6 +136,7 @@ size_t   bus_r3d_read(int region, size_t off, void *dst, size_t len);
 uint8_t *bus_texfifo(size_t *used, size_t *capacity);
 uint64_t bus_rom_cache_misses(void);
 uint64_t bus_vrom_cache_misses(void);
+uint32_t bus_tilegen_generation(void);
 size_t   bus_real3d_bytes(void);
 uint64_t bus_ram_overruns(void);      /* see M3_RAM_BYTES */      /* Dreamcast: Real3D RAM paged in so far */   /* pages fetched through m3_roms_t.read */
 void     bus_texfifo_reset(void);

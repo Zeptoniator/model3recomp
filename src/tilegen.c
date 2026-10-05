@@ -222,21 +222,41 @@ static void dump_state(const uint8_t *v)
 }
 #endif
 
+static unsigned render_pass(int above, uint32_t *fb, int fbw, int fbh,
+                            uint16_t *t16, unsigned stride);
+
 void tilegen_render_pass(int above)
 {
     int fbw = 0, fbh = 0;
     uint32_t *fb = platform_framebuffer(&fbw, &fbh);
+    if (fb)
+        render_pass(above, fb, fbw, fbh, NULL, 0);
+}
+
+unsigned tilegen_render_pass_1555(int above, uint16_t *dst, unsigned stride)
+{
+    return render_pass(above, NULL, 496, 384, dst, stride);
+}
+
+/* Into a 32-bit framebuffer, or (fb NULL) a 1555 target: each line built in
+ * a line buffer and copied a word at a time, because the target may be
+ * video memory that takes no byte writes. */
+static unsigned render_pass(int above, uint32_t *fb, int fbw, int fbh,
+                            uint16_t *t16, unsigned stride)
+{
     const uint8_t *v = bus_vram(NULL);
     int x, y;
+    unsigned drawn = 0;
+    uint16_t line[512];
 
-    if (!fb || !v)
-        return;
+    if ((!fb && !t16) || !v)
+        return 0;
 
     /* M3_NO_2D: draw the 3D on its own. The tilemaps are opaque over most of
      * the screen and sit above the 3D during a round, so this is the only
      * way to see what the Real3D actually produced. */
     if (getenv("M3_NO_2D"))
-        return;
+        return 0;
 
     /* No clear here: real3d_render() has already drawn the 3D scene into
      * this buffer and cleared what it did not cover. The tilemaps go over
@@ -314,6 +334,7 @@ void tilegen_render_pass(int above)
     for (y = 0; y < fbh && y < 384; y++) {
         uint32_t mask_word = le32(v, VRAM_STENCIL + (uint32_t)y * 4u);
         int pair;
+        if (t16) memset(line, 0, sizeof line);
         for (pair = 1; pair >= 0; pair--) {
             int lx[2], ly[2], want[2], four[2], k;
             unsigned lmask = pair ? (mask_word & 0xFFFFu) : (mask_word >> 16);
@@ -350,8 +371,22 @@ void tilegen_render_pass(int above)
                 argb = palette_argb(v, (unsigned)idx, &transparent);
                 if (transparent)
                     continue;
-                fb[y * fbw + x] = coff ? offset_colour(argb, coff) : argb;
+                if (coff) argb = offset_colour(argb, coff);
+                drawn++;
+                if (fb)
+                    fb[y * fbw + x] = argb;
+                else
+                    line[x] = (uint16_t)(0x8000u | ((argb >> 9) & 0x7C00u)
+                                       | ((argb >> 6) & 0x03E0u)
+                                       | ((argb >> 3) & 0x001Fu));
             }
         }
+        if (t16) {
+            const uint32_t *s32 = (const uint32_t *)line;
+            uint32_t *d32 = (uint32_t *)(t16 + (size_t)y * stride);
+            int k;
+            for (k = 0; k < 496 / 2; k++) d32[k] = s32[k];
+        }
     }
+    return drawn;
 }
