@@ -36,7 +36,7 @@ static uint32_t g_enable;
 static uint64_t g_field;
 static int      g_in_dispatch;
 
-void irq_init(void)
+void m3_irq_init(void)
 {
     g_pending = 0;
     g_enable  = 0;

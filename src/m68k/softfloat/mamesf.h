@@ -23,10 +23,12 @@
 *----------------------------------------------------------------------------*/
 
 typedef sint8 flag;
+#ifndef _arch_dreamcast        /* KOS has these already: see m68kcpu.h */
 typedef sint8 int8;
 typedef sint16 int16;
 typedef sint32 int32;
 typedef sint64 int64;
+#endif
 
 /*----------------------------------------------------------------------------
 | Each of the following `typedef's defines a type that holds integers

@@ -197,6 +197,38 @@ static size_t   g_texfifo_used;
 #define POLY_SIZE    0x400000u
 static uint8_t *g_cull_lo, *g_cull_hi, *g_poly;
 
+/* The Real3D's memories and the FIFO are 13 MB between them, and a Dreamcast
+ * has 16 MB for everything. There they are allocated the first time the
+ * guest touches them, so a program that never draws pays nothing, and what
+ * the game does touch is what the memory budget has to find room for
+ * (docs/dreamcast/MEMORY_BUDGET.md). A desktop allocates them up front, as
+ * it always has. */
+#ifdef M3_DREAMCAST
+#  define M3_LAZY_REGIONS 1
+#else
+#  define M3_LAZY_REGIONS 0
+#endif
+
+static uint8_t *region(uint8_t **p, size_t size, const char *name)
+{
+    if (!*p) {
+        *p = calloc(1, size);
+        if (!*p) {
+            fprintf(stderr, "[model3recomp] out of memory for %s (%u KB)\n",
+                    name, (unsigned)(size >> 10));
+            abort();
+        }
+        if (M3_LAZY_REGIONS)
+            fprintf(stderr, "[model3recomp] %s allocated on first use, %u KB\n",
+                    name, (unsigned)(size >> 10));
+    }
+    return *p;
+}
+#define CULL_LO() region(&g_cull_lo, CULL_LO_SIZE, "culling RAM (low)")
+#define CULL_HI() region(&g_cull_hi, CULL_HI_SIZE, "culling RAM (high)")
+#define POLY()    region(&g_poly, POLY_SIZE, "polygon RAM")
+#define TEXFIFO() region(&g_texfifo, TEXFIFO_CAP, "Real3D FIFO")
+
 void bus_init(const m3_roms_t *roms)
 {
     g_roms = *roms;
@@ -219,11 +251,10 @@ void bus_init(const m3_roms_t *roms)
         }
     }
     g_vram    = calloc(1, TILEGEN_VRAM_SIZE);
-    g_texfifo = calloc(1, TEXFIFO_CAP);
-    g_cull_lo = calloc(1, CULL_LO_SIZE);
-    g_cull_hi = calloc(1, CULL_HI_SIZE);
-    g_poly    = calloc(1, POLY_SIZE);
-    if (!g_ram || !g_backup || !g_vram || !g_cull_lo || !g_cull_hi || !g_poly) {
+    if (!M3_LAZY_REGIONS) {
+        TEXFIFO(); CULL_LO(); CULL_HI(); POLY();
+    }
+    if (!g_ram || !g_backup || !g_vram) {
         fprintf(stderr, "[model3recomp] out of memory allocating the board\n");
         abort();
     }
@@ -264,7 +295,7 @@ uint8_t *bus_texfifo(size_t *used, size_t *capacity)
 {
     if (used) *used = g_texfifo_used;
     if (capacity) *capacity = TEXFIFO_CAP;
-    return g_texfifo;
+    return TEXFIFO();
 }
 
 void bus_texfifo_reset(void) { g_texfifo_used = 0; }
@@ -278,19 +309,19 @@ uint8_t *bus_vram(size_t *size)
 uint8_t *bus_cull_lo(size_t *size)
 {
     if (size) *size = CULL_LO_SIZE;
-    return g_cull_lo;
+    return CULL_LO();
 }
 
 uint8_t *bus_cull_hi(size_t *size)
 {
     if (size) *size = CULL_HI_SIZE;
-    return g_cull_hi;
+    return CULL_HI();
 }
 
 uint8_t *bus_poly(size_t *size)
 {
     if (size) *size = POLY_SIZE;
-    return g_poly;
+    return POLY();
 }
 
 const uint8_t *bus_vrom(size_t *size)
@@ -329,11 +360,11 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
         return g_ram + a;
 
     if (a >= M3_R3D_CULL_LO && a < M3_R3D_CULL_LO + CULL_LO_SIZE)
-        return g_cull_lo + (a - M3_R3D_CULL_LO);
+        return CULL_LO() + (a - M3_R3D_CULL_LO);
     if (a >= M3_R3D_CULL_HI && a < M3_R3D_CULL_HI + CULL_HI_SIZE)
-        return g_cull_hi + (a - M3_R3D_CULL_HI);
+        return CULL_HI() + (a - M3_R3D_CULL_HI);
     if (a >= M3_R3D_POLY && a < M3_R3D_POLY + POLY_SIZE)
-        return g_poly + (a - M3_R3D_POLY);
+        return POLY() + (a - M3_R3D_POLY);
 
     if (a >= M3_TILEGEN_VRAM && a < M3_TILEGEN_VRAM + TILEGEN_VRAM_SIZE)
         return g_vram + (a - M3_TILEGEN_VRAM);
@@ -1020,7 +1051,7 @@ static void dev_write(uint32_t a, uint32_t v, unsigned size)
         for (i = 0; i < size; i++) {
             if (g_texfifo_used >= TEXFIFO_CAP)
                 break;
-            g_texfifo[g_texfifo_used++] =
+            TEXFIFO()[g_texfifo_used++] =
                 (uint8_t)(v >> (8u * (size - 1u - i)));
         }
         return;
@@ -1133,9 +1164,9 @@ void bus_state(m3_state_t *st)
     m3_state_io(st, g_ram, M3_RAM_SIZE);
     m3_state_io(st, g_backup, 0x20000u);
     m3_state_io(st, g_vram, TILEGEN_VRAM_SIZE);
-    m3_state_io(st, g_cull_lo, CULL_LO_SIZE);
-    m3_state_io(st, g_cull_hi, CULL_HI_SIZE);
-    m3_state_io(st, g_poly, POLY_SIZE);
+    m3_state_io(st, CULL_LO(), CULL_LO_SIZE);
+    m3_state_io(st, CULL_HI(), CULL_HI_SIZE);
+    m3_state_io(st, POLY(), POLY_SIZE);
     M3_STATE_VAR(st, g_texfifo_used);
     if (g_texfifo_used <= TEXFIFO_CAP)
         m3_state_io(st, g_texfifo, g_texfifo_used);

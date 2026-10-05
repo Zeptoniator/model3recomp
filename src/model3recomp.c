@@ -34,7 +34,7 @@ int model3recomp_init(const m3_config_t *cfg)
     bus_init(&g_cfg.roms);
     bus_set_scsi_base(g_cfg.scsi_base);
     func_table_init();
-    irq_init();
+    m3_irq_init();
     ppc_reset();
 
     m3_safepoint_pc = g_cfg.safepoint_pc ? g_cfg.safepoint_pc : 0xFFFFFFFFu;

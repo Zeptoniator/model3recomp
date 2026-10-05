@@ -36,7 +36,7 @@ extern "C" {
 #define M3_IRQ_SOUND         0x40000000u  /* SCSP (MAME: 0x40) */
 #define M3_IRQ_NET           0x10000000u
 
-void     irq_init(void);
+void     m3_irq_init(void);
 
 /* Raise / acknowledge. ack is what 0xF1180010 routes to. */
 void     irq_raise(uint32_t bits);

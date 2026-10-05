@@ -67,12 +67,22 @@ extern "C" {
 #undef sint
 #undef uint
 
+#ifdef _arch_dreamcast
+/* KallistiOS already names uint8..uint64 and int8..int64 (arch/types.h, which
+ * every newlib header pulls in), with uint32 as unsigned long. Same widths
+ * on the SH-4, different spelling, and C will not have both: use KOS's. */
+#include <arch/types.h>
+typedef signed   char  sint8;
+typedef signed   short sint16;
+typedef signed   long  sint32;
+#else
 typedef signed   char  sint8;  		/* ASG: changed from char to signed char */
 typedef signed   short sint16;
 typedef signed   int   sint32; 		/* AWJ: changed from long to int */
 typedef unsigned char  uint8;
 typedef unsigned short uint16;
 typedef unsigned int   uint32; 			/* AWJ: changed from long to int */
+#endif
 
 /* signed and unsigned int must be at least 32 bits wide */
 typedef signed   int sint;
@@ -81,7 +91,9 @@ typedef unsigned int uint;
 
 #if M68K_USE_64_BIT
 typedef signed   long long sint64;
+#ifndef _arch_dreamcast
 typedef unsigned long long uint64;
+#endif
 #else
 typedef sint32 sint64;
 typedef uint32 uint64;

@@ -28,7 +28,14 @@ set(M3_SOURCES
     src/m68k/m68kops.c
     src/m68k/softfloat/softfloat.c
 )
-if(SDL2_FOUND)
+# A Dreamcast build (KOS's kallistios.toolchain.cmake sets the system name)
+# has no SDL and no sockets: its own platform layer, and no netplay.
+if(CMAKE_SYSTEM_NAME STREQUAL "dreamcast")
+    set(M3_DREAMCAST ON)
+    set(SDL2_FOUND OFF)
+    list(REMOVE_ITEM M3_SOURCES src/netplay.c)
+    list(APPEND M3_SOURCES src/netplay_null.c src/platform/dreamcast/platform_dreamcast.c)
+elseif(SDL2_FOUND)
     list(APPEND M3_SOURCES src/platform_sdl.c)
 else()
     # Headless build: the library is still fully usable for the boot harness
@@ -51,6 +58,12 @@ endif()
 
 if(WIN32)
     target_link_libraries(model3recomp PUBLIC ws2_32)
+endif()
+if(M3_DREAMCAST)
+    target_compile_definitions(model3recomp PUBLIC M3_DREAMCAST=1)
+    # KOS keeps pthreads in an addon (the sound board and the banded
+    # rasteriser use them).
+    target_link_libraries(model3recomp PUBLIC pthread)
 endif()
 
 if(NOT MSVC)
@@ -86,6 +99,27 @@ if(MODEL3RECOMP_BUILD_TESTS)
     add_executable(model3recomp_test_ppc tests/test_ppc.c)
     target_link_libraries(model3recomp_test_ppc PRIVATE model3recomp)
     add_test(NAME ppc_semantics COMMAND model3recomp_test_ppc)
+
+    # Lifted PowerPC end to end: assemble, lift at build time, run, check.
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        set(SMOKE_DIR ${CMAKE_CURRENT_BINARY_DIR}/guest_smoke)
+        set(SMOKE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/dreamcast/guest_smoke)
+        add_custom_command(
+            OUTPUT ${SMOKE_DIR}/smoke_code_000.c ${SMOKE_DIR}/smoke_register.c
+                   ${SMOKE_DIR}/smoke_funcs.h
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${SMOKE_DIR}
+            COMMAND ${Python3_EXECUTABLE} ${SMOKE_SRC}/make_guest.py ${SMOKE_DIR}/guest.bin
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/ppc_lifter.py
+                    ${SMOKE_DIR}/guest.bin ${SMOKE_DIR} smoke --base 0x00010000
+            DEPENDS ${SMOKE_SRC}/make_guest.py tools/ppc_lifter.py tools/ppc_disasm.py
+            COMMENT "Lifting the guest_smoke PowerPC program")
+        add_executable(model3recomp_guest_smoke ${SMOKE_SRC}/main.c
+            ${SMOKE_DIR}/smoke_code_000.c ${SMOKE_DIR}/smoke_register.c)
+        target_include_directories(model3recomp_guest_smoke PRIVATE ${SMOKE_DIR})
+        target_link_libraries(model3recomp_guest_smoke PRIVATE model3recomp)
+        add_test(NAME guest_smoke COMMAND model3recomp_guest_smoke)
+    endif()
 endif()
 
 # --- Scud Race (optional) ---
@@ -105,4 +139,14 @@ if(SCUD_LIFTED_DIR)
         # -Wall says about it is the guest's business.
         target_compile_options(scudrace PRIVATE -O2 -w)
     endif()
+endif()
+
+# --- Dreamcast examples ---
+if(M3_DREAMCAST)
+    execute_process(COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE M3_GIT_REV OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    add_executable(dreamcast_boot examples/dreamcast_boot/main.c)
+    target_link_libraries(dreamcast_boot PRIVATE model3recomp)
+    target_compile_definitions(dreamcast_boot PRIVATE M3_GIT_REV="${M3_GIT_REV}")
 endif()
