@@ -47,3 +47,14 @@ confirmed by a run that still boots.
 
 `cmake --build build-scud` (GCC 15, `-O2 -w`): 1 min 07 s for the library and
 the lifted game together.
+
+## Update (later the same day)
+
+Discovery now iterates to a fixed point and knows more prologue forms, so
+the RAM half grew to 2 054 functions / 131 778 instructions (unique
+addresses 84 523; functions overlap ×1.32). The ROM half is the reset
+routine only (`--entry-only --entry 0xFFF00100 --only 0xFFF00100`): 1
+function, 58 instructions — the rest of the program ROM is the copy of the
+game the boot puts in RAM. Same frame signatures to field 4000, no misses.
+
+`scudrace.elf` for KOS: 3 783 440 bytes of text, 13 656 data, 124 540 BSS.

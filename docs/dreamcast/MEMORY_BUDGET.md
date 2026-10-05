@@ -73,6 +73,18 @@ them:
 - Culling and polygon RAM allocated by page on first write would cost
   ~1.5 MB instead of 9 MB.
 
+## What the Dreamcast build does now (commit 4301653)
+
+| Item | Dreamcast | How it was decided |
+|---|---:|---|
+| Guest work RAM | 4 096 KB (`M3_RAM_BYTES`) | a desktop build with the same window makes no access above it in 4000 fields of Scud, and its frame signatures equal the 8 MB build's; any access above is reported |
+| Tilegen VRAM + battery RAM | 1 280 KB | unchanged |
+| Culling + polygon RAM | paged, 64 KB on first write | ~1.5 MB in attract (above) |
+| Real3D FIFO | 512 KB, dropped each field while nothing renders | peak 175 KB a field |
+| CROM | not in memory; 16 × 32 KB page cache (512 KB) off the disc | a desktop run with the bank paged gives the same signatures |
+| Sound board | absent (`sound_null.c`) | its tables were 1.1 MB of BSS |
+| `scudrace.elf` | 3 783 KB text, 125 KB BSS | ROM half of the lift cut to the reset routine |
+
 ## Estimate for Scud Race (to be replaced by measurements)
 
 | Item | Estimate | Basis |
