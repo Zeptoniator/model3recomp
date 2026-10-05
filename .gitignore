@@ -38,3 +38,14 @@ repo_rules.md
 # Python
 __pycache__/
 *.pyc
+
+# --- Per-target build trees and local ROM directories (Dreamcast port) ---
+build-*/
+roms/*
+!roms/README.md
+rom/
+*.chd
+*.iso
+*.cdi
+*.elf
+*.map

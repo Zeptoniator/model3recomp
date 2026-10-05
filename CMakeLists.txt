@@ -87,3 +87,22 @@ if(MODEL3RECOMP_BUILD_TESTS)
     target_link_libraries(model3recomp_test_ppc PRIVATE model3recomp)
     add_test(NAME ppc_semantics COMMAND model3recomp_test_ppc)
 endif()
+
+# --- Scud Race (optional) ---
+# Point SCUD_LIFTED_DIR at the output of tools/scud/lift.py. That code is
+# generated from your own dump and never lives in this repository.
+set(SCUD_LIFTED_DIR "" CACHE PATH "Directory of lifted Scud Race C (tools/scud/lift.py)")
+if(SCUD_LIFTED_DIR)
+    file(GLOB SCUD_LIFTED CONFIGURE_DEPENDS "${SCUD_LIFTED_DIR}/scud*.c")
+    if(NOT SCUD_LIFTED)
+        message(FATAL_ERROR "SCUD_LIFTED_DIR has no scud*.c -- run tools/scud/lift.py")
+    endif()
+    add_executable(scudrace src/games/scud/main_host.c src/games/scud/scud.c ${SCUD_LIFTED})
+    target_include_directories(scudrace PRIVATE ${SCUD_LIFTED_DIR} src/games/scud)
+    target_link_libraries(scudrace PRIVATE model3recomp)
+    if(NOT MSVC)
+        # Lifted code is one statement per guest instruction; most of what
+        # -Wall says about it is the guest's business.
+        target_compile_options(scudrace PRIVATE -O2 -w)
+    endif()
+endif()

@@ -1,0 +1,7 @@
+# Scud Race (MAME scud) RAM entry points the static walk does not find.
+# Each was reported by the runtime as a func-table miss; see docs/scud/BRINGUP.md.
+0x00018144   # VBlank callback, installed at 0x00100014; prologue is addi r1,r1,-16
+0x000041F8   # computed targets of the LR-relative dispatch at 0x41C0 (mtctr/bctr)
+0x000042F0
+0x00004308
+0x0000432C
