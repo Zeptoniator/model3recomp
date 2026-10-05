@@ -8,6 +8,7 @@
 #include "model3recomp/input.h"
 #include "model3recomp/netplay.h"
 #include "model3recomp/sound.h"
+#include "model3recomp/jtag.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,7 @@ int model3recomp_init(const m3_config_t *cfg)
 #endif
     bus_init(&g_cfg.roms);
     bus_set_scsi_base(g_cfg.scsi_base);
+    jtag_init((unsigned)g_cfg.step);
     func_table_init();
     m3_irq_init();
     ppc_reset();

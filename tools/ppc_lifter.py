@@ -860,12 +860,42 @@ def discover(image, base, seeds, scan_pointers=False, scan_consts=True,
             entries.add(t)
             hard.add(t)
 
+    code_memo = {}
+
     def code_at(addr):
-        """Does this address hold something that decodes, inside the image?"""
+        """Does this address read as code, inside the image?
+
+        One decodable word is not enough: Scud Race keeps its test menu's
+        strings next to its code, `lis`/`addi` pairs load their addresses,
+        and ASCII decodes as PowerPC often enough that "PRESS TEST BUTTON"
+        lifted as a run of 8000-instruction functions. So the address has to
+        read as instructions, without a gap, as far as a way out of a
+        function: blr, bctr, rfi or an unconditional b."""
         if addr & 3 or not (lo <= addr < hi_):
             return False
-        w = struct.unpack_from(">I", image, addr - base)[0]
-        return w not in (0, 0xFFFFFFFF) and D.decode(w, addr).mn is not None
+        if addr in code_memo:
+            return code_memo[addr]
+        # Text first: an ASCII 'H' is opcode 18, an unconditional b, so a
+        # string can "reach an exit" too. Sixteen bytes that are nearly all
+        # printable are a string, not code.
+        head = image[addr - base:addr - base + 16]
+        if sum(32 <= c < 127 for c in head) >= 14:
+            code_memo[addr] = False
+            return False
+        ok = False
+        a = addr
+        while a < hi_ and a - addr < 4 * 4096:
+            w = struct.unpack_from(">I", image, a - base)[0]
+            i = D.decode(w, a)
+            if w in (0, 0xFFFFFFFF) or i.mn is None:
+                break
+            if (i.mn in ("bclr", "bcctr", "rfi") or
+                    (i.mn == "b" and not i.lk)) and D.is_uncond(i):
+                ok = True
+                break
+            a += 4
+        code_memo[addr] = ok
+        return ok
 
     if scan_prologues:
         # `stwu r1,-N(r1)` -- every non-leaf C function opens with it and
@@ -884,6 +914,37 @@ def discover(image, base, seeds, scan_pointers=False, scan_consts=True,
         # scans, which only look at code `seen` reaches.
         pro = {addr for addr, raw in D.words(image, base)
                if (raw >> 16) == 0x9421 and (raw & 0x8000)}
+        # Scud Race's compiler opens most functions before the stwu, which
+        # then names the middle of them:
+        #
+        #     mflr r0 ; stw r31,-4(r1) ; stw r0,4(r1) ; stwu r1,-N(r1)
+        #     addi r1,r1,-16 ; mflr r0 ; stw r0,0(r1)        (no stwu)
+        #
+        # A pointer to the real start is then a runtime miss. Take `mflr r0`
+        # followed within three words by a store of r0 off r1 as a start,
+        # moved back over an `addi r1,r1,-N` just before it.
+        words = dict(D.words(image, base))
+        for addr, raw in words.items():
+            if raw != 0x7C0802A6:                       # mflr r0
+                continue
+            if not any((words.get(addr + 4 * k, 0) >> 16) == 0x9001
+                       for k in (1, 2, 3)):              # stw r0,d(r1)
+                continue
+            start = addr
+            prev = words.get(addr - 4, 0)
+            if (prev >> 16) == 0x3821 and (prev & 0x8000):   # addi r1,r1,-N
+                start -= 4
+            # Text holds mflr-shaped words too; see code_at().
+            if not code_at(addr):
+                continue
+            pro.add(start)
+        # Part of Scud Race's code (around 0xB000..0xF000, a different
+        # compiler) puts a descriptor word 0x0007C0xx in front of every
+        # function -- 57 of them, each followed by mflr or a stw -- and
+        # those functions save registers before r0, past the window above.
+        for addr, raw in words.items():
+            if (raw & 0xFFFFFF00) == 0x0007C000 and code_at(addr + 4):
+                pro.add(addr + 4)
         entries |= pro
         seen |= scan_reachable(image, base, pro)[1]
 

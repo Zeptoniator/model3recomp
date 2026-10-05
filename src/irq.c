@@ -211,6 +211,22 @@ int irq_dispatch(void)
     m3_ctx.spr[27] = saved_msr;        /* SRR1 */
     m3_ctx.msr &= ~MSR_EE;             /* EE off for the duration */
 
+#ifdef M3_LOOP_GUARD
+    {
+        /* M3_WHERE=N: every N fields, the guest function the VBlank
+         * interrupted -- where the main program is, as opposed to the
+         * handler, which is what every other report sees. */
+        extern uint32_t m3_fn_now;
+        static long every = -1;
+        if (every < 0) {
+            const char *e = getenv("M3_WHERE");
+            every = e ? strtol(e, NULL, 0) : 0;
+        }
+        if (every > 0 && g_field % (uint64_t)every == 0)
+            fprintf(stderr, "[where] field %llu: interrupted %08X (LR %08X)\n",
+                    (unsigned long long)g_field, m3_fn_now, m3_ctx.lr);
+    }
+#endif
     g_in_dispatch = 1;
     {
         /* The interrupted code may be between a return and its check

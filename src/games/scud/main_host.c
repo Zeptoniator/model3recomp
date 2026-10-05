@@ -44,8 +44,31 @@ static uint8_t *slurp(const char *name, size_t *len, int required)
     return p;
 }
 
+/* M3_SHOT_EVERY=N[,DIR]: shot_<field>.ppm every N fields, to watch a run
+ * go by without stopping it. */
+static void shots(void)
+{
+    static long every = -1;
+    static char dir[256];
+    uint64_t f = model3recomp_frame_count();
+    char path[512];
+
+    if (every < 0) {
+        const char *e = getenv("M3_SHOT_EVERY");
+        const char *c = e ? strchr(e, ',') : NULL;
+        every = e ? strtol(e, NULL, 0) : 0;
+        snprintf(dir, sizeof dir, "%s", c ? c + 1 : ".");
+    }
+    if (every <= 0 || f % (uint64_t)every)
+        return;
+    snprintf(path, sizeof path, "%s/shot_%06llu.ppm", dir, (unsigned long long)f);
+    model3recomp_screenshot(path);
+}
+
 static void on_field(void)
 {
+    scud_operator_settings();
+    shots();
     if (!g_stop_after || model3recomp_frame_count() < g_stop_after)
         return;
     model3recomp_screenshot("shot.ppm");

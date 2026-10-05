@@ -29,9 +29,11 @@
 
 #define DMODE_MAN 0x01      /* manual start: DSP writes do not launch */
 #define DCNTL_STD 0x04      /* start DMA */
+#define DCNTL_SSM 0x10      /* single-step: stop after every instruction */
 
 #define ISTAT_DIP 0x01      /* DMA interrupt pending */
 #define DSTAT_SIR 0x04      /* SCRIPTS interrupt instruction */
+#define DSTAT_SSI 0x08      /* single-step interrupt */
 
 static uint8_t g_reg[0x40];
 
@@ -45,6 +47,17 @@ static uint32_t reg32(unsigned off)
 {
     return ((uint32_t)g_reg[off] << 24) | ((uint32_t)g_reg[off + 1] << 16) |
            ((uint32_t)g_reg[off + 2] << 8) | g_reg[off + 3];
+}
+
+/* DSP as the chip leaves it: the address of the next instruction. The
+ * register holds it little-endian, as the guest wrote it. */
+static void set_dsp(uint32_t dsp)
+{
+    uint32_t v = swap32(dsp);
+    g_reg[R_DSP]     = (uint8_t)(v >> 24);
+    g_reg[R_DSP + 1] = (uint8_t)(v >> 16);
+    g_reg[R_DSP + 2] = (uint8_t)(v >> 8);
+    g_reg[R_DSP + 3] = (uint8_t)v;
 }
 
 void scsi_init(void)
@@ -162,12 +175,35 @@ static void scsi_run(uint32_t dsp)
             }
             DMA_LOG("accept", src, dst, cnt);
             bus_dma_copy(dst, src, cnt);
+            /* Single-step mode stops here, with DSP on the next instruction
+             * and SSI raised. Scud Race runs its transfers this way: it
+             * sets DCNTL to STD|SSM, and its interrupt handler checks that
+             * DSP has moved exactly one move along and that what is there
+             * is the INT, before it calls the transfer done. Run on to the
+             * INT instead and the handler sees SIR, which it does not look
+             * for, and the game waits for that transfer forever. */
+            if (g_reg[R_DCNTL] & DCNTL_SSM) {
+                set_dsp(dsp);
+                g_reg[R_ISTAT] |= ISTAT_DIP;
+                g_reg[R_DSTAT] |= DSTAT_SSI;
+                return;
+            }
             continue;
         }
         if ((cmd & 0xC0u) == 0x80u) {              /* transfer control */
             unsigned op = (cmd >> 3) & 7u;
-            if (op == 0) { dsp = d1; continue; }   /* JUMP */
+            if (op == 0) {                          /* JUMP */
+                dsp = d1;
+                if (g_reg[R_DCNTL] & DCNTL_SSM) {   /* one step, as above */
+                    set_dsp(dsp);
+                    g_reg[R_ISTAT] |= ISTAT_DIP;
+                    g_reg[R_DSTAT] |= DSTAT_SSI;
+                    return;
+                }
+                continue;
+            }
             if (op == 3) {                          /* INT */
+                set_dsp(dsp + 8);
                 g_reg[R_ISTAT] |= ISTAT_DIP;
                 g_reg[R_DSTAT] |= DSTAT_SIR;
                 return;

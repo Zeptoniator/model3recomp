@@ -18,6 +18,7 @@
 #define M3_NL "\n"
 #include "model3recomp/irq.h"
 #include "model3recomp/scsi.h"
+#include "model3recomp/jtag.h"
 #include "model3recomp/model3recomp.h"
 
 #include <stdio.h>
@@ -572,6 +573,8 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
          * offset below -- the moment the mapping is anything but a shift,
          * the two stop agreeing and the guest never leaves the loop. */
         case 0x08: return g_crom_bank_reg << 24;
+        /* The video board's JTAG port: TDO in bit 5 of the top byte. */
+        case 0x10: return (uint32_t)jtag_read() << 24;
         default:   return 0;
         }
     }
@@ -765,6 +768,8 @@ static void dev_write_word(uint32_t w, uint32_t v)
     if ((w & 0xFFFFFFC0u) == M3_SYSCTL_BASE) {
         switch (w & 0x3C) {
         case 0x14: irq_enable_write(v); return;
+        /* JTAG: TCK, TMS, TDI, TRST in the top byte (jtag.h). */
+        case 0x0C: jtag_write((uint8_t)(v >> 24)); return;
         case 0x08: {
             /* CROM bank select. The banked window is 8 MB of a 32 MB image,
              * so only a couple of bits of this can be the bank; the rest is

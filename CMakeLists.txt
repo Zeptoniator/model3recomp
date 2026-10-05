@@ -15,6 +15,7 @@ set(M3_SOURCES
     src/func_table.c
     src/irq.c
     src/scsi.c
+    src/jtag.c
     src/screenshot.c
     src/scenedump.c
     src/real3d.c
