@@ -34,8 +34,13 @@ set(M3_SOURCES
 if(CMAKE_SYSTEM_NAME STREQUAL "dreamcast")
     set(M3_DREAMCAST ON)
     set(SDL2_FOUND OFF)
-    list(REMOVE_ITEM M3_SOURCES src/netplay.c)
-    list(APPEND M3_SOURCES src/netplay_null.c src/platform/dreamcast/platform_dreamcast.c)
+    # No sound board either (sound_null.c, see why there), and guest work RAM
+    # is 4 MB: Scud Race's high-water mark is ~2 MB, and an access above
+    # the window is counted and reported, never silent.
+    list(REMOVE_ITEM M3_SOURCES src/netplay.c src/sound.c src/scsp.c
+         src/m68k/m68kcpu.c src/m68k/m68kops.c src/m68k/softfloat/softfloat.c)
+    list(APPEND M3_SOURCES src/netplay_null.c src/sound_null.c
+         src/platform/dreamcast/platform_dreamcast.c)
 elseif(SDL2_FOUND)
     list(APPEND M3_SOURCES src/platform_sdl.c)
 else()
@@ -61,7 +66,8 @@ if(WIN32)
     target_link_libraries(model3recomp PUBLIC ws2_32)
 endif()
 if(M3_DREAMCAST)
-    target_compile_definitions(model3recomp PUBLIC M3_DREAMCAST=1)
+    target_compile_definitions(model3recomp PUBLIC M3_DREAMCAST=1
+        M3_RAM_BYTES=0x400000 M3_ROM_PAGES=16u)
     # KOS keeps pthreads in an addon (the sound board and the banded
     # rasteriser use them).
     target_link_libraries(model3recomp PUBLIC pthread)
@@ -134,13 +140,25 @@ if(SCUD_LIFTED_DIR)
     if(NOT SCUD_LIFTED)
         message(FATAL_ERROR "SCUD_LIFTED_DIR has no scud*.c -- run tools/scud/lift.py")
     endif()
-    add_executable(scudrace src/games/scud/main_host.c src/games/scud/scud.c ${SCUD_LIFTED})
+    if(M3_DREAMCAST)
+        set(SCUD_MAIN src/games/scud/main_dc.c)
+    else()
+        set(SCUD_MAIN src/games/scud/main_host.c)
+    endif()
+    add_executable(scudrace ${SCUD_MAIN} src/games/scud/scud.c ${SCUD_LIFTED})
     target_include_directories(scudrace PRIVATE ${SCUD_LIFTED_DIR} src/games/scud)
     target_link_libraries(scudrace PRIVATE model3recomp)
     if(NOT MSVC)
         # Lifted code is one statement per guest instruction; most of what
         # -Wall says about it is the guest's business.
         target_compile_options(scudrace PRIVATE -O2 -w)
+    endif()
+    if(M3_DREAMCAST)
+        execute_process(COMMAND git rev-parse --short HEAD
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE SCUD_GIT_REV OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        target_compile_definitions(scudrace PRIVATE M3_GIT_REV="${SCUD_GIT_REV}")
+        target_link_options(scudrace PRIVATE -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/scud_dc.map)
     endif()
 endif()
 

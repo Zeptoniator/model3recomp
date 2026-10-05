@@ -204,7 +204,9 @@ void model3recomp_end_frame(void)
             const uint8_t *r = bus_ram();
             uint32_t h = 2166136261u;
             size_t i;
-            for (i = 0; i < M3_RAM_SIZE; i++)
+            /* The first 4 MB, whatever this build's window: a Dreamcast
+             * keeps 4 MB and must hash the same bytes as a desktop. */
+            for (i = 0; i < (M3_RAM_SIZE < 0x400000u ? M3_RAM_SIZE : 0x400000u); i++)
                 h = (h ^ r[i]) * 16777619u;
             fprintf(stderr, "[sig] field %llu ram %08lX r3d %llu\n",
                     (unsigned long long)g_frames, (unsigned long)h,

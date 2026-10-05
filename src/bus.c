@@ -479,10 +479,23 @@ static uint8_t *rom_at(int which, uint32_t off)
  * Returns a host pointer for the plain-memory regions, or NULL when the
  * address belongs to a device and has to go through the switch below.
  */
+/* Accesses to the board's 8 MB of work RAM above a smaller host window. */
+static uint64_t g_ram_overruns;
+uint64_t bus_ram_overruns(void) { return g_ram_overruns; }
+
 static uint8_t *direct(uint32_t a, uint32_t size, int write)
 {
     if (a < M3_RAM_SIZE)
         return g_ram + a;
+#if defined(M3_RAM_BYTES)
+    if (a < 0x00800000u) {
+        if (g_ram_overruns++ < 8)
+            fprintf(stderr, "[model3recomp] guest %s work RAM at %08X, above "
+                            "this build's %u KB window\n", write ? "wrote" : "read",
+                    a, (unsigned)(M3_RAM_SIZE >> 10));
+        return NULL;
+    }
+#endif
 
 #ifdef M3_DREAMCAST
     if (a >= M3_R3D_CULL_LO && a < M3_R3D_CULL_LO + CULL_LO_SIZE)

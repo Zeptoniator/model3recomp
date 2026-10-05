@@ -17,7 +17,14 @@ extern "C" {
 
 /* ---- Address map (Step 1.x) -------------------------------------------- */
 #define M3_RAM_BASE        0x00000000u
+/* 8 MB on the board. A host short of memory may build with less
+ * (-DM3_RAM_BYTES=...): accesses above it are counted and reported
+ * (bus_ram_overruns), so a game that needs more says so. */
+#ifdef M3_RAM_BYTES
+#define M3_RAM_SIZE        ((uint32_t)(M3_RAM_BYTES))
+#else
 #define M3_RAM_SIZE        0x00800000u   /* 8 MB */
+#endif
 
 #define M3_R3D_STATUS      0x84000000u   /* Real3D status / ID              */
 #define M3_R3D_TRIGGER     0x88000000u   /* Real3D command trigger          */
@@ -127,7 +134,8 @@ const uint8_t *bus_vrom(size_t *size);
  * an address space. */
 uint8_t *bus_texfifo(size_t *used, size_t *capacity);
 uint64_t bus_rom_cache_misses(void);
-size_t   bus_real3d_bytes(void);      /* Dreamcast: Real3D RAM paged in so far */   /* pages fetched through m3_roms_t.read */
+size_t   bus_real3d_bytes(void);
+uint64_t bus_ram_overruns(void);      /* see M3_RAM_BYTES */      /* Dreamcast: Real3D RAM paged in so far */   /* pages fetched through m3_roms_t.read */
 void     bus_texfifo_reset(void);
 /* Drop the first n bytes, which the renderer has taken; what is left (a
  * partly arrived entry) moves to the front. */
