@@ -37,6 +37,56 @@ static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len
     return got;
 }
 
+#ifdef SCUD_DC_PROFILE
+/* A sampling profiler: a second thread wakes every few milliseconds and
+ * reads the program counter the main thread was preempted at (its saved
+ * context). Counts per 16-byte bucket; the end of the run prints the top
+ * ones, to be named with sh-elf-addr2line against scudrace.elf. Samples are
+ * taken from SCUD_DC_PROFILE_FROM on. */
+#ifndef SCUD_DC_PROFILE_FROM
+#define SCUD_DC_PROFILE_FROM 450
+#endif
+#define PROF_SLOTS 8192
+static kthread_t *g_main;
+static uint32_t g_prof_pc[PROF_SLOTS], g_prof_n[PROF_SLOTS], g_prof_total;
+static volatile int g_prof_on = 1;
+
+static void *profiler(void *arg)
+{
+    (void)arg;
+    while (g_prof_on) {
+        thd_sleep(2);
+        if (model3recomp_frame_count() < SCUD_DC_PROFILE_FROM) continue;
+        {
+            uint32_t pc = g_main->context.pc & ~15u, h = (pc >> 4) % PROF_SLOTS, k;
+            for (k = 0; k < PROF_SLOTS; k++, h = (h + 1) % PROF_SLOTS) {
+                if (g_prof_pc[h] == pc || !g_prof_n[h]) {
+                    g_prof_pc[h] = pc; g_prof_n[h]++; g_prof_total++;
+                    break;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+static void profile_report(void)
+{
+    int top, i, best;
+    g_prof_on = 0;
+    printf("[prof] %lu samples\n", (unsigned long)g_prof_total);
+    for (top = 0; top < 80; top++) {
+        best = -1;
+        for (i = 0; i < PROF_SLOTS; i++)
+            if (g_prof_n[i] && (best < 0 || g_prof_n[i] > g_prof_n[best])) best = i;
+        if (best < 0) break;
+        printf("[prof] %08lX %lu\n", (unsigned long)g_prof_pc[best],
+               (unsigned long)g_prof_n[best]);
+        g_prof_n[best] = 0;
+    }
+}
+#endif
+
 static void report(const char *when)
 {
     struct mallinfo mi = mallinfo();
@@ -59,6 +109,9 @@ static void on_field(void)
         report("progress");
     if (f > SCUD_DC_FIELDS) {          /* after field N's signature */
         report("end");
+#ifdef SCUD_DC_PROFILE
+        profile_report();
+#endif
         printf("SCUD DC DONE\n");
         fflush(stdout);
         exit(0);
@@ -95,6 +148,10 @@ int main(void)
     }
     model3recomp_set_frame_hook(on_field);
     scud_register_lifted();
+#ifdef SCUD_DC_PROFILE
+    g_main = thd_get_current();
+    thd_create(1, profiler, NULL);
+#endif
     g_t0 = timer_us_gettime64();
     report("start");
     printf("SCUD BOOT\n");

@@ -13,6 +13,7 @@ void scud_board_config(m3_config_t *cfg)
     cfg->step      = M3_STEP_1_5;
     cfg->title     = "Scud Race";
     cfg->scsi_base = SCUD_SCSI_BASE;
+    cfg->scsi_irq  = 1;    /* its 0x500 handler services the 53C810 first */
 }
 
 void scud_operator_settings(void)

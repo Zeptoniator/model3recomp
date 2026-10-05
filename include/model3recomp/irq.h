@@ -38,6 +38,12 @@ extern "C" {
 
 void     m3_irq_init(void);
 
+/* The 53C810's interrupt: delivered at the next point the runtime gets
+ * control, whatever the enable mask (it is non-maskable on the board), and
+ * not visible in the status register. Consumed when dispatched. */
+void     irq_raise_scsi(void);
+void     irq_set_scsi_enabled(int on);
+
 /* Raise / acknowledge. ack is what 0xF1180010 routes to. */
 void     irq_raise(uint32_t bits);
 void     irq_ack(uint32_t bits);

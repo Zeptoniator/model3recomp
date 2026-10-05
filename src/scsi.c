@@ -14,6 +14,7 @@
  */
 #include "model3recomp/savestate.h"
 #include "model3recomp/scsi.h"
+#include "model3recomp/irq.h"
 #include "model3recomp/bus.h"
 
 #include <stdio.h>
@@ -163,7 +164,7 @@ static void scsi_run(uint32_t dsp)
                  *
                  * Signal completion anyway, so the guest is not left
                  * polling ISTAT for a program that will never end. */
-                g_reg[R_ISTAT] |= ISTAT_DIP;
+                g_reg[R_ISTAT] |= ISTAT_DIP; irq_raise_scsi();
                 g_reg[R_DSTAT] |= DSTAT_SIR;
                 return;
             }
@@ -184,7 +185,7 @@ static void scsi_run(uint32_t dsp)
              * for, and the game waits for that transfer forever. */
             if (g_reg[R_DCNTL] & DCNTL_SSM) {
                 set_dsp(dsp);
-                g_reg[R_ISTAT] |= ISTAT_DIP;
+                g_reg[R_ISTAT] |= ISTAT_DIP; irq_raise_scsi();
                 g_reg[R_DSTAT] |= DSTAT_SSI;
                 return;
             }
@@ -196,7 +197,7 @@ static void scsi_run(uint32_t dsp)
                 dsp = d1;
                 if (g_reg[R_DCNTL] & DCNTL_SSM) {   /* one step, as above */
                     set_dsp(dsp);
-                    g_reg[R_ISTAT] |= ISTAT_DIP;
+                    g_reg[R_ISTAT] |= ISTAT_DIP; irq_raise_scsi();
                     g_reg[R_DSTAT] |= DSTAT_SSI;
                     return;
                 }
@@ -204,7 +205,7 @@ static void scsi_run(uint32_t dsp)
             }
             if (op == 3) {                          /* INT */
                 set_dsp(dsp + 8);
-                g_reg[R_ISTAT] |= ISTAT_DIP;
+                g_reg[R_ISTAT] |= ISTAT_DIP; irq_raise_scsi();
                 g_reg[R_DSTAT] |= DSTAT_SIR;
                 return;
             }

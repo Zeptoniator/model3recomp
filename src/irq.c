@@ -45,6 +45,10 @@ void m3_irq_init(void)
 }
 
 int irq_in_dispatch(void)          { return g_in_dispatch; }
+
+static int g_scsi_on, g_scsi_pending;
+void irq_set_scsi_enabled(int on)  { g_scsi_on = on; }
+void irq_raise_scsi(void)          { if (g_scsi_on) g_scsi_pending = 1; }
 void irq_raise(uint32_t bits)      { g_pending |= bits; }
 void irq_ack(uint32_t bits)        { g_pending &= ~bits; }
 uint32_t irq_pending(void)         { return g_pending; }
@@ -149,6 +153,8 @@ void irq_tick(void)
     if (g_in_dispatch)
         return;
     dec_tick();
+    if (g_scsi_pending)
+        irq_dispatch();
     if (!model3recomp_field_due())
         return;
 
@@ -197,10 +203,11 @@ int irq_dispatch(void)
 
     if (g_in_dispatch)
         return 0;
-    if (!(g_pending & g_enable))
+    if (!(g_pending & g_enable) && !g_scsi_pending)
         return 0;
     if (!(m3_ctx.msr & MSR_EE))        /* guest has interrupts masked */
         return 0;
+    g_scsi_pending = 0;                /* this dispatch serves it */
 
     vec_base = (m3_ctx.msr & MSR_IP) ? 0xFFF00000u : 0x00000000u;
 
@@ -253,4 +260,5 @@ void irq_state(m3_state_t *st)
     M3_STATE_VAR(st, g_field);
     M3_STATE_VAR(st, g_in_dispatch);
     M3_STATE_VAR(st, g_dec_work);
+    M3_STATE_VAR(st, g_scsi_pending);
 }

@@ -45,6 +45,14 @@ typedef struct m3_config {
      * decides its window: 0xC1000000 on The Lost World, 0xF9000000 on Scud
      * Race (MAME's init_scud and init_lostwsga). 0 means 0xC1000000. */
     uint32_t    scsi_base;
+
+    /* Raise the 53C810's interrupt when a SCRIPTS program stops (INT, or a
+     * single step). On the board it is non-maskable (Supermodel gives it a
+     * bit outside the 8-bit mask) and it is how Scud Race learns a transfer
+     * finished; without it the game waits for the next VBlank, spinning,
+     * after every transfer. Off by default: The Lost World was brought up
+     * without it and has not been re-checked with it. */
+    int         scsi_irq;
 } m3_config_t;
 
 int  model3recomp_init(const m3_config_t *cfg);

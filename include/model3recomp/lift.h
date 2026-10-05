@@ -20,7 +20,7 @@
  * common case, and the byte order matches what bus.c stores (big-endian, as
  * the guest sees it).
  */
-static inline uint32_t m3_ld32(uint32_t a)
+static M3_INLINE uint32_t m3_ld32(uint32_t a)
 {
     if (a < M3_RAM_SIZE - 3u) {
         const uint8_t *p = m3_ram_base + a;
@@ -30,7 +30,7 @@ static inline uint32_t m3_ld32(uint32_t a)
     return bus_read32(a);
 }
 
-static inline uint32_t m3_ld16(uint32_t a)
+static M3_INLINE uint32_t m3_ld16(uint32_t a)
 {
     if (a < M3_RAM_SIZE - 1u) {
         const uint8_t *p = m3_ram_base + a;
@@ -39,7 +39,7 @@ static inline uint32_t m3_ld16(uint32_t a)
     return bus_read16(a);
 }
 
-static inline uint32_t m3_ld8(uint32_t a)
+static M3_INLINE uint32_t m3_ld8(uint32_t a)
 {
     if (a < M3_RAM_SIZE)
         return m3_ram_base[a];
@@ -67,7 +67,7 @@ extern uint32_t m3_watch_addr;
 #define M3_WATCH_NOTE(a, v, n) ((void)0)
 #endif
 
-static inline void m3_st32(uint32_t a, uint32_t v)
+static M3_INLINE void m3_st32(uint32_t a, uint32_t v)
 {
     M3_WATCH_NOTE(a, v, 4);
     if (a < M3_RAM_SIZE - 3u) {
@@ -79,7 +79,7 @@ static inline void m3_st32(uint32_t a, uint32_t v)
     bus_write32(a, v);
 }
 
-static inline void m3_st16(uint32_t a, uint32_t v)
+static M3_INLINE void m3_st16(uint32_t a, uint32_t v)
 {
     M3_WATCH_NOTE(a, v, 2);
     if (a < M3_RAM_SIZE - 1u) {
@@ -90,7 +90,7 @@ static inline void m3_st16(uint32_t a, uint32_t v)
     bus_write16(a, (uint16_t)v);
 }
 
-static inline void m3_st8(uint32_t a, uint32_t v)
+static M3_INLINE void m3_st8(uint32_t a, uint32_t v)
 {
     M3_WATCH_NOTE(a, v, 1);
     if (a < M3_RAM_SIZE) { m3_ram_base[a] = (uint8_t)v; return; }
@@ -125,11 +125,11 @@ static inline void m3_st8(uint32_t a, uint32_t v)
 /* Single-precision ops round through float; they do not truncate. */
 #define F32(d)        ((double)(float)(d))
 
-static inline double m3_fabs(double d)  { return fabs(d); }
-static inline double m3_sqrt(double d)  { return sqrt(d); }
+static M3_INLINE double m3_fabs(double d)  { return fabs(d); }
+static M3_INLINE double m3_sqrt(double d)  { return sqrt(d); }
 /* fctiw honours FPSCR[RN]; every Model 3 title leaves it at round-to-nearest,
  * which is what nearbyint gives under the default host mode. */
-static inline double m3_round(double d) { return nearbyint(d); }
+static M3_INLINE double m3_round(double d) { return nearbyint(d); }
 
 uint32_t m3_timebase(unsigned spr);
 void     m3_timebase_set(unsigned spr, uint32_t v);

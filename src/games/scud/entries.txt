@@ -16,3 +16,4 @@
 0x00001A48   # nop padding, falls into the stwbrx stub
 0x00001A54   # stwbrx stub
 0x0004566C   # callback (via 0x13CF8 bnelrl); opens with mftb before its prologue
+0x00034328   # callback leaf (no prologue): installs 0x34338 at 12(r12); seen once the SCSI interrupt sped attract up
