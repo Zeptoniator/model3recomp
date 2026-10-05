@@ -71,3 +71,18 @@
   visible victim.
 - **Next step**: differential device trace, interpreter vs runtime
   (docs/scud/BRINGUP.md).
+
+## DC-BUG-008 — with no framebuffer, VROM texture loads vanish (open)
+
+- **Symptom**: none yet (nothing renders on the Dreamcast); found reading
+  `src/real3d.c` for docs/renderer/.
+- **Root cause**: `real3d_render()` returns early when
+  `platform_framebuffer()` is NULL, which is how the Dreamcast platform asks
+  the software renderers to stand down. `g_sheet` is allocated only past
+  that return, and `real3d_vrom_texture()` drops every load while `g_sheet`
+  is NULL (`real3d.c:310`) — silently. The FIFO drain is skipped the same way.
+- **Consequence**: a PVR back end cannot simply sit beside the software one;
+  texture uploads must be decoupled from rasterising first.
+- Related: `flush_texture_fifo()` re-parses the FIFO from offset 0 whenever
+  it grows and `bus_texfifo_reset()` has no caller, so every texture ever
+  sent is re-uploaded and the 4 MB cap eventually drops data silently.
