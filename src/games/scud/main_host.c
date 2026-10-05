@@ -92,9 +92,10 @@ static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len
  * it is handed, the path the Dreamcast's PVR back end takes. */
 static unsigned g_sink_polys[2], g_sink_last[2];
 static void sink_begin(void) { g_sink_polys[0] = g_sink_polys[1] = 0; }
-static void sink_poly(const m3_r3d_vertex *v, int n, uint32_t argb, int tr)
+static void sink_poly(const m3_r3d_vertex *v, int n, uint32_t argb, int tr,
+                      const m3_r3d_texture *tex)
 {
-    (void)v; (void)n; (void)argb;
+    (void)v; (void)n; (void)argb; (void)tex;
     g_sink_polys[tr ? 1 : 0]++;
 }
 static void sink_end(void)
@@ -102,7 +103,7 @@ static void sink_end(void)
     g_sink_last[0] = g_sink_polys[0];
     g_sink_last[1] = g_sink_polys[1];
 }
-static const m3_r3d_sink k_count_sink = { sink_begin, sink_poly, sink_end };
+static const m3_r3d_sink k_count_sink = { sink_begin, sink_poly, sink_end, NULL };
 
 static void on_field(void)
 {

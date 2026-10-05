@@ -272,6 +272,13 @@ static const unsigned char DETILE[64] = {
 };
 
 static uint16_t *g_sheet;
+/* The sheet may be kept at reduced size (real3d_set_sheet, M3_SHEET_SHIFT
+ * on a desktop to see what that looks like): 1 << g_sheet_shift texels of
+ * the board's per stored texel, each way, point sampled. */
+static unsigned g_sheet_shift;
+static const m3_r3d_sink *g_sink;      /* real3d_set_sink */
+#define SHEET_AT(X, Y) ((size_t)((Y) >> g_sheet_shift) * (TEX_W >> g_sheet_shift) \
+                        + ((X) >> g_sheet_shift))
 static uint8_t  *g_sheet_set;          /* TEX_W * TEX_H texels */
 static size_t    g_fifo_seen;      /* how much of the FIFO has been drained */
 static unsigned  g_tex_uploads;
@@ -280,6 +287,7 @@ static unsigned  g_tex_uploads;
  * the FIFO is not. */
 static int g_src_be;
 
+static uint64_t g_up_texels[2], g_up_count[2];   /* FIFO, VROM port */
 static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
 {
     /* The origin and size of an upload. Dumping the sheet to a PNG shows
@@ -329,9 +337,13 @@ static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
         for (tx = 0; tx < w; tx += 8u) {
             for (yy = 0; yy < 8u; yy++) {
                 for (xx = 0; xx < 8u; xx++) {
-                    size_t o = (size_t)(y + ty + yy) * TEX_W + (x + tx + xx);
+                    size_t o;
                     size_t si;
                     uint16_t t;
+                    if (g_sheet_shift && (((x + tx + xx) | (y + ty + yy))
+                                          & ((1u << g_sheet_shift) - 1u)))
+                        continue;            /* not kept at this size */
+                    o = SHEET_AT(x + tx + xx, y + ty + yy);
                     if (sixteen) {
                         si = off + DETILE[yy * 8u + xx];
                         if ((si + 1) * 2 > avail) continue;
@@ -364,6 +376,9 @@ static void upload_texture(uint32_t header, const uint8_t *src, size_t avail)
         }
     }
     g_tex_uploads++;
+    if (g_sink && g_sink->sheet_changed) g_sink->sheet_changed();
+    g_up_texels[g_src_be ? 1 : 0] += (uint64_t)w * h;
+    g_up_count[g_src_be ? 1 : 0]++;
 }
 
 /* The VROM texture port at 0x90000000.
@@ -436,6 +451,17 @@ static void flush_texture_fifo(void)
                         "\n");
         }
         if (!words || (size_t)words * 4u > used - i) break;
+        if (getenv("M3_TEX_SAVE")) {        /* each payload, for tracing */
+            static unsigned saved;
+            char path[512];
+            FILE *fp;
+            snprintf(path, sizeof path, "%s/up%03u_%08X.bin",
+                     getenv("M3_TEX_SAVE"), saved++, header);
+            if ((fp = fopen(path, "wb"))) {
+                fwrite(f + i + 8, 1, (size_t)words * 4u - 8u, fp);
+                fclose(fp);
+            }
+        }
         upload_texture(header, f + i + 8, (size_t)words * 4u - 8u);
         i += (size_t)words * 4u;
     }
@@ -456,7 +482,7 @@ static int sheet_word(unsigned x, unsigned y)
 {
     size_t o;
     if (!g_sheet) return -1;
-    o = (size_t)(y & (TEX_H - 1u)) * TEX_W + (x & (TEX_W - 1u));
+    o = SHEET_AT(x & (TEX_W - 1u), y & (TEX_H - 1u));
     if (g_sheet_set && !g_sheet_set[o]) return -1;
     return g_sheet[o];
 }
@@ -468,7 +494,7 @@ static int sheet_word(unsigned x, unsigned y)
  * one byte or nibble of the texel: 1-4 four-bit luminance and alpha, 5-6
  * eight-bit luminance with full white transparent, 7 RGBA4, 8-11 four-bit
  * luminance with the top value transparent. */
-static uint32_t texel_argb(unsigned fmt, unsigned v)
+uint32_t real3d_texel_argb(unsigned fmt, unsigned v)
 {
     unsigned r, g, b, a = 255;
     switch (fmt) {
@@ -552,10 +578,10 @@ static int64_t sample(const tri_t *tr, double u, double v)
     unsigned base = tr->page * 1024u;
     int t;
 
-    t = sheet_word(tr->tx + x0, ((tr->ty + y0) & 1023u) + base); if (t < 0) return -1; px[0] = texel_argb(tr->fmt, (unsigned)t);
-    t = sheet_word(tr->tx + x1, ((tr->ty + y0) & 1023u) + base); if (t < 0) return -1; px[1] = texel_argb(tr->fmt, (unsigned)t);
-    t = sheet_word(tr->tx + x0, ((tr->ty + y1) & 1023u) + base); if (t < 0) return -1; px[2] = texel_argb(tr->fmt, (unsigned)t);
-    t = sheet_word(tr->tx + x1, ((tr->ty + y1) & 1023u) + base); if (t < 0) return -1; px[3] = texel_argb(tr->fmt, (unsigned)t);
+    t = sheet_word(tr->tx + x0, ((tr->ty + y0) & 1023u) + base); if (t < 0) return -1; px[0] = real3d_texel_argb(tr->fmt, (unsigned)t);
+    t = sheet_word(tr->tx + x1, ((tr->ty + y0) & 1023u) + base); if (t < 0) return -1; px[1] = real3d_texel_argb(tr->fmt, (unsigned)t);
+    t = sheet_word(tr->tx + x0, ((tr->ty + y1) & 1023u) + base); if (t < 0) return -1; px[2] = real3d_texel_argb(tr->fmt, (unsigned)t);
+    t = sheet_word(tr->tx + x1, ((tr->ty + y1) & 1023u) + base); if (t < 0) return -1; px[3] = real3d_texel_argb(tr->fmt, (unsigned)t);
 
     /* Where the four are not all opaque, each takes its colour from the
      * most opaque of them, so a cut-out's clear texels do not bleed dark
@@ -1547,9 +1573,71 @@ static void pool_start(void)
     }
 }
 
+/* M3_TEX_STATS=1: every 100 fields, how many distinct textures (origin,
+ * size, page, format) the last field's polygons used, their area, and how
+ * much of the sheet has ever been written -- what a texture cache on a
+ * host without room for the sheet has to hold. */
+static int g_texstats = -1;
+enum { TS_SLOTS = 4096 };
+static struct { uint32_t key, area; } g_ts[TS_SLOTS];
+static unsigned g_ts_n, g_ts_fmts[12];
+static uint64_t g_ts_area;
+static void tex_stats_note(void)
+{
+    unsigned i;
+    for (i = 0; i < g_ntris; i++) {
+        const tri_t *t = &g_tris[i];
+        uint32_t key, h;
+        if (!t->textured) continue;
+        key = ((uint32_t)(t->tx >> 5) | ((uint32_t)(t->ty >> 5) << 6)
+               | ((uint32_t)t->page << 11) | ((uint32_t)t->fmt << 12))
+            ^ ((uint32_t)t->tw << 16) ^ ((uint32_t)t->th << 22);
+        for (h = (key * 2654435761u) >> 20;; h = (h + 1) & (TS_SLOTS - 1)) {
+            if (!g_ts[h].area) {
+                if (g_ts_n >= TS_SLOTS / 2) break;
+                g_ts[h].key = key;
+                g_ts[h].area = (uint32_t)t->tw * t->th;
+                g_ts_n++;
+                g_ts_area += g_ts[h].area;
+                g_ts_fmts[t->fmt < 12 ? t->fmt : 11]++;
+                break;
+            }
+            if (g_ts[h].key == key) break;
+        }
+    }
+}
+static void tex_stats_field(void)
+{
+    if (model3recomp_frame_count() % 100 == 0) {
+        size_t k, set = 0;
+        if (g_sheet_set)
+            for (k = 0; k < ((size_t)TEX_W * TEX_H) >> (2 * g_sheet_shift); k++)
+                set += g_sheet_set[k];
+        fprintf(stderr, "[texstats] field %llu: %u textures, %llu Ktexels; "
+                "sheet %zu Ktexels written; fmt", 
+                (unsigned long long)model3recomp_frame_count(), g_ts_n,
+                (unsigned long long)(g_ts_area >> 10), set >> 10);
+        for (k = 0; k < 12; k++) fprintf(stderr, " %u", g_ts_fmts[k]);
+        fprintf(stderr, "; uploads FIFO %llu (%llu Ktexels) VROM %llu (%llu Ktexels)",
+                (unsigned long long)g_up_count[0],
+                (unsigned long long)(g_up_texels[0] >> 10),
+                (unsigned long long)g_up_count[1],
+                (unsigned long long)(g_up_texels[1] >> 10));
+        fprintf(stderr, "\n");
+    }
+    memset(g_ts, 0, sizeof g_ts);
+    memset(g_ts_fmts, 0, sizeof g_ts_fmts);
+    g_ts_n = 0;
+    g_ts_area = 0;
+}
+
 /* ---- the hardware path (real3d_set_sink) ------------------------------- */
-static const m3_r3d_sink *g_sink;
 void real3d_set_sink(const m3_r3d_sink *sink) { g_sink = sink; }
+void real3d_set_sheet(uint16_t *texels, unsigned shift)
+{
+    g_sheet = texels;
+    g_sheet_shift = shift;
+}
 
 /* The same culling, near-plane cut, projection and flat shade as raster(),
  * handed to the sink polygon by polygon instead of rasterised. */
@@ -1560,6 +1648,7 @@ static void sink_submit(const float L[3], float intensity)
         const tri_t *tr = &g_tris[t % g_ntris];
         float clipped[4][5], src[3][5], lit, sh;
         m3_r3d_vertex out[4];
+        m3_r3d_texture tex;
         int nclip, k, r, g, b;
         if ((tr->alpha < 255) != (t >= g_ntris)) continue;
         {
@@ -1594,10 +1683,20 @@ static void sink_submit(const float L[3], float intensity)
         if (g > 255) g = 255;
         if (b > 255) b = 255;
         g_drawn++;
+        if (tr->textured && g_textures) {
+            tex.x = tr->tx; tex.y = tr->ty; tex.page = tr->page;
+            tex.w = tr->tw ? tr->tw : 32u; tex.h = tr->th ? tr->th : 32u;
+            tex.fmt = tr->fmt;
+            tex.mirror_u = (tr->mirror & 2u) != 0;
+            tex.mirror_v = (tr->mirror & 1u) != 0;
+            tex.alpha_test = tr->alpha_test;
+            tex.tex_alpha = tr->tex_alpha;
+        }
         g_sink->polygon(out, nclip,
                         ((uint32_t)tr->alpha << 24) | ((uint32_t)r << 16) |
                         ((uint32_t)g << 8) | (uint32_t)b,
-                        tr->alpha < 255);
+                        tr->alpha < 255,
+                        tr->textured && g_textures ? &tex : NULL);
     }
 }
 
@@ -1663,8 +1762,13 @@ void real3d_render(void)
          * holds) and no texture sheet: 12 MB a Dreamcast does not have. */
         g_max_tris = fb ? MAX_TRIS : SINK_MAX_TRIS;
         g_tris = (tri_t *)malloc(sizeof(tri_t) * g_max_tris);
-        if (fb && !g_sheet) g_sheet = (uint16_t *)calloc(TEX_W * TEX_H, sizeof(uint16_t));
-        if (fb && !g_sheet_set) g_sheet_set = (uint8_t *)calloc(TEX_W * TEX_H, 1);
+        if (fb && !g_sheet) {
+            const char *sh = getenv("M3_SHEET_SHIFT");
+            g_sheet_shift = sh ? (unsigned)atoi(sh) & 3u : 0u;
+            g_sheet = (uint16_t *)calloc((TEX_W * TEX_H) >> (2 * g_sheet_shift),
+                                         sizeof(uint16_t));
+            g_sheet_set = (uint8_t *)calloc((TEX_W * TEX_H) >> (2 * g_sheet_shift), 1);
+        }
         inited = 1;
     }
     if (!g_tris) return;
@@ -1700,11 +1804,12 @@ void real3d_render(void)
         if (!done && g_sheet && model3recomp_frame_count() >= at) {
             FILE *fp = fopen(getenv("M3_TEX_DUMP"), "wb");
             done = 1;
-            if (fp) { fwrite(g_sheet, 2, (size_t)TEX_W * TEX_H, fp);
+            if (fp) { fwrite(g_sheet, 2, ((size_t)TEX_W * TEX_H) >> (2 * g_sheet_shift), fp);
                       fclose(fp); }
         }
     }
     g_drawn = 0;
+    if (g_texstats < 0) g_texstats = getenv("M3_TEX_STATS") != NULL;
     { static int probed; if (!probed) { probed = 1;
         { const char *e = getenv("M3_NODE_DUMP");
           m3_node_dump = e ? (int)strtol(e, NULL, 0) : 0;
@@ -1870,6 +1975,7 @@ void real3d_render(void)
                   if (e) { int px = atoi(e), py = 0; const char *c = strchr(e, ',');
                            if (c) py = atoi(c + 1);
                            g_pick = (long)py * fw + px; } }
+                if (g_texstats) tex_stats_note();
                 if (fb) raster_bands(fb, fw, fh, sx, sy, light, intensity);
                 else    sink_submit(light, intensity);
                 if (g_pick_tri >= 0) {
@@ -1954,6 +2060,7 @@ void real3d_render(void)
     }
     /* And a fingerprint of what came out, so a scene that changes while the
      * picture does not shows up as exactly that. */
+    if (g_texstats > 0) tex_stats_field();
     if (!fb) g_sink->end_frame();
     if (fb && getenv("M3_REAL3D_STATS")) {
         uint32_t h = 2166136261u;
@@ -1985,6 +2092,7 @@ void real3d_render(void)
  * state too: restoring RAM without it leaves every surface wrong. */
 void real3d_state(m3_state_t *st)
 {
+    if (g_sheet_shift) return;     /* a reduced sheet is not saved */
     if (!g_sheet) g_sheet = (uint16_t *)calloc(TEX_W * TEX_H, sizeof(uint16_t));
     if (!g_sheet_set) g_sheet_set = (uint8_t *)calloc(TEX_W * TEX_H, 1);
     if (!g_sheet || !g_sheet_set) return;

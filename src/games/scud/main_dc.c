@@ -113,8 +113,11 @@ static void on_field(void)
     scud_operator_settings();
     if (f % 100 == 0) {
         report("progress");
-        printf("[pvr] last frame: %u opaque, %u translucent polygons\n",
-               pvr_r3d_last_opaque(), pvr_r3d_last_translucent());
+        printf("[pvr] last frame: %u opaque, %u punch-through, %u translucent"
+               " polygons; textures %u made, %u refused, %u KB\n",
+               pvr_r3d_last_opaque(), pvr_r3d_last_punch(),
+               pvr_r3d_last_translucent(), pvr_r3d_textures_made(),
+               pvr_r3d_textures_failed(), pvr_r3d_texture_kb());
     }
     if (f == SCUD_DC_SHOT_AT)
         printf("SCUD SHOT field %llu\n", (unsigned long long)f);

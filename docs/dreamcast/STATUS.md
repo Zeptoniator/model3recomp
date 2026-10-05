@@ -1,5 +1,25 @@
 # Status
 
+## 2026-10-05 (evening) — DC-06 textures
+
+- **Textured 3D on the Dreamcast.** Village course with sky, stone
+  houses, tiled roofs, road, grass (Flycast capture at field 1300).
+- Measured first (desktop, `M3_TEX_STATS=1`): all 108 texture uploads of a
+  6000-field attract come through the FIFO, none through the VROM port;
+  6.9 M texels uploaded, 3 M of the sheet written by field 800 (6 MB).
+  The payloads are not in any ROM (decompressed by the game), so they
+  cannot be re-read later. A field uses ≤ 73 textures, ≤ 718 K texels.
+- So the sheet is kept in PVR memory at half size (2 MB, point sampled:
+  exact for every texel format); textures are converted on first use
+  per (rectangle, format) into ARGB1555/4444, LRU in a 2.5 MB budget;
+  any upload empties the cache. Three lists: opaque, punch-through
+  (texel alpha), translucent. `M3_SHEET_SHIFT=1` shows the half-size
+  sheet on the desktop.
+- Field 1400: 78 textures, 398 KB, none refused; heap 10.6 MB (VROM cache
+  cut to 32 pages, kept lists to 1024/512 — the first try ran out of
+  memory at 11.2 MB of heap). VROM misses unchanged (53).
+- Next: the tilemap layers on the PVR (no 2D at all yet on the console).
+
 ## 2026-10-05 (late morning) — DC-05
 
 - **First Real3D polygons on the PowerVR2.** The attract race's village

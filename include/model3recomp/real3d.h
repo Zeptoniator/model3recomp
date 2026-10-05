@@ -36,12 +36,36 @@ unsigned real3d_last_tri_count(void);
  * nearer, as the PVR wants it); colour is the flat-shaded ARGB the software
  * path would use. Opaque polygons come first, then translucent ones. */
 typedef struct { float x, y, w, u, v; } m3_r3d_vertex;
+/* A polygon's texture: a rectangle of the texture sheet in full-size
+ * texels (x, y within page 0 or 1, w and h powers of two), the texel
+ * format (real3d_texel_argb), mirroring per axis, and whether texel alpha
+ * cuts it out. u and v of the vertices are in full-size texels, from the
+ * rectangle's origin, unwrapped. */
+typedef struct {
+    unsigned x, y, page, w, h, fmt;
+    int mirror_u, mirror_v;
+    int alpha_test, tex_alpha;
+} m3_r3d_texture;
 typedef struct {
     void (*begin_frame)(void);
-    void (*polygon)(const m3_r3d_vertex *v, int n, uint32_t argb, int translucent);
+    /* tex is NULL for an untextured polygon. */
+    void (*polygon)(const m3_r3d_vertex *v, int n, uint32_t argb,
+                    int translucent, const m3_r3d_texture *tex);
     void (*end_frame)(void);
+    /* An upload has written the sheet: anything made from it is stale. */
+    void (*sheet_changed)(void);
 } m3_r3d_sink;
 void real3d_set_sink(const m3_r3d_sink *sink);
+
+/* Where uploads go when there is no software framebuffer (and so no sheet
+ * of real3d.c's own): a 2048x2048 grid of 16-bit texels, two pages of
+ * 1024 rows stacked, stored at 1/(1 << shift) size each way (point
+ * sampled: a texel is kept as it is, whatever its format). The Dreamcast
+ * keeps it in PVR memory at shift 1, 2 MB. Row stride is 2048 >> shift. */
+void real3d_set_sheet(uint16_t *texels, unsigned shift);
+
+/* A raw 16-bit texel as 0xAARRGGBB in one of the twelve formats. */
+uint32_t real3d_texel_argb(unsigned fmt, unsigned v);
 
 #ifdef __cplusplus
 }
