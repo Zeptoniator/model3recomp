@@ -685,6 +685,10 @@ class Function:
         self.insns = []
         self.labels = set()
         self.truncated = False
+        # Addresses inside this function that it loads into LR as an
+        # immediate before jumping away -- a hand-made call whose return
+        # comes back here (see emit_function).
+        self.lr_targets = set()
 
 
 # Real PowerPC functions are not this big. The cap exists so that an entry
@@ -724,54 +728,84 @@ def build(image, base, entry, hard, cap=MAX_FUNC_INSNS):
     seen = set()
     work = [entry]
     body = {}
-    while work:
-        pc = work.pop()
-        while True:
-            if pc in seen:
-                fn.labels.add(pc)
-                break
-            off = pc - base
-            if off < 0 or off + 4 > size or len(body) >= cap:
-                fn.truncated = True
-                break
-            seen.add(pc)
-            raw = struct.unpack_from(">I", image, off)[0]
-            i = D.decode(raw, pc)
-            body[pc] = i
-
-            # An undecodable word is data, not a missing opcode. Stop: walking
-            # on would lift a lookup table as if it were instructions.
-            if i.mn is None:
-                fn.truncated = True
-                break
-
-            if D.is_call(i):
-                pc += 4
-                continue
-            if i.mn in ("bclr", "bcctr", "rfi"):
-                if D.is_uncond(i):
+    while True:
+        while work:
+            pc = work.pop()
+            while True:
+                if pc in seen:
+                    fn.labels.add(pc)
                     break
+                off = pc - base
+                if off < 0 or off + 4 > size or len(body) >= cap:
+                    fn.truncated = True
+                    break
+                seen.add(pc)
+                raw = struct.unpack_from(">I", image, off)[0]
+                i = D.decode(raw, pc)
+                body[pc] = i
+
+                # An undecodable word is data, not a missing opcode. Stop: walking
+                # on would lift a lookup table as if it were instructions.
+                if i.mn is None:
+                    fn.truncated = True
+                    break
+
+                if D.is_call(i):
+                    pc += 4
+                    continue
+                if i.mn in ("bclr", "bcctr", "rfi"):
+                    if D.is_uncond(i):
+                        break
+                    pc += 4
+                    continue
+                if i.mn in ("b", "bc"):
+                    t = i.target
+                    # A branch to another function's start leaves this function,
+                    # conditionally or not. Following it merges the two and is
+                    # what turned a 2 MB ROM into 2.2 M lifted instructions.
+                    external = t is not None and t != entry and t in hard
+                    inside = t is not None and base <= t < base + size
+                    # A target outside the image cannot become a label: the walk
+                    # would refuse to emit code there and the C would not compile.
+                    # It is reached through the func table instead.
+                    if inside and not external:
+                        fn.labels.add(t)
+                        work.append(t)
+                    if D.is_uncond(i):
+                        break
+                    pc += 4
+                    continue
                 pc += 4
-                continue
-            if i.mn in ("b", "bc"):
-                t = i.target
-                # A branch to another function's start leaves this function,
-                # conditionally or not. Following it merges the two and is
-                # what turned a 2 MB ROM into 2.2 M lifted instructions.
-                external = t is not None and t != entry and t in hard
-                inside = t is not None and base <= t < base + size
-                # A target outside the image cannot become a label: the walk
-                # would refuse to emit code there and the C would not compile.
-                # It is reached through the func table instead.
-                if inside and not external:
+        # lis/addi ; mtlr -- an address in this function made the return
+        # address of a jump. Scud Race's 0x21800 does that and branches into
+        # shared code whose blr comes back to 0x21838. Nothing else leads
+        # there, so the walk has to go there itself; each such target is
+        # also a label, so that return can be a goto rather than an unwind
+        # out of the function.
+        val, more = {}, []
+        for addr, i in sorted(body.items()):
+            if i.mn == "addis" and i.ra == 0:
+                val[i.rd] = (i.uimm << 16) & 0xFFFFFFFF
+            elif i.mn in ("addi", "ori") and i.ra in val:
+                v = val[i.ra] + (i.simm if i.mn == "addi" else i.uimm)
+                val[i.rd] = v & 0xFFFFFFFF
+            elif i.mn == "mtspr" and i.spr == 8 and i.rd in val:
+                t = val[i.rd]
+                inside = base <= t < base + size and not (t & 3)
+                if inside and t not in hard and t != entry:
                     fn.labels.add(t)
-                    work.append(t)
-                if D.is_uncond(i):
-                    break
-                pc += 4
-                continue
-            pc += 4
+                    fn.lr_targets.add(t)
+                    if t not in body:
+                        more.append(t)
+            elif i.mn is not None and i.rd in val and i.mn not in (
+                    "stw", "stb", "sth", "stwu", "stbu", "sthu", "cmp", "cmpi",
+                    "cmpl", "cmpli", "b", "bc", "bclr", "bcctr", "mtspr"):
+                del val[i.rd]
+        if not more:
+            break
+        work = more
     fn.insns = sorted(body.items())
+
     return fn
 
 
@@ -822,13 +856,15 @@ def scan_reachable(image, base, seeds):
 
 
 def discover(image, base, seeds, scan_pointers=False, scan_consts=True,
-             scan_tables=True, scan_prologues=True):
+             scan_tables=True, scan_prologues=True, soft=frozenset()):
     """Find function entries, and which of them are real function starts."""
     size = len(image)
     lo, hi_ = base, base + size
 
-    calls, seen = scan_reachable(image, base, seeds)
-    entries = set(seeds) | calls
+    # `soft` are entries an earlier pass found: walked from, but not
+    # function boundaries, unless something else makes them one.
+    calls, seen = scan_reachable(image, base, set(seeds) | set(soft))
+    entries = set(seeds) | set(soft) | calls
     hard = set(seeds) | calls          # a bl names a function; so does a seed
 
     # Reachability alone under-approximates badly: most of a Model 3 game is
@@ -938,6 +974,17 @@ def discover(image, base, seeds, scan_pointers=False, scan_consts=True,
             if not code_at(addr):
                 continue
             pro.add(start)
+        # A leaf that only needs stack for floats opens with addi r1,r1,-N
+        # and no mflr (Scud Race's 0x37528: addi r1,r1,-32 ; stfs f12,0(r1)).
+        # Taken only right after the end of a function -- blr or b -- and
+        # only if it reads as code.
+        for addr, raw in words.items():
+            if (raw >> 16) != 0x3821 or not (raw & 0x8000):
+                continue
+            prev = words.get(addr - 4, 0)
+            if prev == 0x4E800020 or (prev & 0xFC000003) == 0x48000000:
+                if code_at(addr):
+                    pro.add(addr)
         # Part of Scud Race's code (around 0xB000..0xF000, a different
         # compiler) puts a descriptor word 0x0007C0xx in front of every
         # function -- 57 of them, each followed by mflr or a stw -- and
@@ -1115,6 +1162,13 @@ def emit_function(em, fn, prefix, entries):
     # Race's 0x19EC builds LR as 0x1A24 + 12*r8 and `blr`s into a table of
     # three-instruction store stubs; read as a return, the stub never ran
     # and its store was lost without a word.
+    # A jump out of a function that set LR to one of its own addresses is a
+    # call in disguise: its return comes back here. Claim it on the way out.
+    tail_ret = "return;"
+    if fn.lr_targets:
+        tail_ret = "{ %s return; }" % " ".join(
+            "if (m3_ret_to == 0x%08Xu) { m3_ret_to = 0; goto L_%08X; }" % (t, t)
+            for t in sorted(fn.lr_targets))
     prov = {}
     lr_from_imm = False
     srr0_from_imm = False
@@ -1210,9 +1264,9 @@ def emit_function(em, fn, prefix, entries):
                 c = ("{ M3_LOOPED(0x%08Xu); goto L_%08X; }" % (addr, t) if t <= addr
                      else "goto L_%08X;" % t)
             elif t in entries:
-                c = "%s(); return; /* tail call */" % fname(prefix, t)
+                c = "%s(); %s /* tail call */" % (fname(prefix, t), tail_ret)
             else:
-                c = "CALL(0x%08Xu); return; /* tail call, unresolved */" % t
+                c = "CALL(0x%08Xu); %s /* tail call, unresolved */" % (t, tail_ret)
         elif i.mn == "b" and i.lk:
             t = i.target
             c = ("PPC_LR = %s; %s(); M3_RETURNED(%s);" % (ret, fname(prefix, t), ret)
@@ -1227,9 +1281,9 @@ def emit_function(em, fn, prefix, entries):
                 act = ("{ M3_LOOPED(0x%08Xu); goto L_%08X; }" % (addr, t) if t <= addr
                        else "goto L_%08X;" % t)
             elif t in entries:
-                act = "{ %s(); return; }" % fname(prefix, t)
+                act = "{ %s(); %s }" % (fname(prefix, t), tail_ret)
             else:
-                act = "{ CALL(0x%08Xu); return; }" % t
+                act = "{ CALL(0x%08Xu); %s }" % (t, tail_ret)
             c = act if cond is None else "if (%s) %s" % (cond, act)
         elif i.mn == "bclr":
             cond = branch_cond(i)
@@ -1244,6 +1298,10 @@ def emit_function(em, fn, prefix, entries):
                 # always -- the caller. M3_RETURN publishes the target and
                 # the call sites above check it; see M3_RETURNED in lift.h.
                 act = "M3_RETURN();"
+                if fn.lr_targets:
+                    act = "{ %s M3_RETURN(); }" % " ".join(
+                        "if (PPC_LR == 0x%08Xu) goto L_%08X;" % (t, t)
+                        for t in sorted(fn.lr_targets))
             c = act if cond is None else "if (%s) %s" % (cond, act)
         elif i.mn == "bcctr":
             cond = branch_cond(i)
@@ -1310,9 +1368,19 @@ def main():
             if lo <= vbase + v < hi:
                 seeds.add(vbase + v)
 
-    entries, hard = discover(image, base, seeds, a.scan_pointers,
-                             not a.no_scan_consts, not a.no_scan_tables,
-                             not a.no_scan_prologues)
+    # To a fixed point. Code the table, constant and prologue scans find is
+    # only walked for *their* call targets on the next pass: Scud Race's
+    # 0x5D00 is found by a scan and bl's 0x5D80, a leaf nothing else names,
+    # which one pass leaves as a runtime miss.
+    soft = set()
+    while True:
+        entries, hard = discover(image, base, seeds, a.scan_pointers,
+                                 not a.no_scan_consts, not a.no_scan_tables,
+                                 not a.no_scan_prologues, soft)
+        grown = {e for e in entries if lo <= e < hi} - seeds - soft
+        if not grown:
+            break
+        soft |= grown
     entries = {e for e in entries if lo <= e < hi}
     hard = {e for e in hard if lo <= e < hi}
 

@@ -224,9 +224,19 @@ void m3_loop_tick(void);
  * zero target -- an rfi, or a function that ran off its end -- means
  * "nothing to check". One compare per call. */
 #define M3_RETURN()   do { m3_ret_to = PPC_LR; return; } while (0)
+#ifdef M3_LOOP_GUARD
+/* M3_UNWIND_TRACE=N: report the first N frames a return goes past. */
+void m3_unwind_note(uint32_t expected);
+#define M3_UNWIND_NOTE(r) m3_unwind_note((uint32_t)(r))
+#else
+#define M3_UNWIND_NOTE(r) ((void)0)
+#endif
 #define M3_RETURNED(r)                                                     \
     do {                                                                   \
-        if (m3_ret_to != (uint32_t)(r) && m3_ret_to) return;               \
+        if (m3_ret_to != (uint32_t)(r) && m3_ret_to) {                     \
+            M3_UNWIND_NOTE(r);                                             \
+            return;                                                        \
+        }                                                                  \
         m3_ret_to = 0;                                                     \
     } while (0)
 

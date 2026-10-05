@@ -108,6 +108,27 @@ static long trace_budget(void)
 /* Where the last guest return was going; see M3_RETURNED in lift.h. */
 uint32_t m3_ret_to;
 
+#ifdef M3_LOOP_GUARD
+void m3_unwind_note(uint32_t expected)
+{
+    extern uint32_t m3_fn_now;
+    static long left = -1;
+    static uint32_t only;
+    if (left < 0) {
+        const char *e = getenv("M3_UNWIND_TRACE");
+        const char *o = getenv("M3_UNWIND_ONLY");    /* one target only */
+        left = e ? strtol(e, NULL, 0) : 0;
+        only = o ? (uint32_t)strtoul(o, NULL, 0) : 0;
+    }
+    if (left > 0 && (!only || m3_ret_to == only)) {
+        left--;
+        fprintf(stderr, "[unwind] frame waiting for %08X passed by a return "
+                        "to %08X (last function entered %08X)\n",
+                expected, m3_ret_to, m3_fn_now);
+    }
+}
+#endif
+
 int func_table_call(uint32_t addr)
 {
     enum { MISS_MAX = 64 };
