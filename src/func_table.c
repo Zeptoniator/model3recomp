@@ -135,6 +135,17 @@ int func_table_call(uint32_t addr)
     for (k = 0; k < nmiss; k++)
         if (miss[k] == addr) return 0;
     if (nmiss < MISS_MAX) miss[nmiss++] = addr;
+#ifdef M3_LOOP_GUARD
+    {
+        /* Who asked: an address alone does not say whether it is a missing
+         * entry or a pointer the guest never meant to call. */
+        extern uint32_t m3_fn_now;
+        fprintf(stderr, "[model3recomp] no function lifted at %08X "
+                        "(called from guest function %08X, LR %08X)\n",
+                addr, m3_fn_now, m3_ctx.lr);
+    }
+#else
     fprintf(stderr, "[model3recomp] no function lifted at %08X\n", addr);
+#endif
     return 0;
 }

@@ -1032,14 +1032,27 @@ def emit_function(em, fn, prefix, entries):
     # port silently does nothing. The two cases are told apart by where LR's
     # value came from: restored from the stack means a real return, built from
     # an immediate means a jump.
+    #
+    # `rfi` has the same two readings. Inside an interrupt handler it returns
+    # to the interrupted code, which the C call stack already does. But Scud
+    # Race's reset vector hands over to the game with
+    #
+    #     li   r3, 0x3002 ; mtspr SRR1, r3
+    #     lis  r3, 0 ; addi r3, r3, 0x1540 ; mtspr SRR0, r3
+    #     rfi              ; jump to the game at RAM 0x00001540
+    #
+    # and as `return;` that is the same silent no-op. Same rule: SRR0 built
+    # from an immediate means a jump.
     imm_regs = set()
     lr_from_imm = False
+    srr0_from_imm = False
 
     for addr, i in fn.insns:
         if addr in fn.labels:
             out.append("L_%08X: ;" % addr)
             imm_regs.clear()          # unknown path in: assume nothing
             lr_from_imm = False
+            srr0_from_imm = False
         ret = "0x%08Xu" % (addr + 4)
 
         # Track which GPRs currently hold an immediate-derived value.
@@ -1051,9 +1064,12 @@ def emit_function(em, fn, prefix, entries):
             pass                       # still immediate-derived
         elif i.mn == "mtspr" and i.spr == 8:
             lr_from_imm = i.rd in imm_regs
+        elif i.mn == "mtspr" and i.spr == 26:
+            srr0_from_imm = i.rd in imm_regs
         elif D.is_call(i):
             imm_regs.clear()           # a call clobbers LR and the volatiles
             lr_from_imm = False
+            srr0_from_imm = False
         elif i.mn is not None and i.mn not in ("stw", "stb", "sth", "stwu",
                                                "cmp", "cmpi", "cmpl", "cmpli",
                                                "sync", "isync", "eieio"):
@@ -1108,7 +1124,11 @@ def emit_function(em, fn, prefix, entries):
                    if i.lk else "{ CALL(PPC_CTR); return; }")
             c = act if cond is None else "if (%s) %s" % (cond, act)
         elif i.mn == "rfi":
-            c = "return; /* rfi */"
+            if srr0_from_imm:
+                c = ("{ PPC_MSR = m3_ctx.spr[27]; CALL(m3_ctx.spr[26]); return; }"
+                     " /* computed jump via SRR0 */")
+            else:
+                c = "return; /* rfi */"
         else:
             c = em.emit(i)
 

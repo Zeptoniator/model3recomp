@@ -59,6 +59,9 @@ typedef struct m3_roms {
 } m3_roms_t;
 
 void     bus_init(const m3_roms_t *roms);
+
+/* The 16 MB page the 53C810 answers in (see m3_config_t.scsi_base). */
+void     bus_set_scsi_base(uint32_t base);
 void     bus_shutdown(void);
 
 uint8_t  bus_read8 (uint32_t addr);

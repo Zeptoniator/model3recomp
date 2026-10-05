@@ -40,6 +40,11 @@ typedef struct m3_config {
     const char *nvram_path;      /* battery RAM, loaded at boot, saved on quit */
     const char *state_prefix;    /* save states go to <prefix>.<slot>.m3s   */
     uint32_t    safepoint_pc;    /* see savestate.h; 0 means no save states */
+
+    /* Where the board puts the 53C810. It is a PCI device and the ROM board
+     * decides its window: 0xC1000000 on The Lost World, 0xF9000000 on Scud
+     * Race (MAME's init_scud and init_lostwsga). 0 means 0xC1000000. */
+    uint32_t    scsi_base;
 } m3_config_t;
 
 int  model3recomp_init(const m3_config_t *cfg);

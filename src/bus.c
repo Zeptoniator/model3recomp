@@ -25,6 +25,7 @@
 #include <string.h>
 
 static uint8_t  *g_ram;
+static uint32_t  g_scsi_base = M3_SCSI_BASE;
 uint8_t *m3_ram_base;           /* mirrors g_ram, for lift.h's fast path */
 static m3_roms_t g_roms;
 static uint8_t  *g_backup;          /* 128 KB battery-backed SRAM */
@@ -253,6 +254,11 @@ uint8_t *bus_backup(size_t *size)
 }
 
 uint8_t *bus_ram(void) { return g_ram; }
+
+void bus_set_scsi_base(uint32_t base)
+{
+    g_scsi_base = base ? (base & 0xFF000000u) : M3_SCSI_BASE;
+}
 
 uint8_t *bus_texfifo(size_t *used, size_t *capacity)
 {
@@ -956,7 +962,7 @@ static uint32_t dev_read(uint32_t a, unsigned size)
      * lifted code keeps its temporaries in C locals the guest cannot reach.
      * irq_tick() is re-entrancy guarded. */
     irq_tick();
-    if ((a & 0xFF000000u) == M3_SCSI_BASE) {
+    if ((a & 0xFF000000u) == g_scsi_base) {
         uint32_t sv = scsi_read(a, size);
         io_log('R', a, size, sv);
         return sv;
@@ -1033,7 +1039,7 @@ static void dev_write(uint32_t a, uint32_t v, unsigned size)
      *
      * The game says where the chip is: it writes DSP at 0xC100002C, and it
      * touches 0x0C, 0x14, 0x2C, 0x38 and 0x39 there and nowhere else. */
-    if ((a & 0xFF000000u) == M3_SCSI_BASE) { scsi_write(a, v, size); return; }
+    if ((a & 0xFF000000u) == g_scsi_base) { scsi_write(a, v, size); return; }
     if (size == 4) { dev_write_word(w, v); return; }
     /* Read-modify-write without side effects: a byte store must not be able
      * to advance a field by accidentally reading the status register. */

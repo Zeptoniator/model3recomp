@@ -32,6 +32,7 @@ int model3recomp_init(const m3_config_t *cfg)
     { void m3_watch_init(void); m3_watch_init(); }
 #endif
     bus_init(&g_cfg.roms);
+    bus_set_scsi_base(g_cfg.scsi_base);
     func_table_init();
     irq_init();
     ppc_reset();

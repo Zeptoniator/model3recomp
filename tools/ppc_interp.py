@@ -78,6 +78,10 @@ class Machine:
         self.irq_taken = 0
         self.in_handler = False
         self.scsi = bytearray(0x40)   # 53C810 register file
+        # Where the board puts the 53C810 (--scsi-base). The historical
+        # default is the 32 MB at 0xC0000000, as The Lost World was brought
+        # up with; Scud Race has it at 0xF9000000.
+        self.scsi_base, self.scsi_mask = 0xC0000000, 0xFE000000
         self.scsi_log = []
         self.scsi_trace = False
         self.scsi_int = False
@@ -250,7 +254,7 @@ class Machine:
         0x20000000, so the interrupt-enable mask ends up with entirely
         different bits set from the ones the hardware would have.
         """
-        if (a & 0xFE000000) == 0xC0000000:
+        if (a & self.scsi_mask) == self.scsi_base:
             v = self.scsi_read(a, n)
             self.io_log("R", a, n, v)
             return v
@@ -266,7 +270,7 @@ class Machine:
 
     def dev_write(self, a, n, v):
         self.io_log("W", a, n, v)
-        if (a & 0xFE000000) == 0xC0000000:
+        if (a & self.scsi_mask) == self.scsi_base:
             self.scsi_write(a, n, v)
             return
         self.hw_writes[a & 0xFFFFFFFC] += 1
@@ -836,6 +840,14 @@ def step(m, i, mn, rd, ra, rb):
     elif mn == "stwbrx":
         a = ((r[ra] if ra else 0) + r[rb]) & M
         m.write(a, 4, int.from_bytes(r[rd].to_bytes(4, "big"), "little"))
+    elif mn == "lhbrx":
+        a = ((r[ra] if ra else 0) + r[rb]) & M
+        v = m.read(a, 2)
+        r[rd] = ((v & 0xFF) << 8) | (v >> 8)
+    elif mn == "sthbrx":
+        a = ((r[ra] if ra else 0) + r[rb]) & M
+        v = r[rd] & 0xFFFF
+        m.write(a, 2, ((v & 0xFF) << 8) | (v >> 8))
     elif mn == "lwarx":
         r[rd] = m.read(((r[ra] if ra else 0) + r[rb]) & M, 4)
     elif mn == "stwcx.":
@@ -992,6 +1004,8 @@ def main():
     ap.add_argument("image")
     ap.add_argument("--base", default="0xFFE00000")
     ap.add_argument("--crom-bank")
+    ap.add_argument("--scsi-base", type=lambda s: int(s, 0), default=None,
+                    help="16 MB page of the 53C810 (Scud Race: 0xF9000000)")
     ap.add_argument("--entry", default="0xFFF00100")
     ap.add_argument("--max", type=lambda s: int(s, 0), default=200000000)
     ap.add_argument("--snapshot")
@@ -1018,6 +1032,8 @@ def main():
     crom = open(a.image, "rb").read()
     bank = open(a.crom_bank, "rb").read() if a.crom_bank else None
     m = Machine(crom, int(a.base, 0), bank)
+    if a.scsi_base is not None:
+        m.scsi_base, m.scsi_mask = a.scsi_base & 0xFF000000, 0xFF000000
     m.watch = {int(x, 0) for x in a.watch}
     m.hist_max = a.history
     m.brk = {int(x, 0): [0, 0, 0] for x in a.break_at}
