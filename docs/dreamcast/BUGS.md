@@ -116,3 +116,35 @@
 - Related: `flush_texture_fifo()` re-parses the FIFO from offset 0 whenever
   it grows and `bus_texfifo_reset()` has no caller, so every texture ever
   sent is re-uploaded and the 4 MB cap eventually drops data silently.
+
+## DC-BUG-010 — the video board's JTAG chain was not modelled (fixed)
+
+- **Symptom**: Scud draws "ERROR : (1A) VIDEO BOARD ABNORMAL STATUS, LR
+  0000F944" on its settings screen and stops.
+- **Root cause**: system registers 0x0C (TCK/TMS/TDI/TRST) and 0x10 (TDO)
+  were ignored; the game shifts every ASIC's IDCODE out of the chain and
+  compares it with the Step 1.5 values.
+- **Fix**: `src/jtag.c`, an IEEE 1149.1 TAP and the board's chain (order,
+  IR lengths and IDCODEs as Supermodel documents them; code written here).
+
+## DC-BUG-011 — 53C810 single-step mode ignored (fixed)
+
+- **Symptom**: the main program waits in `0xAE9C` for ever after the first
+  DMA (field 430); the flag at `0x1005B0` is set and never cleared.
+- **Root cause**: Scud sets DCNTL to STD|SSM. The engine ran the whole
+  program and raised SIR; Scud's handler looks for SSI and for DSP one
+  instruction along, then for the INT there.
+- **Fix**: single-step stops after each instruction with SSI raised and DSP
+  updated; DSP is also left past an INT, as on the chip.
+
+## DC-BUG-012 — returns the lifter did not see coming (fixed)
+
+- **Symptoms**: "guest returned to 00021838 / 0002F718 / 00013CFC, which no
+  host frame was waiting for", and misses at `0x5D80`, `0x789C`, `0x37528`.
+- **Root causes**: (1) code found by a scan was never walked for its own
+  `bl` targets; (2) functions that load one of their own addresses into LR
+  and branch away — conditionally or not — are making a call by hand, and
+  the lifter treated the branch as a tail call; (3) float leaves open with
+  `addi r1,r1,-N`, no `mflr`.
+- **Fix**: discovery to a fixed point with soft entries; hand-made return
+  addresses become labels claimed after the branch; one more prologue form.

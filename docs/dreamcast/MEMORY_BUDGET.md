@@ -49,6 +49,30 @@ Lifted Scud Race code compiled with `sh-elf-gcc -O2` (`KOS_CFLAGS`), see
 CODE_SIZE.md: **2.89 MB** as lifted today, of which 1.41 MB is the ROM half,
 which at runtime enters exactly one function (`0xFFF00100`).
 
+## Measured on Scud Race's attract mode (desktop, field 4300)
+
+`M3_DUMP_SCENE` at field 4300 (attract: INSERT COIN(S), the 3D scene
+submitted every field), then for each region the 4 KB pages holding any
+non-zero byte and the highest non-zero offset:
+
+| Region | Modelled | Pages touched | Highest non-zero |
+|---|---:|---:|---:|
+| Guest work RAM | 8 192 KB | 1 372 KB | `0x1EFFBF` (≈ 2 MB; the stack top is `0x1F0000`) |
+| Culling RAM low | 4 096 KB | 940 KB | `0x1B82F7` |
+| Culling RAM high | 1 024 KB | 44 KB | `0x162BB` |
+| Polygon RAM | 4 096 KB | 492 KB | `0x7A4B3` |
+| Tilegen VRAM + palette | 1 152 KB | 676 KB | `0x11A47D` |
+| Real3D FIFO | 4 096 KB | 4 096 KB | full: it is never reset (DC-BUG-008), so this measures the bug, not the game |
+
+So the regions the desktop allocates at 22 MB hold about 3.5 MB during
+attract. Two consequences, both to confirm over a race before relying on
+them:
+
+- Guest RAM above 2 MB is untouched; a 2 MB window with a bus fault (or a
+  page allocated on demand) above it would save 6 MB.
+- Culling and polygon RAM allocated by page on first write would cost
+  ~1.5 MB instead of 9 MB.
+
 ## Estimate for Scud Race (to be replaced by measurements)
 
 | Item | Estimate | Basis |

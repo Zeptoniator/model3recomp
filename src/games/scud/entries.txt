@@ -15,3 +15,4 @@
 0x000019E0   # lwbrx stub (index 4)
 0x00001A48   # nop padding, falls into the stwbrx stub
 0x00001A54   # stwbrx stub
+0x0004566C   # callback (via 0x13CF8 bnelrl); opens with mftb before its prologue

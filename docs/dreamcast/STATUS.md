@@ -1,6 +1,44 @@
 # Status
 
-## 2026-10-05
+## 2026-10-05 (later the same day)
+
+### Working
+
+- **SCUD-PC-09: Scud Race reaches attract mode on the desktop.** Region
+  warning, title screen (Scud Race / BPR organisation), then INSERT
+  COIN(S) / CREDIT 0 / © SEGA 1996 with the AM2 and SEGA logos, all drawn
+  by the recompiled game through the tilemap. Five fixes got it there, each
+  general rather than Scud-specific: non-local returns and computed `blr`
+  in the lifter, discovery to a fixed point, the video board's JTAG chain,
+  53C810 single-step, and the operator's LINK ID setting.
+- **PVR**: flat, Gouraud and textured triangles on the PowerVR2
+  (`tests/dreamcast/pvr_triangle`, photographed under Flycast).
+
+### Broken
+
+- The 3D is submitted (23 738 triangles a field in attract) and none is
+  drawn: the viewport words decode as `inf`, and one matrix is loaded where
+  a scene needs many. The Real3D decode was settled on The Lost World only.
+
+### Measured
+
+| | |
+|---|---|
+| Lift | RAM 2 054 functions / 131 778 instructions, ROM 1 604 / 109 128 |
+| Real3D memories in use during attract | ~3.5 MB of the 22 MB modelled (MEMORY_BUDGET.md) |
+| Guest RAM high-water mark during attract | `0x1EFFBF` of 8 MB |
+
+### Next
+
+1. Real3D viewport and matrix decode for Scud (vs Supermodel's Legacy3D),
+   until the attract race draws on the desktop — the reference for the PVR.
+2. Reset the texture FIFO per frame (DC-BUG-008) and measure its real volume.
+3. Confirm the memory high-water marks during a race; then size guest RAM
+   and the Real3D regions for the Dreamcast.
+4. ROM streaming (`rom_read`, page cache) — Scud on the Dreamcast (DC-03).
+5. Analog inputs (wheel, pedals) through the ADC.
+
+## 2026-10-05 (morning)
 
 ### Working
 
