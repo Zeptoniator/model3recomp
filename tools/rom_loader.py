@@ -9,9 +9,15 @@ ascending.
 
 Which four are the program ROMs is not guessed. Every candidate set is
 interleaved and checked against the PowerPC exception vector table, which is
-self-validating: the vector at 0xFFF00000 + 0x100*n opens by loading its own
-number, `li r7, n`. Only the correct interleave produces that, so a romset
-this tool accepts is a romset it has actually verified.
+self-validating in one of two ways, depending on the title's boot ROM:
+
+  - the vector at 0xFFF00000 + 0x100*n opens by loading its own number,
+    `li r7, n` (The Lost World), or
+  - every vector opens with `bl` to one common handler, which tells them
+    apart by LR (Scud Race).
+
+Only the correct interleave produces either, so a romset this tool accepts is
+a romset it has actually verified.
 
 No ROM is written into the repository -- the output path is yours, and the
 repo's .gitignore excludes the usual spellings.
@@ -52,7 +58,9 @@ def interleave(bufs):
 
 
 def vector_score(img):
-    """How many exception vectors open with `li r7, <their own number>`.
+    """How many exception vectors carry one of the two self-identifying
+    openings: `li r7, <their own number>`, or `bl` to a handler that every
+    checked vector shares. The better of the two counts is the score.
 
     The image is 2 MB and sits at 0xFFE00000, so the vector page at
     0xFFF00000 is at offset 0x100000.
@@ -60,7 +68,8 @@ def vector_score(img):
     vbase = len(img) - 0x100000
     if vbase < 0:
         return 0
-    hits = 0
+    li_hits = 0
+    bl_targets = []
     for v in VEC_CHECK:
         off = vbase + v
         if off + 4 > len(img):
@@ -68,8 +77,66 @@ def vector_score(img):
         w = struct.unpack_from(">I", img, off)[0]
         # li r7, imm  ==  addi r7, 0, imm  ==  0x38E0____
         if (w & 0xFFFF0000) == 0x38E00000 and (w & 0xFFFF) == (v >> 8):
-            hits += 1
-    return hits
+            li_hits += 1
+        # bl rel  ==  opcode 18, AA=0, LK=1
+        if (w & 0xFC000003) == 0x48000001:
+            rel = w & 0x03FFFFFC
+            if rel & 0x02000000:
+                rel -= 0x04000000
+            bl_targets.append((0xFFF00000 + v + rel) & 0xFFFFFFFF)
+    bl_hits = 0
+    if bl_targets:
+        common = max(set(bl_targets), key=bl_targets.count)
+        bl_hits = bl_targets.count(common)
+    return max(li_hits, bl_hits)
+
+
+def code_score(img):
+    """How many of the 256 words from the reset vector on decode as 603e
+    instructions. The vector check only ever reads lanes 0-1 -- every vector
+    is 8-byte aligned -- so two interleaves that differ in lanes 2-3 score
+    the same there. This reads all four lanes."""
+    import ppc_disasm
+    off = len(img) - 0x100000 + 0x100
+    n = 0
+    for i in range(256):
+        w = struct.unpack_from(">I", img, off + 4 * i)[0]
+        if ppc_disasm.decode(w, 0xFFF00100 + 4 * i).mn:
+            n += 1
+    return n
+
+
+def ic_position(name):
+    """The board location a chip was dumped from, as MAME names it: the
+    number after the last dot (`mpr-19672.26` -> 26, `epr-19607.20a` -> 20).
+    None when the name carries none.
+
+    This is the ROM board's own layout, not a title's: on every Step 1.x
+    board seen so far the banked CROM sits at IC 1..16, the program EPROMs
+    at 17..20, the sound program at 21, the SCSP samples at 22 and 24, the
+    VROM at 26..41, and a Digital Sound Board's MPEG ROMs at 57..60. Sizes
+    alone cannot tell them apart -- Scud Race's MPEG ROMs are the size of a
+    VROM chip and sort ahead of them.
+    """
+    tail = name.rsplit(".", 1)
+    if len(tail) != 2:
+        return None
+    digits = ""
+    for ch in tail[1]:
+        if not ch.isdigit():
+            break
+        digits += ch
+    return int(digits) if digits else None
+
+
+def by_position(files, size, lo, hi, exclude):
+    """Chips of `size` at IC lo..hi, in board order; None if any chip of
+    that size has no readable position (fall back to sorting by name)."""
+    named = [(n, ic_position(n)) for n, b in files.items()
+             if len(b) == size and n not in exclude]
+    if not named or any(p is None for _, p in named):
+        return None
+    return [n for n, p in sorted(named, key=lambda t: t[1]) if lo <= p <= hi]
 
 
 def interleave_n(bufs, lanes, word=2):
@@ -147,17 +214,31 @@ def main():
               % (len(cands), a.size), file=sys.stderr)
         return 2
 
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+    # The board's own order first: lane 0 is IC 20, lane 3 is IC 17 (MAME's
+    # ROM_LOAD64_WORD_SWAP offsets 0, 2, 4, 6). Only when that does not
+    # validate is every permutation scored, and then the code check breaks
+    # ties the vector check cannot see.
     best = None
-    for combo in itertools.combinations(cands, 4):
-        for order in itertools.permutations(combo):
-            img = interleave([files[n] for n in order])
-            s = vector_score(img)
-            if best is None or s > best[0]:
-                best = (s, order, img)
-            if s == len(VEC_CHECK):
-                break
-        if best[0] == len(VEC_CHECK):
-            break
+    board = sorted((n for n in cands if ic_position(n) in (17, 18, 19, 20)),
+                   key=ic_position, reverse=True)
+    if len(board) == 4:
+        img = interleave([files[n] for n in board])
+        if vector_score(img) == len(VEC_CHECK):
+            best = (len(VEC_CHECK), tuple(board), img)
+    if best is None:
+        for combo in itertools.combinations(cands, 4):
+            for order in itertools.permutations(combo):
+                img = interleave([files[n] for n in order])
+                s = vector_score(img)
+                if s == len(VEC_CHECK):
+                    s = (s, code_score(img))
+                else:
+                    s = (s, 0)
+                if best is None or s > best[0]:
+                    best = (s, order, img)
+        best = (best[0][0], best[1], best[2])
 
     score, order, img = best
     if score < len(VEC_CHECK):
@@ -208,13 +289,17 @@ def main():
     # image has tens of thousands of models whose every normal comes out
     # unit length. The eight-lane image has none at all.
     if a.banked:
-        names = sorted(n for n, b in files.items()
-                       if len(b) == 0x400000 and n not in order)
+        names = by_position(files, 0x400000, 1, 16, order)
+        if names is None:
+            names = sorted(n for n, b in files.items()
+                           if len(b) == 0x400000 and n not in order)
         build_region(files, names, 4, a.banked, "banked CROM",
                      group_order=lambda g: list(reversed(g)))
     if a.vrom:
-        names = sorted(n for n, b in files.items()
-                       if len(b) == 0x200000 and n not in order)
+        names = by_position(files, 0x200000, 26, 41, order)
+        if names is None:
+            names = sorted(n for n, b in files.items()
+                           if len(b) == 0x200000 and n not in order)
         build_region(files, names, 16, a.vrom, "VROM",
                      group_order=swap_pairs)
     return 0
