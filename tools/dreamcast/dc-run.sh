@@ -3,6 +3,7 @@
 #
 #   tools/dreamcast/dc-run.sh <image.cdi> [seconds] [done-token]
 #
+# DC_SHOT=<token>:<file.png> takes a screenshot when <token> is printed.
 # Exits 0 when the done-token appears on the console, 1 on timeout, 2 when
 # Flycast cannot be found. FLYCAST=<binary> picks the emulator.
 #
@@ -60,8 +61,22 @@ DISPLAY=":$DISP" XDG_CONFIG_HOME="$HOME_DIR" XDG_DATA_HOME="$HOME_DIR/data" \
     "$ELF" >"$LOG" 2>&1 &
 FLY=$!
 
+# DC_SHOT=<token>:<file.png> photographs the display when <token> first
+# appears on the console -- while the picture is up, not after Flycast has
+# exited (a capture then is of an empty desktop, and reads as "black").
+SHOT_TOKEN=${DC_SHOT%%:*}
+SHOT_FILE=${DC_SHOT#*:}
+shot_done=""
+
 rc=1
 for _ in $(seq 1 $((TIMEOUT * 4))); do
+    if [ -n "${DC_SHOT:-}" ] && [ -z "$shot_done" ] && grep -aq -- "$SHOT_TOKEN" "$LOG"; then
+        sleep 0.3
+        DISPLAY=":$DISP" import -window root "$SHOT_FILE" 2>/dev/null \
+            && echo "[dc-run] captured $SHOT_FILE" >&2 \
+            || echo "[dc-run] capture FAILED: $SHOT_FILE" >&2
+        shot_done=1
+    fi
     if [ -n "$DONE" ] && grep -aq -- "$DONE" "$LOG"; then rc=0; break; fi
     kill -0 "$FLY" 2>/dev/null || break
     sleep 0.25

@@ -149,4 +149,6 @@ if(M3_DREAMCAST)
     add_executable(dreamcast_boot examples/dreamcast_boot/main.c)
     target_link_libraries(dreamcast_boot PRIVATE model3recomp)
     target_compile_definitions(dreamcast_boot PRIVATE M3_GIT_REV="${M3_GIT_REV}")
+    # The PVR on its own: flat, Gouraud and textured triangles.
+    add_executable(pvr_triangle tests/dreamcast/pvr_triangle/main.c)
 endif()
