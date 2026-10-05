@@ -361,6 +361,21 @@ class Emitter:
     def i_lhzux(self, i):
         return self._ux(i, "%s = MEM_R16(_a);" % R(i.rd))
 
+    # Indexed loads and stores of floats with update. Scud Race's trig
+    # helper at 0x5770 walks a table with lfsux; it was the only one of
+    # these the lifter did not know, and a missing one is a silent zero.
+    def i_lfsux(self, i):
+        return self._ux(i, "%s = (double)m3_bits_to_f32(MEM_R32(_a));" % F(i.rd))
+
+    def i_lfdux(self, i):
+        return self._ux(i, "%s = m3_bits_to_f64(MEM_R64(_a));" % F(i.rd))
+
+    def i_stfsux(self, i):
+        return self._ux(i, "MEM_W32(_a, m3_f32_to_bits((float)%s));" % F(i.rd))
+
+    def i_stfdux(self, i):
+        return self._ux(i, "MEM_W64(_a, m3_f64_to_bits(%s));" % F(i.rd))
+
     def i_lwzux(self, i):
         return self._ux(i, "%s = MEM_R32(_a);" % R(i.rd))
 
@@ -455,8 +470,21 @@ class Emitter:
     def i_stfdu(self, i):
         return self._u(i, "MEM_W64(_a, m3_f64_to_bits(%s));" % F(i.rd))
 
+    # Set per function by emit_function: whether this function reads the
+    # FPSCR (mcrfs, mffs), in which case arithmetic keeps FPRF up to date.
+    track_fprf = False
+
+    # The arithmetic that sets FPRF; moves (fmr, fneg, fabs, fnabs) and
+    # conversions to integer do not.
+    FPRF_OPS = ("fadd", "fsub", "fmul", "fdiv", "fmadd", "fmsub", "fnmadd",
+                "fnmsub", "fadds", "fsubs", "fmuls", "fdivs", "fmadds",
+                "fmsubs", "fnmadds", "fnmsubs", "frsp", "fres", "frsqrte")
+
     def _fp(self, i, expr):
-        return "%s = %s;" % (F(i.rd), expr) + (" CRF(1, 0);" if i.rc else "")
+        c = "%s = %s;" % (F(i.rd), expr) + (" CRF(1, 0);" if i.rc else "")
+        if self.track_fprf and i.mn in self.FPRF_OPS:
+            c += " m3_fprf(&m3_ctx, %s);" % F(i.rd)
+        return c
 
     def i_fadd(self, i):
         return self._fp(i, "%s + %s" % (F(i.ra), F(i.rb)))
@@ -540,10 +568,15 @@ class Emitter:
         return self._fp(i, "m3_bits_to_f64((uint64_t)(uint32_t)(int32_t)%s)" % F(i.rb))
 
     def i_fcmpu(self, i):
-        return "FCMP(%d, %s, %s);" % (i.crfd, F(i.ra), F(i.rb))
+        c = "FCMP(%d, %s, %s);" % (i.crfd, F(i.ra), F(i.rb))
+        if self.track_fprf:
+            c += " m3_fpcc(&m3_ctx, m3_cr_get(&m3_ctx, %d));" % i.crfd
+        return c
 
-    def i_fcmpo(self, i):
-        return "FCMP(%d, %s, %s);" % (i.crfd, F(i.ra), F(i.rb))
+    i_fcmpo = i_fcmpu
+
+    def i_mcrfs(self, i):
+        return "m3_mcrfs(&m3_ctx, %d, %d);" % (i.crfd, (i.raw >> 18) & 7)
 
     def i_mffs(self, i):
         return "%s = m3_bits_to_f64((uint64_t)m3_ctx.fpscr);" % F(i.rd)
@@ -1104,6 +1137,7 @@ def fname(prefix, addr):
 
 
 def emit_function(em, fn, prefix, entries):
+    em.track_fprf = any(i.mn in ("mcrfs", "mffs") for _, i in fn.insns)
     out = ["/* %s: function at 0x%08X (%d instructions) */"
            % (fname(prefix, fn.entry), fn.entry, len(fn.insns)),
            "void %s(void)" % fname(prefix, fn.entry),

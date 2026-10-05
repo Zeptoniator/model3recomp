@@ -89,6 +89,8 @@ void m3_timebase_set(unsigned spr, uint32_t v)
 uint32_t m3_watch_addr = 0xFFFFFFFFu;   /* set from M3_WATCH at init */
 static uint64_t g_watch_from;           /* M3_WATCH_FROM: first field */
 static int      g_watch_ring;           /* M3_WATCH_RING: call history */
+static int      g_watch_has_val;        /* M3_WATCH_VAL: only this value */
+static uint32_t g_watch_val;
 
 void m3_watch_init(void)
 {
@@ -97,6 +99,9 @@ void m3_watch_init(void)
     e = getenv("M3_WATCH_FROM");
     g_watch_from = e ? strtoull(e, NULL, 0) : 0;
     g_watch_ring = getenv("M3_WATCH_RING") != NULL;
+    e = getenv("M3_WATCH_VAL");
+    g_watch_has_val = e != NULL;
+    g_watch_val = e ? (uint32_t)strtoul(e, NULL, 0) : 0;
     { void m3_fn_args_init(void); m3_fn_args_init(); }
 }
 
@@ -104,6 +109,9 @@ void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size)
 {
     uint32_t k;
     if (model3recomp_frame_count() < g_watch_from) return;
+    /* A buffer that is rewritten all the time reports thousands of writes;
+     * the one worth seeing is the one that put a given value there. */
+    if (g_watch_has_val && val != g_watch_val) return;
     fprintf(stderr, "[model3recomp] watch %08X = %08X (size %u) from guest "
                     "function %08X, field %llu\n",
             addr, val, size, m3_fn_now,

@@ -11,6 +11,7 @@
 #ifndef MODEL3RECOMP_PPC_H
 #define MODEL3RECOMP_PPC_H
 
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -98,6 +99,38 @@ static inline void m3_fcmp(m3_ppc_t *c, unsigned fld, double a, double b) {
     if (a != a || b != b) v = 1u;          /* unordered */
     else                  v = (a < b) ? 8u : (a > b) ? 4u : 2u;
     m3_cr_set(c, fld, v);
+}
+
+/* ---- FPSCR result flags ---------------------------------------------------
+ * FPRF -- the class of the last arithmetic result, C and FPCC (FL FG FE FU),
+ * FPSCR bits 15..19 in PPC numbering. Games read it with mcrfs to learn a
+ * value's sign without a compare: Scud Race's atan2 does `frsp f1,f1 ;
+ * mcrfs cr7,cr4`. Only functions that read the FPSCR keep it (see the
+ * lifter), so it is not maintained everywhere. */
+#define M3_FPRF_MASK 0x0001F000u
+static inline void m3_fprf(m3_ppc_t *c, double d) {
+    uint32_t f;
+    if (d != d)                    f = 0x11u;              /* QNaN       C  FU */
+    else if (d == 0.0)             f = signbit(d) ? 0x12u : 0x02u; /* -0 C FE, +0 FE */
+    else if (d < 0.0) {            /* denormals are classed as normals */
+        if (d == -INFINITY)        f = 0x09u;              /* -inf    FL FU */
+        else                       f = 0x08u;              /* -normal FL    */
+    } else {
+        if (d == INFINITY)         f = 0x05u;              /* +inf    FG FU */
+        else                       f = 0x04u;              /* +normal FG    */
+    }
+    c->fpscr = (c->fpscr & ~M3_FPRF_MASK) | (f << 12);
+}
+/* fcmpu / fcmpo set FPCC to the compare result as well as the CR field. */
+static inline void m3_fpcc(m3_ppc_t *c, uint32_t v) {
+    c->fpscr = (c->fpscr & ~0x0000F000u) | ((v & 0xFu) << 12);
+}
+/* mcrfs: copy FPSCR field s to CR field d, clearing the sticky exception
+ * bits that were copied (FX, OX..VXVC, VXSOFT..VXCVI). */
+static inline void m3_mcrfs(m3_ppc_t *c, unsigned d, unsigned s) {
+    unsigned sh = 28u - 4u * s;
+    m3_cr_set(c, d, (c->fpscr >> sh) & 0xFu);
+    c->fpscr &= ~((0x9FF80700u >> sh & 0xFu) << sh);
 }
 
 /* ---- Rotate helpers ---------------------------------------------------- */

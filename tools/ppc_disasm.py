@@ -95,6 +95,8 @@ _X63 = {
     38: "mtfsb1", 70: "mtfsb0", 134: "mtfsfi", 583: "mffs", 711: "mtfsf",
     64: "mcrfs",
 }
+# The opcode-63 instructions whose XO is the 5-bit A-form field.
+_A63 = {18, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31}
 _X59 = {
     18: "fdivs", 20: "fsubs", 21: "fadds", 24: "fres", 25: "fmuls",
     28: "fmsubs", 29: "fmadds", 30: "fnmsubs", 31: "fnmadds",
@@ -139,11 +141,17 @@ def decode(raw, addr):
         d["xo"] = _f(raw, 5, 1)
         d["mn"] = _X59.get(d["xo"])
     elif op == 63:
-        d["xo"] = _f(raw, 5, 1)
-        d["mn"] = _X63.get(d["xo"])
-        if d["mn"] is None:
+        # A-form arithmetic has a 5-bit XO, everything else a 10-bit one,
+        # and they overlap: mcrfs (64) and fcmpo (32) both end in five zero
+        # bits, which is fcmpu's 5-bit XO. Trying the 5-bit table first
+        # turned Scud Race's mcrfs into compares of f16 and f12 against f0,
+        # and its atan2 lost the signs of its arguments.
+        xo5 = _f(raw, 5, 1)
+        if xo5 in _A63:
+            d["xo"] = xo5
+        else:
             d["xo"] = _f(raw, 10, 1)
-            d["mn"] = _X63.get(d["xo"])
+        d["mn"] = _X63.get(d["xo"])
     return Insn(**d)
 
 
