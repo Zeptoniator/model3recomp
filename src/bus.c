@@ -170,6 +170,7 @@ static uint32_t g_serial1, g_serial2, g_gun_reg;
  * never from the host directly: every read in a field must agree, and on a
  * netplay session both machines must see the same thing. */
 static unsigned buttons_now(void) { return m3_input()->buttons; }
+static uint32_t g_adc_channel;     /* the ADC's selected channel */
 static uint8_t *g_vram;
 
 /* The tilegen's own register file, 0xF1180000..0xF11800FF. Only the ack at
@@ -933,6 +934,10 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
             uint32_t v = 0xFFu;
             unsigned want = ((w & 0x3Cu) == 0x08u) ? M3_BTN_TRIG1 : M3_BTN_TRIG2;
             if (btn & want) v &= ~0x01u;
+            /* A drive cabinet's view buttons and gear lever (Supermodel's
+             * VR4 and SHIFT4), from the game's input_map. */
+            v &= ~(uint32_t)((w & 0x3Cu) == 0x08u ? m3_input()->in08
+                                                  : m3_input()->in0C);
             return (v << 24) | 0x00FFFFFFu;
         }
         if ((w & 0x3Cu) == 0x3Cu) {
@@ -942,6 +947,14 @@ static uint32_t dev_read_word(uint32_t w, int side_effects)
              * stuck-high converter, which is what it used to get. */
             static int probed;
             static uint32_t adc = 0xFFFFFFFFu;
+            const m3_config_t *cfg = model3recomp_config();
+            if (cfg && cfg->adc) {
+                /* Eight channels; each read returns the selected one and
+                 * moves to the next (Supermodel). */
+                uint32_t d = m3_input()->adc[g_adc_channel & 7u];
+                if (side_effects) g_adc_channel = (g_adc_channel + 1u) & 7u;
+                return (d << 24) | 0x00FFFFFFu;
+            }
             if (!probed) {
                 const char *e = getenv("M3_ADC");
                 probed = 1;
@@ -1128,6 +1141,7 @@ static void dev_write_word(uint32_t w, uint32_t v)
             return;
         }
         if ((w & 0x3Cu) == 0x28u) { g_serial2 = (v >> 24) & 0xFFu; return; }
+        if ((w & 0x3Cu) == 0x3Cu) { g_adc_channel = (v >> 24) & 7u; return; }
         if ((w & 0x3Cu) == 0x24u) {
             unsigned cmd = (v >> 24) & 0xFFu;
             if (getenv("M3_GUN_TRACE")) {

@@ -13,6 +13,7 @@
 
 #include "model3recomp/ppc.h"
 #include "model3recomp/bus.h"
+#include "model3recomp/input.h"
 #include "model3recomp/func_table.h"
 #include "model3recomp/irq.h"
 
@@ -53,6 +54,21 @@ typedef struct m3_config {
      * after every transfer. Off by default: The Lost World was brought up
      * without it and has not been re-checked with it. */
     int         scsi_irq;
+
+    /* The drive/analog cabinet's inputs (Supermodel's model). With adc
+     * set, register 0x3C of the input block is an 8-channel ADC: a write
+     * selects a channel, every read returns that channel and moves to the
+     * next. Its channels come from m3_input_t.adc. Off, the old behaviour
+     * stays (all ones, or M3_ADC). */
+    int         adc;
+    /* What the cabinet reads when nobody touches it: a wheel centred
+     * (0x80), pedals up (0). Copied into each field's record before the
+     * host's controls are sampled. */
+    uint8_t     adc_rest[8];
+    /* Turns the host's pad (m3_input_t.pad) into this cabinet's inputs --
+     * a wheel, pedals, a gear lever. Called once per field after sampling;
+     * NULL for a game whose platform mapping is enough. */
+    void      (*input_map)(m3_input_t *in);
 } m3_config_t;
 
 int  model3recomp_init(const m3_config_t *cfg);

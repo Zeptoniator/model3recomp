@@ -136,12 +136,49 @@ static void scripted(m3_input_t *in, uint64_t f)
     if (gy) in->gun_y[0] = (uint16_t)(gy & 0x3FFu);
 }
 
+/* Scripted analog and game inputs: M3_ADC_SET=ch:value[,...] from the
+ * first field, M3_IN08_AT=field:mask[,...] held for M3_PRESS_FIELDS. For
+ * driving a race from a harness. */
+static void scripted_analog(m3_input_t *in, uint64_t f)
+{
+    static int probed, nset, nin;
+    static unsigned long ch[8], val[8], at[32], mask[32], press;
+    int k;
+    if (!probed) {
+        const char *e = getenv("M3_ADC_SET");
+        probed = 1;
+        while (e && *e && nset < 8) {
+            char *end;
+            ch[nset] = strtoul(e, &end, 0);
+            if (*end != ':') break;
+            val[nset++] = strtoul(end + 1, &end, 0);
+            e = *end == ',' ? end + 1 : end;
+        }
+        e = getenv("M3_IN08_AT");
+        while (e && *e && nin < 32) {
+            char *end;
+            at[nin] = strtoul(e, &end, 0);
+            if (*end != ':') break;
+            mask[nin++] = strtoul(end + 1, &end, 0);
+            e = *end == ',' ? end + 1 : end;
+        }
+        press = env_ul("M3_PRESS_FIELDS", 8);
+    }
+    for (k = 0; k < nset; k++) in->adc[ch[k] & 7u] = (uint8_t)val[k];
+    for (k = 0; k < nin; k++)
+        if (f >= at[k] && f < at[k] + press) in->in08 |= (uint8_t)mask[k];
+}
+
 void m3_input_latch(void)
 {
     m3_input_t local;
     uint64_t next = model3recomp_frame_count();   /* the field about to run */
 
     memset(&local, 0, sizeof local);
+    {
+        const m3_config_t *cfg = model3recomp_config();
+        if (cfg) memcpy(local.adc, cfg->adc_rest, sizeof local.adc);
+    }
     local.gun_x[0] = local.gun_x[1] = (M3_GUN_X0 + M3_GUN_X1) / 2;
     local.gun_y[0] = local.gun_y[1] = (M3_GUN_Y0 + M3_GUN_Y1) / 2;
     /* A scripted run must not also read whoever is at the machine: a mouse
@@ -150,6 +187,11 @@ void m3_input_latch(void)
     scripted(&local, next);
     if (!g_scripted)
         platform_sample(&local);
+    {
+        const m3_config_t *cfg = model3recomp_config();
+        if (cfg && cfg->input_map) cfg->input_map(&local);
+    }
+    scripted_analog(&local, next);
     {
         static int probed;
         if (!probed) { probed = 1; g_cheats_local |= (uint32_t)env_ul("M3_CHEATS", 0); }

@@ -37,8 +37,30 @@ extern "C" {
 #define M3_GUN_Y0 80
 #define M3_GUN_Y1 465
 
+/* A host pad as the platform saw it, for a game's input_map: buttons
+ * (M3_PAD_*), the analog stick (-128..127, centre 0) and the triggers
+ * (0..255). */
+#define M3_PAD_A      0x0001u
+#define M3_PAD_B      0x0002u
+#define M3_PAD_X      0x0004u
+#define M3_PAD_Y      0x0008u
+#define M3_PAD_START  0x0010u
+#define M3_PAD_UP     0x0020u
+#define M3_PAD_DOWN   0x0040u
+#define M3_PAD_LEFT   0x0080u
+#define M3_PAD_RIGHT  0x0100u
+typedef struct m3_pad {
+    uint16_t buttons;
+    int8_t   sx, sy;
+    uint8_t  lt, rt;
+    uint8_t  present;
+} m3_pad_t;
+
 typedef struct m3_input {
     uint32_t buttons;           /* M3_BTN_* */
+    uint8_t  adc[8];            /* analog channels: wheel, pedals ... */
+    uint8_t  in08, in0C;        /* game inputs, registers 0x08 / 0x0C, set = pressed */
+    m3_pad_t pad[2];            /* the host's pads, before input_map */
     uint16_t gun_x[2], gun_y[2];/* board units, players 1 and 2 */
     uint32_t cheats;            /* game-defined bits, see m3_cheat_* */
     uint32_t options;           /* game options, four bits each, see m3_option_* */

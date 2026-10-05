@@ -630,6 +630,32 @@ void platform_sample(m3_input_t *in)
         if (k[SDL_SCANCODE_F3]) in->buttons |= M3_BTN_SERVICE;
         if (k[SDL_SCANCODE_SPACE] || k[SDL_SCANCODE_LCTRL]) in->buttons |= M3_BTN_TRIG1;
         if (k[SDL_SCANCODE_RCTRL]) in->buttons |= M3_BTN_TRIG2;
+        /* The keyboard as a pad, for a game's input_map (a driving game):
+         * arrows the d-pad, Z / X / C / V the A / B / X / Y buttons. */
+        {
+            m3_pad_t *p = &in->pad[0];
+            p->present = 1;
+            if (k[SDL_SCANCODE_UP])    p->buttons |= M3_PAD_UP;
+            if (k[SDL_SCANCODE_DOWN])  p->buttons |= M3_PAD_DOWN;
+            if (k[SDL_SCANCODE_LEFT])  p->buttons |= M3_PAD_LEFT;
+            if (k[SDL_SCANCODE_RIGHT]) p->buttons |= M3_PAD_RIGHT;
+            if (k[SDL_SCANCODE_Z])     p->buttons |= M3_PAD_A;
+            if (k[SDL_SCANCODE_X])     p->buttons |= M3_PAD_B;
+            if (k[SDL_SCANCODE_C])     p->buttons |= M3_PAD_X;
+            if (k[SDL_SCANCODE_V])     p->buttons |= M3_PAD_Y;
+        }
+    }
+    if (g_pad) {
+        m3_pad_t *p = &in->pad[0];
+        float ax = axis(SDL_CONTROLLER_AXIS_LEFTX);
+        p->present = 1;
+        p->sx = (int8_t)(ax * 127.0f);
+        p->lt = (uint8_t)(axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) * 255.0f);
+        p->rt = (uint8_t)(axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) * 255.0f);
+        if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_UP))   p->buttons |= M3_PAD_UP;
+        if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) p->buttons |= M3_PAD_DOWN;
+        if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_X))         p->buttons |= M3_PAD_X;
+        if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_START))     p->buttons |= M3_PAD_START;
     }
 
     if (opt.mouse) {

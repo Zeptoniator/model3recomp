@@ -53,9 +53,27 @@ void platform_sample(m3_input_t *in)
 
     if (!dev || !(st = (cont_state_t *)maple_dev_status(dev)))
         return;
-    if (st->buttons & CONT_START) in->buttons |= M3_BTN_START1;
-    if (st->buttons & CONT_A)     in->buttons |= M3_BTN_COIN1;
-    if (st->buttons & CONT_Y)     in->buttons |= M3_BTN_SERVICE;
+    /* The pad as it is, for the game's input_map (a wheel and pedals for
+     * a driving game). With no input_map, Start is start and Y a coin. */
+    {
+        m3_pad_t *p = &in->pad[0];
+        uint32_t b = st->buttons;
+        int jx = st->joyx, jy = st->joyy;
+        p->present = 1;
+        p->buttons = (uint16_t)(((b & CONT_A) ? M3_PAD_A : 0) | ((b & CONT_B) ? M3_PAD_B : 0)
+                   | ((b & CONT_X) ? M3_PAD_X : 0) | ((b & CONT_Y) ? M3_PAD_Y : 0)
+                   | ((b & CONT_START) ? M3_PAD_START : 0)
+                   | ((b & CONT_DPAD_UP) ? M3_PAD_UP : 0) | ((b & CONT_DPAD_DOWN) ? M3_PAD_DOWN : 0)
+                   | ((b & CONT_DPAD_LEFT) ? M3_PAD_LEFT : 0) | ((b & CONT_DPAD_RIGHT) ? M3_PAD_RIGHT : 0));
+        p->sx = (int8_t)(jx < -128 ? -128 : jx > 127 ? 127 : jx);
+        p->sy = (int8_t)(jy < -128 ? -128 : jy > 127 ? 127 : jy);
+        p->lt = (uint8_t)st->ltrig;
+        p->rt = (uint8_t)st->rtrig;
+    }
+    if (!model3recomp_config() || !model3recomp_config()->input_map) {
+        if (st->buttons & CONT_START) in->buttons |= M3_BTN_START1;
+        if (st->buttons & CONT_Y)     in->buttons |= M3_BTN_COIN1;
+    }
 }
 
 void platform_set_status(const char *s)
