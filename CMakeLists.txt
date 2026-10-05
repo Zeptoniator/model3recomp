@@ -67,7 +67,7 @@ if(WIN32)
 endif()
 if(M3_DREAMCAST)
     target_compile_definitions(model3recomp PUBLIC M3_DREAMCAST=1
-        M3_RAM_BYTES=0x400000 M3_ROM_PAGES=16u)
+        M3_RAM_BYTES=0x400000 M3_ROM_PAGES=64u)
     # KOS keeps pthreads in an addon (the sound board and the banded
     # rasteriser use them).
     target_link_libraries(model3recomp PUBLIC pthread)
@@ -145,7 +145,8 @@ if(SCUD_LIFTED_DIR)
     else()
         set(SCUD_MAIN src/games/scud/main_host.c)
     endif()
-    add_executable(scudrace ${SCUD_MAIN} src/games/scud/scud.c ${SCUD_LIFTED})
+    add_executable(scudrace ${SCUD_MAIN} src/games/scud/scud.c
+                   src/games/scud/scudpack.c ${SCUD_LIFTED})
     target_include_directories(scudrace PRIVATE ${SCUD_LIFTED_DIR} src/games/scud)
     target_link_libraries(scudrace PRIVATE model3recomp)
     if(NOT MSVC)

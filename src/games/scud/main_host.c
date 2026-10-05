@@ -8,6 +8,7 @@
 #include "scud.h"
 #include "model3recomp/bus.h"
 #include "model3recomp/lift.h"
+#include "scudpack.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,18 +66,34 @@ static void shots(void)
     model3recomp_screenshot(path);
 }
 
-/* m3_roms_t.read for the banked CROM only (which == 1); the program ROM
- * stays in memory on the desktop. */
+/* m3_roms_t.read, both CROMs from their files (M3_ROM_PAGED). With
+ * M3_ROM_ORDER=<file> it also records, once each, the 32 KB pages in the
+ * order the game first touches them: tools/scud/pack.py lays SCUD.DAT out
+ * in that order, so a Dreamcast reads the disc sequentially. */
+static FILE *g_romf[2], *g_order;
+static uint8_t g_seen[2][2048];
+
 static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len)
 {
-    FILE *f = (FILE *)ctx;
-    if (which != 1 || fseek(f, (long)off, SEEK_SET)) return 0;
+    FILE *f;
+    (void)ctx;
+    if (which < 0 || which > 1 || !(f = g_romf[which])) return 0;
+    if (g_order && len > 8 && !g_seen[which][(off >> 15) & 2047]) {
+        g_seen[which][(off >> 15) & 2047] = 1;
+        fprintf(g_order, "%d %u %llu\n", which, off >> 15,
+                (unsigned long long)model3recomp_frame_count());
+    }
+    if (fseek(f, (long)off, SEEK_SET)) return 0;
     return fread(dst, 1, len, f);
 }
 
 static void on_field(void)
 {
     scud_operator_settings();
+    if (getenv("M3_ROM_PAGED") && model3recomp_frame_count() % 500 == 0)
+        fprintf(stderr, "[rom] field %llu: %llu pages fetched\n",
+                (unsigned long long)model3recomp_frame_count(),
+                (unsigned long long)bus_rom_cache_misses());
     shots();
     if (!g_stop_after || model3recomp_frame_count() < g_stop_after)
         return;
@@ -119,19 +136,35 @@ int main(int argc, char **argv)
         return 2;
     }
     cfg.roms.crom_size = n;
-    if (getenv("M3_ROM_PAGED")) {
-        /* The CROM through the bus's page cache, as a Dreamcast reads it --
-         * for checking that path against the in-memory one. */
-        static FILE *bank;
+    if (getenv("M3_SCUD_PACK")) {
+        /* The CROM out of SCUD.DAT, the way the Dreamcast reads it. */
+        static scudpack_t pack;
+        free((void *)cfg.roms.crom);
+        cfg.roms.crom = NULL;
+        if (!scudpack_open(&pack, getenv("M3_SCUD_PACK"), 8)) return 2;
+        cfg.roms.crom_size = pack.prog_bytes;
+        cfg.roms.crom_bank_size = pack.bank_bytes;
+        cfg.roms.read = scudpack_read;
+        cfg.roms.read_ctx = &pack;
+    } else if (getenv("M3_ROM_PAGED")) {
+        /* Both CROMs through the bus's page cache, as a Dreamcast reads
+         * them -- for checking that path against the in-memory one. */
+        static const char *const names[2] = { "scud_prog.bin", "scud_bank.bin" };
+        size_t *sizes[2] = { &cfg.roms.crom_size, &cfg.roms.crom_bank_size };
         char path[512];
-        snprintf(path, sizeof path, "%s/scud_bank.bin", g_roms_dir);
-        bank = fopen(path, "rb");
-        if (bank) {
-            fseek(bank, 0, SEEK_END);
-            cfg.roms.crom_bank_size = (size_t)ftell(bank);
-            cfg.roms.read = read_rom;
-            cfg.roms.read_ctx = bank;
+        int k;
+        free((void *)cfg.roms.crom);
+        cfg.roms.crom = NULL;
+        for (k = 0; k < 2; k++) {
+            snprintf(path, sizeof path, "%s/%s", g_roms_dir, names[k]);
+            if ((g_romf[k] = fopen(path, "rb")) != NULL) {
+                fseek(g_romf[k], 0, SEEK_END);
+                *sizes[k] = (size_t)ftell(g_romf[k]);
+            }
         }
+        cfg.roms.read = read_rom;
+        if (getenv("M3_ROM_ORDER"))
+            g_order = fopen(getenv("M3_ROM_ORDER"), "w");
     } else {
         cfg.roms.crom_bank = slurp("scud_bank.bin", &n, 0);
         if (cfg.roms.crom_bank) cfg.roms.crom_bank_size = n;

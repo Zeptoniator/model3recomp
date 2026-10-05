@@ -466,11 +466,20 @@ static uint8_t *rom_at(int which, uint32_t off)
     }
     g_rc.misses++;
     p = g_rc.buf + victim * (M3_ROM_PAGE + 8u);
-    memset(p, 0, M3_ROM_PAGE + 8u);
+    memset(p + M3_ROM_PAGE, 0, 8u);
+    /* Exactly one page, sector-aligned, so consecutive misses are
+     * consecutive reads (a disc does not seek between them). The 8 bytes
+     * past the end are only for an access that straddles two pages; they
+     * are read separately when there is a next page, which a word-aligned
+     * access never needs but a misaligned one does. */
     g_roms.read(g_roms.read_ctx, which, page * M3_ROM_PAGE, p,
-                (size_t)page * M3_ROM_PAGE + M3_ROM_PAGE + 8u <= size
-                    ? M3_ROM_PAGE + 8u : size - (size_t)page * M3_ROM_PAGE);
+                (size_t)page * M3_ROM_PAGE + M3_ROM_PAGE <= size
+                    ? M3_ROM_PAGE : size - (size_t)page * M3_ROM_PAGE);
     g_rc.key[victim] = key;
+    if (off % M3_ROM_PAGE > M3_ROM_PAGE - 8u &&
+        (size_t)page * M3_ROM_PAGE + M3_ROM_PAGE + 8u <= size)
+        g_roms.read(g_roms.read_ctx, which, (page + 1u) * M3_ROM_PAGE,
+                    p + M3_ROM_PAGE, 8u);
     g_rc.used[victim] = g_rc.tick;
     return p + (off % M3_ROM_PAGE);
 }
@@ -1297,9 +1306,38 @@ void bus_write64(uint32_t a, uint64_t v)
 
 void bus_dma_copy(uint32_t dst, uint32_t src, uint32_t len)
 {
+#ifndef M3_WATCH
+    /* Memory to memory, a block at a time. Every region the bus maps
+     * directly is aligned to and a multiple of 32 KB, and so are the ROM
+     * cache's and the paged Real3D memories' pages, so a chunk that stays
+     * inside one 32 KB window of both addresses stays inside one region and
+     * one page. Scud Race moves a few hundred KB a field into culling RAM;
+     * a byte at a time through the full decode, that was most of a
+     * Dreamcast field. Device ports (the FIFO, the texture port, the
+     * trigger) are not memory and still take the byte path. */
+    while (len) {
+        uint32_t room_s = 0x8000u - (src & 0x7FFFu);
+        uint32_t room_d = 0x8000u - (dst & 0x7FFFu);
+        uint32_t n = len < room_s ? len : room_s;
+        uint8_t *s, *d;
+        if (n > room_d) n = room_d;
+        s = direct(src, n, 0);
+        d = s ? direct(dst, n, 1) : NULL;
+        if (s && d) {
+            memmove(d, s, n);
+        } else {
+            uint32_t i;
+            for (i = 0; i < n; i++)
+                bus_write8(dst + i, bus_read8(src + i));
+        }
+        src += n; dst += n; len -= n;
+    }
+#else
+    /* The watch has to see each byte (see M3_WATCH in lift.h). */
     uint32_t i;
     for (i = 0; i < len; i++)
         bus_write8(dst + i, bus_read8(src + i));
+#endif
 }
 
 /* Everything the guest can see of the board, for save states. The ROMs are

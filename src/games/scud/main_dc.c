@@ -1,13 +1,13 @@
 /* Scud Race on a Dreamcast, headless (milestone DC-03).
  *
- * The CROM stays on the disc: scud_prog.bin and scud_bank.bin, built by
- * tools/scud/build_roms.py from your own romset and put on the disc by
- * tools/dreamcast/make-cdi.sh, are read through the bus's page cache. No
+ * The CROM stays on the disc, in SCUD.DAT (tools/scud/pack.py, built from
+ * your own romset), read through the bus's page cache. No
  * sound board, no battery file. Everything is reported on the serial
  * console: frame signatures (the same lines a desktop prints with
  * M3_SIG_EVERY, so the two can be diffed), memory, ROM traffic. */
 #include "scud.h"
 #include "model3recomp/bus.h"
+#include "scudpack.h"
 
 #include <kos.h>
 #include <malloc.h>
@@ -25,38 +25,30 @@
 #define M3_GIT_REV "unknown"
 #endif
 
-static FILE *g_rom[2];
-static uint64_t g_t0;
+static scudpack_t g_pack;
+static uint64_t g_t0, g_rom_us;   /* time spent reading the disc */
 
+/* SCUD.DAT through the bus's page cache; see scudpack.c. */
 static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len)
 {
-    (void)ctx;
-    if (which < 0 || which > 1 || !g_rom[which]) return 0;
-    if (fseek(g_rom[which], (long)off, SEEK_SET)) return 0;
-    return fread(dst, 1, len, g_rom[which]);
-}
-
-static size_t open_rom(int which, const char *path)
-{
-    long n;
-    g_rom[which] = fopen(path, "rb");
-    if (!g_rom[which]) { printf("cannot open %s\n", path); return 0; }
-    fseek(g_rom[which], 0, SEEK_END);
-    n = ftell(g_rom[which]);
-    printf("ROM %-22s %ld bytes (paged, not loaded)\n", path, n);
-    return n > 0 ? (size_t)n : 0;
+    uint64_t t = timer_us_gettime64();
+    size_t got = scudpack_read(ctx, which, off, dst, len);
+    g_rom_us += timer_us_gettime64() - t;
+    return got;
 }
 
 static void report(const char *when)
 {
     struct mallinfo mi = mallinfo();
     printf("[scud] %s: field %llu, %llu ms, heap %lu KB, Real3D %u KB, "
-           "ROM pages read %llu\n", when,
+           "ROM pages missed %llu, disc reads %llu (%llu ms)\n", when,
            (unsigned long long)model3recomp_frame_count(),
            (unsigned long long)((timer_us_gettime64() - g_t0) / 1000),
            (unsigned long)mi.uordblks >> 10,
            (unsigned)(bus_real3d_bytes() >> 10),
-           (unsigned long long)bus_rom_cache_misses());
+           (unsigned long long)bus_rom_cache_misses(),
+           (unsigned long long)g_pack.reads,
+           (unsigned long long)(g_rom_us / 1000));
 }
 
 static void on_field(void)
@@ -86,13 +78,16 @@ int main(void)
 
     memset(&cfg, 0, sizeof cfg);
     scud_board_config(&cfg);
-    cfg.roms.crom_size = open_rom(0, "/cd/scud_prog.bin");
-    cfg.roms.crom_bank_size = open_rom(1, "/cd/scud_bank.bin");
-    if (!cfg.roms.crom_size) {
-        printf("no program ROM on the disc\nSCUD DC FAILED\n");
+    if (!scudpack_open(&g_pack, "/cd/SCUD.DAT", 8)) {
+        printf("no /cd/SCUD.DAT (tools/scud/pack.py)\nSCUD DC FAILED\n");
         return 1;
     }
+    printf("SCUD.DAT: %lu pages, %lu hot first, read 8 at a time\n",
+           (unsigned long)g_pack.count, (unsigned long)g_pack.hot);
+    cfg.roms.crom_size = g_pack.prog_bytes;
+    cfg.roms.crom_bank_size = g_pack.bank_bytes;
     cfg.roms.read = read_rom;
+    cfg.roms.read_ctx = &g_pack;
 
     if (!model3recomp_init(&cfg)) {
         printf("model3recomp_init failed\nSCUD DC FAILED\n");
