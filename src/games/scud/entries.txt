@@ -17,3 +17,7 @@
 0x00001A54   # stwbrx stub
 0x0004566C   # callback (via 0x13CF8 bnelrl); opens with mftb before its prologue
 0x00034328   # callback leaf (no prologue): installs 0x34338 at 12(r12); seen once the SCSI interrupt sped attract up
+# Called through a pointer at the start of a race (scripted race: coin 1500,
+# start 1600, accelerator held); reported as a func-table miss. Without it
+# the run diverges from field <= 4800 (DC-BUG-016).
+0x00035740

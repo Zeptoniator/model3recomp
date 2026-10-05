@@ -42,6 +42,11 @@ void     m3_irq_init(void);
  * control, whatever the enable mask (it is non-maskable on the board), and
  * not visible in the status register. Consumed when dispatched. */
 void     irq_raise_scsi(void);
+/* A level-sensitive source held asserted outside the field cycle: while
+ * on, and enabled in the mask, it is dispatched at the next irq_tick()
+ * rather than at the next field. The sound UART's transmitter interrupt
+ * with no sound board behind it -- always ready -- is one. */
+void     irq_set_level(uint32_t bits, int on);
 void     irq_set_scsi_enabled(int on);
 
 /* Raise / acknowledge. ack is what 0xF1180010 routes to. */

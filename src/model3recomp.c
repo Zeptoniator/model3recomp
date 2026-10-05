@@ -291,7 +291,12 @@ void model3recomp_run(void)
             break;
     }
     /* Reached only if the guest's init returns, which a running game never
-     * does. Keep presenting so the host does not appear hung. */
+     * does. Keep presenting so the host does not appear hung -- but say so:
+     * from outside, empty fields look like a game that froze (DC-BUG-016). */
+    if (g_running)
+        fprintf(stderr, "[model3recomp] guest code exited at field %llu; "
+                        "presenting empty fields from here\n",
+                (unsigned long long)g_frames);
     while (g_running)
         model3recomp_end_frame();
 }

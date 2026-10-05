@@ -197,6 +197,14 @@ void sound_uart_write(unsigned reg, uint8_t v)
     if (getenv("M3_SND_TRACE"))
         fprintf(stderr, "[snd] field %llu ppc writes %s %02X\n",
                 (unsigned long long)model3recomp_frame_count(), reg ? "ctl" : "data", v);
+    if (!g_scsp1) {
+        /* No board: as sound_null.c (DC-BUG-015). */
+        if (reg == 0)
+            irq_ack(M3_IRQ_SOUND);
+        else
+            irq_set_level(M3_IRQ_SOUND, (v & 0x20) != 0);
+        return;
+    }
     if (reg == 0) {
         /* Sending a byte clears the sound interrupt (MAME). */
         irq_ack(M3_IRQ_SOUND);

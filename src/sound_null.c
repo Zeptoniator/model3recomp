@@ -21,10 +21,20 @@ int sound_present(void) { return 0; }
 
 uint8_t sound_uart_read(unsigned reg) { return reg ? 0x05 : 0; }   /* always ready */
 
+/* The transmitter is always ready, so with its interrupt turned on (a
+ * command with bit 5 set) the interrupt is simply asserted, and the guest
+ * empties its command queue into nothing. Sending a byte drops the line
+ * until the handler has returned (MAME): Scud's handler sends one byte and
+ * then polls the status register until the bit clears. Raised only once a field, as it
+ * was, the queue drained a byte a field: Scud Race's burst of sound
+ * commands at the start of a race filled its 32-entry queue and the game
+ * waited on it for ever (DC-BUG-015). */
 void sound_uart_write(unsigned reg, uint8_t v)
 {
-    if (reg == 0 || !(v & 0x20))
+    if (reg == 0)
         irq_ack(M3_IRQ_SOUND);
+    else
+        irq_set_level(M3_IRQ_SOUND, (v & 0x20) != 0);
 }
 
 void sound_run_field(void) { }

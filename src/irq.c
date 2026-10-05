@@ -50,6 +50,11 @@ static int g_scsi_on, g_scsi_pending;
 void irq_set_scsi_enabled(int on)  { g_scsi_on = on; }
 void irq_raise_scsi(void)          { if (g_scsi_on) g_scsi_pending = 1; }
 void irq_raise(uint32_t bits)      { g_pending |= bits; }
+static uint32_t g_level;
+void irq_set_level(uint32_t bits, int on)
+{
+    if (on) g_level |= bits; else { g_level &= ~bits; g_pending &= ~bits; }
+}
 void irq_ack(uint32_t bits)        { g_pending &= ~bits; }
 uint32_t irq_pending(void)         { return g_pending; }
 uint32_t irq_enable_read(void)     { return g_enable; }
@@ -155,6 +160,10 @@ void irq_tick(void)
     dec_tick();
     if (g_scsi_pending)
         irq_dispatch();
+    if (g_level & g_enable) {
+        g_pending |= g_level;
+        irq_dispatch();
+    }
     if (!model3recomp_field_due())
         return;
 
@@ -166,7 +175,23 @@ void irq_tick(void)
      * the two are separate events at opposite ends of the blanking interval.
      * The differential trace against tools/ppc_interp.py caught it. */
     irq_raise(M3_IRQ_VBLANK_START);
+#ifdef M3_LOOP_GUARD
+    if (!irq_dispatch()) {
+        /* M3_WHERE: a field whose VBlank was not delivered, and why. A
+         * guest that waits on its VBlank flag with interrupts masked looks,
+         * from outside, like a game that stopped drawing. */
+        extern uint32_t m3_fn_now;
+        static int probed, on;
+        if (!probed) { probed = 1; on = getenv("M3_WHERE") != NULL; }
+        if (on)
+            fprintf(stderr, "[where] field %llu: VBlank not delivered: msr %08X "
+                            "pending %08X enable %08X in %08X (LR %08X)\n",
+                    (unsigned long long)g_field, m3_ctx.msr, g_pending, g_enable,
+                    m3_fn_now, m3_ctx.lr);
+    }
+#else
     irq_dispatch();
+#endif
 
     /* Render after the guest's handler, not before it.
      *
@@ -261,4 +286,5 @@ void irq_state(m3_state_t *st)
     M3_STATE_VAR(st, g_in_dispatch);
     M3_STATE_VAR(st, g_dec_work);
     M3_STATE_VAR(st, g_scsi_pending);
+    M3_STATE_VAR(st, g_level);
 }

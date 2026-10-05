@@ -128,6 +128,8 @@ if(MODEL3RECOMP_BUILD_TESTS)
         add_test(NAME guest_smoke COMMAND model3recomp_guest_smoke)
         add_test(NAME disasm_cases COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_disasm.py)
+        add_test(NAME lifter_cases COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lifter.py)
     endif()
 endif()
 

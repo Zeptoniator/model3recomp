@@ -201,3 +201,63 @@ the Dreamcast) is still open.
   as the desktop sink; signatures identical; first 3D picture (flat).
 - **Note**: compare desktop runs only from a fresh NVRAM: a leftover
   `scudrace.nv` changes the run from field 100 on.
+
+## DC-BUG-015 — race start waits for ever on the sound command queue (fixed)
+
+- **Symptom**: scripted race on the desktop (`M3_NO_SOUND=1`, coin 1500,
+  start 1600, accelerator held): course, car and transmission chosen,
+  "レーススタートです", then the HUD over a black screen and no progress
+  from field ~4400.
+- **Chased**: `M3_WHERE` put the main program in `0x2744`, the enqueue of
+  a 32-entry ring of 4-byte sound commands, spinning while it is full. The
+  ring is drained by `0x2798` from the 0x500 handler, one byte per sound
+  interrupt; the enqueue writes `0x27` to the UART's control register
+  (transmitter interrupt on) when the ring goes non-empty and the drain
+  writes `0x06` (off) when it empties. With no sound board the runtime
+  raised the interrupt once a field, so the ring drained a byte a field
+  and the start-of-race burst filled it.
+- **First fix, wrong**: the interrupt held as a level while enabled. Attract
+  then hung at field 967: the handler sends one byte and then polls
+  `0xF0100018` until the sound bit clears, and a level that stayed visible
+  inside the handler never cleared.
+- **Fix**: a level source (`irq_set_level`) that `irq_tick` re-raises
+  outside a dispatch, and a data write that drops the pending bit (as MAME
+  does) until the handler has returned. Both `sound_null.c` and the
+  no-board path of `sound.c`. In the save state (version 3).
+- **Result**: the race starts: rolling start under AUTO DRIVE, 3-2-GO!,
+  304 km/h, the HUD (lap 1/4, 40th, timer), 3D textured. Then the next
+  bug: frozen on GO! from field 4919 (DC-BUG-016).
+
+## DC-BUG-016 — frozen on GO!: a jump through LR lifted as a return
+
+- **Symptom**: from field 4919 the guest RAM hash and the Real3D count stop
+  (`[sig]` constant), fields still advance, no spin reported, no VBlank
+  dispatched (`M3_WHERE` silent; the new "VBlank not delivered" line too).
+- **First reading, wrong**: `no function lifted at 00035740` and `guest
+  returned to 0001EEF0, which no host frame was waiting for` looked like
+  indirect targets only a race reaches. Added to `entries.txt`, the next
+  run unwound one step further (`0x1DF90`), a chain of returns with no
+  owner -- the shape of something broken upstream, not of missing entries.
+- **Chased**: `M3_UNWIND_TRACE=60 M3_UNWIND_ONLY=0x1F0E0`: the first stray
+  return is to `0x1F0E0`, which follows no `bl`; it is inside the loop of
+  `0x1F014`. That function sets `r31 = 0x20000 - 3872 = 0x1F0E0` before the
+  loop; the loop branches (`blt`, not `bl`) to a local routine at `0x1F158`
+  which leaves with `mtlr r31 ; blr` -- a jump back into the loop, LR used
+  as a jump register. Lifted as `M3_RETURN()`, it unwound every host frame
+  and out of the reset vector, and `model3recomp_run` presented empty
+  fields.
+- **Why the lifter missed it**: it already turns `lis/addi ; mtlr` targets
+  inside a function into labels with a runtime check (`if (PPC_LR == t)
+  goto`). Its scan goes in address order and read each instruction's `rd`
+  field as the register written: `fadds f31` erased r31's constant, `ori`
+  was read backwards, and the epilogue's `lwz r31` sits, by address,
+  between the build and the local routine's `mtlr`.
+- **Fix** (`tools/ppc_lifter.py`): `gpr_writes()` gives the general
+  registers an instruction really writes; and any address of the body
+  built from immediates into a register that some `mtlr` in the body reads
+  becomes a checked target (never new code to walk, never a call's return
+  site). Four new checked targets in the whole Scud lift: `0x1F0E0`,
+  `0x19B0`, `0x1A24`, `0x21860`. `tests/test_lifter.py`, four cases, the
+  old lifter fails the two that matter.
+- **Also**: `model3recomp_run` now says when the guest's code exits and it
+  is only presenting empty fields -- this freeze was silent.

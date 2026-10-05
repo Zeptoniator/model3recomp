@@ -1,5 +1,31 @@
 # Status
 
+## 2026-10-06 (night) — SCUD-PC: a race, played on the desktop
+
+- **Scud Race runs a race on the desktop**, driven by a script (coin at
+  field 1500, start at 1600, accelerator held, wheel centred): course,
+  car and transmission screens time out to their defaults, rolling start
+  under AUTO DRIVE, 3-2-GO!, then the beginner course -- tunnels, the
+  glass tube, the viaducts -- with the HUD live (lap 1/4, lap timer to
+  0'54", countdown 60 to 5, position 40th to 37th). 8000 fields, no stall.
+- **Cabinet inputs**: Supermodel's drive-cabinet model -- an 8-channel ADC
+  at register 0x3C (wheel, accelerator, brake), view buttons and the
+  four-position gear lever on register 0x08 -- fed from a host pad through
+  a per-game `input_map` (`scud_input_map`): stick/d-pad the wheel, R or A
+  the accelerator, L or B the brake, up/down the gears, X the view, Y a
+  coin, Start. SDL (keyboard and pad) and Maple fill the same `m3_pad_t`.
+  `M3_ADC_SET` / `M3_IN08_AT` script them.
+- Two bugs on the way (BUGS.md): **DC-BUG-015**, the race start waited for
+  ever on the sound command queue (the UART's transmitter interrupt is now
+  a level, and sending a byte drops it until the handler returns);
+  **DC-BUG-016**, frozen on GO!: a jump through LR (`mtlr r31 ; blr` back
+  into a loop) lifted as a return -- a lifter fix, with
+  `tests/test_lifter.py` -- plus one race-only entry point (`0x35740`).
+- The guest exiting to the idle loop is now reported; it used to look like
+  a game that had frozen.
+- Not yet: the race on the Dreamcast; steering under a script (the car
+  rides the right-hand wall at ~101 km/h); sound (the run has none).
+
 ## 2026-10-05 (night) — DC-07 tilemap layers
 
 - **The 2D is on the Dreamcast**: AM2 logo, CREDIT 0, © SEGA 1996 and the

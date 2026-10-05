@@ -815,14 +815,38 @@ def build(image, base, entry, hard, cap=MAX_FUNC_INSNS):
         # there, so the walk has to go there itself; each such target is
         # also a label, so that return can be a goto rather than an unwind
         # out of the function.
+        #
+        # The scan goes in address order, not in the order the code runs, so
+        # the value a register holds at the mtlr is only known when the two
+        # are close. Scud Race's 0x1F014 builds r31 = 0x1F0E0 before its
+        # loop, restores r31 in its epilogue, and only *after* the epilogue
+        # in the address space has the local routine, reached by a plain
+        # branch, that leaves with mtlr r31 ; blr -- a jump back into the
+        # loop. So, besides the value at the mtlr: any address of this body
+        # built from immediates into a register that some mtlr in the body
+        # reads, when that address is already a label -- a point the
+        # function's own branches join. That one only ever adds a runtime
+        # check (`if (PPC_LR == t) goto`), never code to walk, and not the
+        # return site of a call, which a recursive return would also reach.
+        # Without the label condition the bases of 0x1978's and 0x19EC's
+        # stub tables (LR = 0x1A24 + 12*r8) became labels too, and the
+        # labels broke those computed jumps: the boot stopped at field 62.
         val, more = {}, []
+        built, mtlr_regs = [], set()
         for addr, i in sorted(body.items()):
             if i.mn == "addis" and i.ra == 0:
                 val[i.rd] = (i.uimm << 16) & 0xFFFFFFFF
-            elif i.mn in ("addi", "ori") and i.ra in val:
-                v = val[i.ra] + (i.simm if i.mn == "addi" else i.uimm)
-                val[i.rd] = v & 0xFFFFFFFF
+                built.append((i.rd, val[i.rd]))
+            elif i.mn == "addi" and i.ra in val:
+                val[i.rd] = (val[i.ra] + i.simm) & 0xFFFFFFFF
+                built.append((i.rd, val[i.rd]))
+            elif i.mn == "ori" and i.rd in val:      # ori rA, rS: rd is rS
+                val[i.ra] = val[i.rd] | i.uimm
+                built.append((i.ra, val[i.ra]))
+            elif i.mn == "mtspr" and i.spr == 8 and i.rd not in val:
+                mtlr_regs.add(i.rd)
             elif i.mn == "mtspr" and i.spr == 8 and i.rd in val:
+                mtlr_regs.add(i.rd)
                 t = val[i.rd]
                 inside = base <= t < base + size and not (t & 3)
                 if inside and t not in hard and t != entry:
@@ -830,16 +854,60 @@ def build(image, base, entry, hard, cap=MAX_FUNC_INSNS):
                     fn.lr_targets.add(t)
                     if t not in body:
                         more.append(t)
-            elif i.mn is not None and i.rd in val and i.mn not in (
-                    "stw", "stb", "sth", "stwu", "stbu", "sthu", "cmp", "cmpi",
-                    "cmpl", "cmpli", "b", "bc", "bclr", "bcctr", "mtspr"):
-                del val[i.rd]
+            else:
+                # Only what the instruction really writes. Reading the rd
+                # field instead took `fadds f31` for a write of r31: Scud
+                # Race's 0x1F014 builds r31 = 0x1F0E0, does float work in
+                # f31, then `mtlr r31 ; blr` from a local routine -- a jump
+                # back into its own loop, lifted as a return. The race froze
+                # on GO! with the game unwound out of the reset vector.
+                for r in gpr_writes(i):
+                    val.pop(r, None)
+        for r, t in built:
+            prev = body.get(t - 4)
+            if (r in mtlr_regs and t in fn.labels and t != entry
+                    and t not in hard
+                    and not (prev is not None and D.is_call(prev))):
+                fn.labels.add(t)
+                fn.lr_targets.add(t)
         if not more:
             break
         work = more
     fn.insns = sorted(body.items())
 
     return fn
+
+
+_LOGICAL_RA = ("and", "or", "xor", "nand", "nor", "eqv", "andc", "orc",
+               "and.", "or.", "xor.", "nand.", "nor.", "eqv.", "andc.", "orc.",
+               "rlwinm", "rlwimi", "rlwnm", "rlwinm.", "rlwimi.", "rlwnm.",
+               "slw", "srw", "sraw", "srawi", "slw.", "srw.", "sraw.", "srawi.",
+               "extsb", "extsh", "extsb.", "extsh.", "cntlzw", "cntlzw.",
+               "andi.", "andis.", "ori", "oris", "xori", "xoris")
+_NO_GPR = ("b", "bc", "bclr", "bcctr", "rfi", "sc", "sync", "isync", "eieio",
+           "mcrf", "mcrxr", "mcrfs", "mffs", "mffs.", "mtcrf", "mtmsr", "mtspr",
+           "mtsr", "mtsrin", "mtfsf", "mtfsfi", "mtfsb0", "mtfsb1", "tlbie",
+           "tlbsync", "stwcx.")
+
+
+def gpr_writes(i):
+    """The general registers an instruction writes. Not its rd field: in a
+    float instruction rd names an FPR, in a logical one rd is the source and
+    ra the destination, in a CR operation rd is a CR bit."""
+    mn = i.mn
+    if mn is None:
+        return ()
+    w = []
+    if mn.startswith(("l", "st")) and (mn.endswith("u") or mn.endswith("ux")):
+        w.append(i.ra)                     # update forms write the base
+    if mn.startswith(("st", "lf", "f", "cr", "cmp", "dcb", "icb", "tw")) \
+            or mn in _NO_GPR:
+        return w
+    if mn == "lmw":
+        return w + list(range(i.rd, 32))
+    if mn in _LOGICAL_RA:
+        return w + [i.ra]
+    return w + [i.rd]
 
 
 def scan_reachable(image, base, seeds):
