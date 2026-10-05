@@ -488,10 +488,11 @@ static unsigned wrap_axis(long i, unsigned size, int mirror)
  * texel's colour is first taken from whichever neighbour is more opaque,
  * so a cut-out's transparent texels do not bleed dark into its edge.
  * Returns -1 when the texture was never uploaded. */
-static int64_t sample(const struct tri_s *tr, double u, double v);
+typedef struct tri_s tri_t;
+static int64_t sample(const tri_t *tr, double u, double v);
 
 /* ---- the triangle queue ------------------------------------------------ */
-typedef struct tri_s {
+struct tri_s {
     float v[3][3];          /* view space */
     float n[3];             /* the polygon's own normal, from the header */
     float vn[3][3];         /* per-vertex normals, for Gouraud */
@@ -508,7 +509,7 @@ typedef struct tri_s {
     uint8_t tex_alpha;      /* texel alpha makes it see-through */
     uint8_t mirror;         /* bit 0 mirror v, bit 1 mirror u (header word 2) */
     uint8_t r, g, b;
-} tri_t;
+};
 
 static tri_t *g_tris;
 
