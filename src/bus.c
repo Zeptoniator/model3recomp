@@ -186,7 +186,12 @@ const uint32_t *bus_tilegen_regs(void) { return g_tilegen_regs; }
  * of them in a two-thousand-field run, which is most of what the guest sends
  * the graphics processor. Kept in arrival order, because a FIFO has no
  * addresses. */
+#ifdef M3_DREAMCAST
+/* Scud Race peaks at 175 KB a field once the FIFO drains each field. */
+#define TEXFIFO_CAP 0x80000u
+#else
 #define TEXFIFO_CAP 0x400000u
+#endif
 static uint8_t *g_texfifo;
 static uint32_t g_vromtex[4];    /* the VROM texture port at 0x90000000 */
 static size_t   g_texfifo_used;
@@ -225,6 +230,43 @@ static uint8_t *region(uint8_t **p, size_t size, const char *name)
     }
     return *p;
 }
+#ifdef M3_DREAMCAST
+/* On a Dreamcast the culling and polygon memories are paged: 64 KB at a
+ * time, allocated on the first write, so what they cost is what the game
+ * uses -- about 1.5 MB in Scud Race's attract mode, against 9 MB modelled
+ * (docs/dreamcast/MEMORY_BUDGET.md). A page never written reads as zeros.
+ * An access that straddles two pages is not served (it does not happen
+ * with word-aligned scene data, and is counted if it ever does). */
+#define SPARSE_PAGE 0x10000u
+typedef struct { uint8_t *page[CULL_LO_SIZE / SPARSE_PAGE]; size_t bytes; } sparse_t;
+static sparse_t g_sp[3];          /* culling low, culling high, polygon */
+static uint8_t  g_zero_page[SPARSE_PAGE + 8];
+static uint32_t g_sparse_straddles;
+
+static uint8_t *sparse_at(unsigned r, uint32_t off, uint32_t size, int write)
+{
+    sparse_t *s = &g_sp[r];
+    unsigned pg = off / SPARSE_PAGE;
+    if ((off % SPARSE_PAGE) + size > SPARSE_PAGE) { g_sparse_straddles++; return NULL; }
+    if (!s->page[pg]) {
+        if (!write)
+            return g_zero_page + (off % SPARSE_PAGE);
+        s->page[pg] = calloc(1, SPARSE_PAGE);
+        if (!s->page[pg]) {
+            fprintf(stderr, "[model3recomp] out of memory paging Real3D RAM "
+                            "(%u KB in use)\n", (unsigned)(s->bytes >> 10));
+            abort();
+        }
+        s->bytes += SPARSE_PAGE;
+    }
+    return s->page[pg] + (off % SPARSE_PAGE);
+}
+
+size_t bus_real3d_bytes(void)
+{
+    return g_sp[0].bytes + g_sp[1].bytes + g_sp[2].bytes;
+}
+#endif
 #define CULL_LO() region(&g_cull_lo, CULL_LO_SIZE, "culling RAM (low)")
 #define CULL_HI() region(&g_cull_hi, CULL_HI_SIZE, "culling RAM (high)")
 #define POLY()    region(&g_poly, POLY_SIZE, "polygon RAM")
@@ -317,19 +359,34 @@ uint8_t *bus_vram(size_t *size)
 uint8_t *bus_cull_lo(size_t *size)
 {
     if (size) *size = CULL_LO_SIZE;
+#ifdef M3_DREAMCAST
+    if (size) *size = 0;
+    return NULL;          /* paged: there is no flat copy to hand out */
+#else
     return CULL_LO();
+#endif
 }
 
 uint8_t *bus_cull_hi(size_t *size)
 {
     if (size) *size = CULL_HI_SIZE;
+#ifdef M3_DREAMCAST
+    if (size) *size = 0;
+    return NULL;          /* paged: there is no flat copy to hand out */
+#else
     return CULL_HI();
+#endif
 }
 
 uint8_t *bus_poly(size_t *size)
 {
     if (size) *size = POLY_SIZE;
+#ifdef M3_DREAMCAST
+    if (size) *size = 0;
+    return NULL;          /* paged: there is no flat copy to hand out */
+#else
     return POLY();
+#endif
 }
 
 const uint8_t *bus_vrom(size_t *size)
@@ -358,6 +415,66 @@ static inline void wbe16(uint8_t *p, uint16_t v)
     p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v;
 }
 
+/* ---- CROM through a page cache ------------------------------------------
+ * For a host that cannot hold the ROMs (m3_roms_t.read). Pages are 32 KB, a
+ * few dozen of them, least recently used out first; each is filled 8 bytes
+ * past its end so an access that straddles two pages is still contiguous. */
+#ifndef M3_ROM_PAGE
+#define M3_ROM_PAGE  0x8000u
+#endif
+#ifndef M3_ROM_PAGES
+#define M3_ROM_PAGES 32u
+#endif
+static struct {
+    uint8_t *buf;            /* M3_ROM_PAGES * (M3_ROM_PAGE + 8) */
+    uint32_t key[M3_ROM_PAGES];      /* which << 31 | page index, + 1 */
+    uint32_t used[M3_ROM_PAGES];
+    uint32_t tick;
+    uint64_t misses, hits;
+} g_rc;
+
+uint64_t bus_rom_cache_misses(void) { return g_rc.misses; }
+
+static uint8_t *rom_at(int which, uint32_t off)
+{
+    const uint8_t *data = which ? g_roms.crom_bank : g_roms.crom;
+    size_t size = which ? g_roms.crom_bank_size : g_roms.crom_size;
+    uint32_t page, key;
+    unsigned i, victim = 0;
+    uint8_t *p;
+
+    if (off >= size) return NULL;
+    if (data) return (uint8_t *)data + off;
+    if (!g_roms.read) return NULL;
+    if (!g_rc.buf) {
+        g_rc.buf = calloc(M3_ROM_PAGES, M3_ROM_PAGE + 8u);
+        if (!g_rc.buf) {
+            fprintf(stderr, "[model3recomp] out of memory for the ROM cache\n");
+            abort();
+        }
+    }
+    page = off / M3_ROM_PAGE;
+    key = (((uint32_t)which << 31) | page) + 1u;
+    g_rc.tick++;
+    for (i = 0; i < M3_ROM_PAGES; i++) {
+        if (g_rc.key[i] == key) {
+            g_rc.used[i] = g_rc.tick;
+            g_rc.hits++;
+            return g_rc.buf + i * (M3_ROM_PAGE + 8u) + (off % M3_ROM_PAGE);
+        }
+        if (g_rc.used[i] < g_rc.used[victim]) victim = i;
+    }
+    g_rc.misses++;
+    p = g_rc.buf + victim * (M3_ROM_PAGE + 8u);
+    memset(p, 0, M3_ROM_PAGE + 8u);
+    g_roms.read(g_roms.read_ctx, which, page * M3_ROM_PAGE, p,
+                (size_t)page * M3_ROM_PAGE + M3_ROM_PAGE + 8u <= size
+                    ? M3_ROM_PAGE + 8u : size - (size_t)page * M3_ROM_PAGE);
+    g_rc.key[victim] = key;
+    g_rc.used[victim] = g_rc.tick;
+    return p + (off % M3_ROM_PAGE);
+}
+
 /* ---- region resolution --------------------------------------------------
  * Returns a host pointer for the plain-memory regions, or NULL when the
  * address belongs to a device and has to go through the switch below.
@@ -367,12 +484,21 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
     if (a < M3_RAM_SIZE)
         return g_ram + a;
 
+#ifdef M3_DREAMCAST
+    if (a >= M3_R3D_CULL_LO && a < M3_R3D_CULL_LO + CULL_LO_SIZE)
+        return sparse_at(0, a - M3_R3D_CULL_LO, size, write);
+    if (a >= M3_R3D_CULL_HI && a < M3_R3D_CULL_HI + CULL_HI_SIZE)
+        return sparse_at(1, a - M3_R3D_CULL_HI, size, write);
+    if (a >= M3_R3D_POLY && a < M3_R3D_POLY + POLY_SIZE)
+        return sparse_at(2, a - M3_R3D_POLY, size, write);
+#else
     if (a >= M3_R3D_CULL_LO && a < M3_R3D_CULL_LO + CULL_LO_SIZE)
         return CULL_LO() + (a - M3_R3D_CULL_LO);
     if (a >= M3_R3D_CULL_HI && a < M3_R3D_CULL_HI + CULL_HI_SIZE)
         return CULL_HI() + (a - M3_R3D_CULL_HI);
     if (a >= M3_R3D_POLY && a < M3_R3D_POLY + POLY_SIZE)
         return POLY() + (a - M3_R3D_POLY);
+#endif
 
     if (a >= M3_TILEGEN_VRAM && a < M3_TILEGEN_VRAM + TILEGEN_VRAM_SIZE)
         return g_vram + (a - M3_TILEGEN_VRAM);
@@ -384,10 +510,10 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
         /* Fixed program CROM occupies the top of the map. A ROM smaller than
          * the 8 MB window sits at the END of it, which is why the reset
          * vector at 0xFFF00100 lands where it does. */
-        if (a >= M3_CROM_FIXED && g_roms.crom) {
+        if (a >= M3_CROM_FIXED && g_roms.crom_size) {
             uint32_t top = 0xFFFFFFFFu - (uint32_t)g_roms.crom_size + 1u;
             if (a >= top)
-                return (uint8_t *)g_roms.crom + (a - top);
+                return rom_at(0, a - top);
             /* Below the program and above 0xFF800000 is the data ROM, and it
              * is not banked: the whole span is the front of the image, which
              * is where a game's tables and models actually live.
@@ -398,15 +524,12 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
              * against MAME: 0xFF800000 is offset 0 of this image, 0xFFC00000
              * is 0x400000 and so on, one for one to 0xFFDFFFFF, and driving
              * the bank register through all 256 values moves none of it. */
-            if (g_roms.crom_bank) {
-                uint32_t off = a - M3_CROM_FIXED;
-                if (off < g_roms.crom_bank_size)
-                    return (uint8_t *)g_roms.crom_bank + off;
-            }
+            if (g_roms.crom_bank_size)
+                return rom_at(1, a - M3_CROM_FIXED);
             return NULL;
         }
         /* Banked CROM window. */
-        if (a >= M3_CROM_BANKED && a < M3_CROM_FIXED && g_roms.crom_bank) {
+        if (a >= M3_CROM_BANKED && a < M3_CROM_FIXED && g_roms.crom_bank_size) {
 #ifdef M3_LOOP_GUARD
             /* Which window offsets the guest reads, under which bank value.
              * Pinning the bank mapping down needs the guest's own access
@@ -429,10 +552,7 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
                 }
             }
 #endif
-            uint32_t off = (a - M3_CROM_BANKED) + g_crom_bank;
-            if (off < g_roms.crom_bank_size)
-                return (uint8_t *)g_roms.crom_bank + off;
-            return NULL;
+            return rom_at(1, (a - M3_CROM_BANKED) + g_crom_bank);
         }
     }
     return NULL;
@@ -1176,9 +1296,11 @@ void bus_state(m3_state_t *st)
     m3_state_io(st, g_ram, M3_RAM_SIZE);
     m3_state_io(st, g_backup, 0x20000u);
     m3_state_io(st, g_vram, TILEGEN_VRAM_SIZE);
+#ifndef M3_DREAMCAST   /* paged there; save states are not supported */
     m3_state_io(st, CULL_LO(), CULL_LO_SIZE);
     m3_state_io(st, CULL_HI(), CULL_HI_SIZE);
     m3_state_io(st, POLY(), POLY_SIZE);
+#endif
     M3_STATE_VAR(st, g_texfifo_used);
     if (g_texfifo_used <= TEXFIFO_CAP)
         m3_state_io(st, g_texfifo, g_texfifo_used);

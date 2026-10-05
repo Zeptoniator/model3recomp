@@ -56,6 +56,15 @@ typedef struct m3_roms {
     const uint8_t *vrom;      size_t vrom_size;      /* texture / model ROM */
     const uint8_t *sndrom;    size_t sndrom_size;    /* 68000 program       */
     const uint8_t *samples;   size_t samples_size;   /* SCSP wave ROM       */
+
+    /* Optional: CROM that is not in memory. When `crom` (or `crom_bank`) is
+     * NULL and this is set, the bus fetches the bytes on demand through a
+     * small page cache -- which is how a Dreamcast, with 16 MB of RAM, reads
+     * 50 MB of CROM off the disc. `which` is 0 for the program CROM and 1
+     * for the banked CROM; `crom_size` and `crom_bank_size` still give the
+     * sizes. Returns the number of bytes read. */
+    size_t (*read)(void *ctx, int which, uint32_t off, void *dst, size_t len);
+    void  *read_ctx;
 } m3_roms_t;
 
 void     bus_init(const m3_roms_t *roms);
@@ -117,6 +126,8 @@ const uint8_t *bus_vrom(size_t *size);
  * port rather than a window, so this is the order the bytes arrived in, not
  * an address space. */
 uint8_t *bus_texfifo(size_t *used, size_t *capacity);
+uint64_t bus_rom_cache_misses(void);
+size_t   bus_real3d_bytes(void);      /* Dreamcast: Real3D RAM paged in so far */   /* pages fetched through m3_roms_t.read */
 void     bus_texfifo_reset(void);
 /* Drop the first n bytes, which the renderer has taken; what is left (a
  * partly arrived entry) moves to the front. */

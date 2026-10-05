@@ -65,6 +65,15 @@ static void shots(void)
     model3recomp_screenshot(path);
 }
 
+/* m3_roms_t.read for the banked CROM only (which == 1); the program ROM
+ * stays in memory on the desktop. */
+static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len)
+{
+    FILE *f = (FILE *)ctx;
+    if (which != 1 || fseek(f, (long)off, SEEK_SET)) return 0;
+    return fread(dst, 1, len, f);
+}
+
 static void on_field(void)
 {
     scud_operator_settings();
@@ -110,8 +119,23 @@ int main(int argc, char **argv)
         return 2;
     }
     cfg.roms.crom_size = n;
-    cfg.roms.crom_bank = slurp("scud_bank.bin", &n, 0);
-    if (cfg.roms.crom_bank) cfg.roms.crom_bank_size = n;
+    if (getenv("M3_ROM_PAGED")) {
+        /* The CROM through the bus's page cache, as a Dreamcast reads it --
+         * for checking that path against the in-memory one. */
+        static FILE *bank;
+        char path[512];
+        snprintf(path, sizeof path, "%s/scud_bank.bin", g_roms_dir);
+        bank = fopen(path, "rb");
+        if (bank) {
+            fseek(bank, 0, SEEK_END);
+            cfg.roms.crom_bank_size = (size_t)ftell(bank);
+            cfg.roms.read = read_rom;
+            cfg.roms.read_ctx = bank;
+        }
+    } else {
+        cfg.roms.crom_bank = slurp("scud_bank.bin", &n, 0);
+        if (cfg.roms.crom_bank) cfg.roms.crom_bank_size = n;
+    }
     cfg.roms.vrom = slurp("scud_vrom.bin", &n, 0);
     if (cfg.roms.vrom) cfg.roms.vrom_size = n;
     cfg.roms.sndrom = slurp("scud_snd.bin", &n, 0);

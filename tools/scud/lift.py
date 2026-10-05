@@ -7,8 +7,9 @@
      copies the program ROM from 0xFFF10000 on into RAM 0x00000000 and
      enters at 0x00000100 -- 18.5 M instructions.
   2. The RAM snapshot is lifted at RAM addresses (prefix scudram).
-  3. The ROM half -- the boot itself -- is lifted separately (scudrom),
-     because the recompiled program starts where the processor does.
+  3. The ROM half -- the reset routine only -- is lifted separately
+     (scudrom), because the recompiled program starts where the processor
+     does.
 
 <out_dir> receives the generated C. It is derived from your dump: never
 commit it.
@@ -66,9 +67,16 @@ def main():
         return 1
 
     extra = ["--entries", a.entries] if a.entries else []
+    # The program ROM holds the boot and, from 0xFFF10000 on, the copy of the
+    # game the boot puts in RAM. That copy is lifted from RAM below; from ROM
+    # only the reset routine runs (the runtime's function report shows no
+    # other ROM function entered), so only it is lifted. 58 instructions
+    # instead of 53 000, and 1.4 MB less SH-4 code. A ROM function that did
+    # get called would be a reported func-table miss.
     print("lift: boot code (from ROM)")
     if run([sys.executable, os.path.join(TOOLS, "ppc_lifter.py"), prog, a.out,
-            "scudrom", "--base", ROM_BASE, "--stats"]):
+            "scudrom", "--base", ROM_BASE, "--entry-only",
+            "--entry", "0xFFF00100", "--only", "0xFFF00100", "--stats"]):
         return 1
     print("lift: game (from the RAM snapshot)")
     return run([sys.executable, os.path.join(TOOLS, "ppc_lifter.py"), snap,

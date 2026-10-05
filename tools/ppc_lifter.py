@@ -1380,6 +1380,17 @@ def main():
                     help="also treat code-looking pointers in data as entries")
     ap.add_argument("--no-scan-prologues", action="store_true",
                     help="do not treat stwu r1,-N(r1) as a function start")
+    ap.add_argument("--entry-only", action="store_true",
+                    help="seed only the --entry/--entries addresses: no image "
+                         "start, no exception vectors. For the boot half of a "
+                         "game whose program ROM also holds a copy of the game "
+                         "the boot puts in RAM (Scud Race): the copy is lifted "
+                         "from RAM, and only the boot needs lifting from ROM")
+    ap.add_argument("--only", action="append", default=[],
+                    help="emit only these functions (repeatable); calls to "
+                         "anything else go through the function table, so a "
+                         "call that does happen is a reported miss, not a "
+                         "crash")
     ap.add_argument("--stats", action="store_true")
     a = ap.parse_args()
 
@@ -1388,7 +1399,8 @@ def main():
     lo, hi = base, base + len(image)
 
     seeds = {int(x, 0) for x in a.entry}
-    seeds.add(base)          # a computed jump can land on the image's start
+    if not a.entry_only:
+        seeds.add(base)      # a computed jump can land on the image's start
     if a.entries:
         for line in open(a.entries):
             line = line.split("#")[0].strip()
@@ -1397,7 +1409,7 @@ def main():
 
     # Seed the exception vectors both where MSR[IP]=1 puts them (0xFFF00000)
     # and where MSR[IP]=0 does (0x00000000), whichever lands in this image.
-    for v in VECTORS:
+    for v in VECTORS if not a.entry_only else ():
         for vbase in (base, 0x00000000, 0xFFF00000):
             if lo <= vbase + v < hi:
                 seeds.add(vbase + v)
@@ -1417,6 +1429,8 @@ def main():
         soft |= grown
     entries = {e for e in entries if lo <= e < hi}
     hard = {e for e in hard if lo <= e < hi}
+    if a.only:
+        entries = {int(x, 0) for x in a.only}
 
     em = Emitter()
     fns = [build(image, base, e, hard) for e in sorted(entries)]

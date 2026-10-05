@@ -161,6 +161,12 @@ void model3recomp_end_frame(void)
         tilegen_render_pass(0);
         t1 = on ? platform_ticks_us() : 0;
         real3d_render();
+#ifdef M3_DREAMCAST
+        /* Nothing drains the texture FIFO while no renderer runs; a field's
+         * uploads are dropped here rather than piling up (DC-BUG-008). */
+        if (!platform_framebuffer(NULL, NULL))
+            bus_texfifo_reset();
+#endif
         t2 = on ? platform_ticks_us() : 0;
         tilegen_render_pass(1);
         t3 = on ? platform_ticks_us() : 0;
@@ -183,6 +189,28 @@ void model3recomp_end_frame(void)
     }
     if (g_frame_hook)
         g_frame_hook();
+    {
+        /* M3_SIG_EVERY=N: a signature of the guest every N fields -- a hash
+         * of work RAM and the Real3D trigger count. Fields are paced by guest
+         * work, not time, so two hosts running the same lift with the same
+         * inputs print the same lines: a desktop and a Dreamcast can be
+         * compared field for field (prompt: frame signatures). */
+        static long every = -1;
+        if (every < 0) {
+            const char *e = getenv("M3_SIG_EVERY");
+            every = e ? strtol(e, NULL, 0) : 0;
+        }
+        if (every > 0 && g_frames % (uint64_t)every == 0) {
+            const uint8_t *r = bus_ram();
+            uint32_t h = 2166136261u;
+            size_t i;
+            for (i = 0; i < M3_RAM_SIZE; i++)
+                h = (h ^ r[i]) * 16777619u;
+            fprintf(stderr, "[sig] field %llu ram %08lX r3d %llu\n",
+                    (unsigned long long)g_frames, (unsigned long)h,
+                    (unsigned long long)bus_r3d_trigger_count());
+        }
+    }
     sound_run_field();
     if (!model3recomp_poll())
         model3recomp_quit(0);
