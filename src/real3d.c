@@ -422,7 +422,13 @@ static void flush_texture_fifo(void)
         upload_texture(header, f + i + 8, (size_t)words * 4u - 8u);
         i += (size_t)words * 4u;
     }
-    g_fifo_seen = used;
+    /* What was uploaded leaves the FIFO, as it does on the board. Keeping
+     * it -- which this did -- re-uploaded every texture ever sent on every
+     * field, and once the 4 MB buffer filled, every texture sent after
+     * that was dropped: Scud Race's attract race showed its later
+     * textures as white rectangles. */
+    bus_texfifo_consume(i);
+    g_fifo_seen = 0;
     if (getenv("M3_TEX_TRACE"))
         fprintf(stderr, "[tex] fifo %u bytes, %u uploads so far%s",
                 (unsigned)used, g_tex_uploads, "\n");

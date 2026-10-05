@@ -118,6 +118,9 @@ const uint8_t *bus_vrom(size_t *size);
  * an address space. */
 uint8_t *bus_texfifo(size_t *used, size_t *capacity);
 void     bus_texfifo_reset(void);
+/* Drop the first n bytes, which the renderer has taken; what is left (a
+ * partly arrived entry) moves to the front. */
+void     bus_texfifo_consume(size_t n);
 void     bus_dma_copy(uint32_t dst, uint32_t src, uint32_t len);
 
 #ifdef __cplusplus

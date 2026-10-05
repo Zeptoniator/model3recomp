@@ -102,7 +102,7 @@
   the two stub tables, and the boot hand-off. The stubs are in
   `src/games/scud/entries.txt`.
 
-## DC-BUG-008 — with no framebuffer, VROM texture loads vanish (open)
+## DC-BUG-008 — with no framebuffer, VROM texture loads vanish (FIFO half fixed)
 
 - **Symptom**: none yet (nothing renders on the Dreamcast); found reading
   `src/real3d.c` for docs/renderer/.
@@ -148,3 +148,31 @@
   `addi r1,r1,-N`, no `mflr`.
 - **Fix**: discovery to a fixed point with soft entries; hand-made return
   addresses become labels claimed after the branch; one more prologue form.
+
+### DC-BUG-008, the FIFO half (fixed)
+
+`flush_texture_fifo()` now consumes what it uploaded (`bus_texfifo_consume`).
+Before, the FIFO filled to its 4 MB cap during Scud Race's title screens and
+every texture sent after that was dropped: the attract race drew its later
+textures as white rectangles. After: `fifo 0` at the end of every field and
+"0 never uploaded" texels. The no-framebuffer half (VROM loads skipped on
+the Dreamcast) is still open.
+
+## DC-BUG-013 — mcrfs decoded as fcmpu; FPSCR result flags not kept (fixed)
+
+- **Symptom**: Scud Race's attract submits 23 738 triangles a field and
+  draws none; the viewport's frustum words are `inf`, its sun vector `NaN`.
+- **Chased**: viewport word ← DMA from `0xE0010` ← `0x5740` (tangent table
+  lookup) ← FOV half-angles at `0x100344..` ← `0x2E7C0`, four `atan2`
+  calls (`0x58D8`) with arguments `(1.43, +1)` and `(1.43, -1)` returning
+  the same angle. `M3_WATCH` with the new `M3_WATCH_VAL`, then one probe at
+  each step; the inputs were checked at every step before moving up.
+- **Root cause**: `0x58D8` takes its arguments' signs from the FPSCR —
+  `frsp f1,f1 ; mcrfs cr7,cr4` — and the decoder read mcrfs (XO 64) as
+  fcmpu (5-bit XO 0), so the lift compared f16 and f12 with f0 instead.
+  fcmpo (XO 32) had the same problem. The FPSCR's FPRF was never kept.
+- **Fix**: `83e309f` — decoder takes the 5-bit XO only for the A-form set;
+  `m3_fprf`, `m3_mcrfs`, FPCC from fcmpu/fcmpo; arithmetic keeps FPRF in
+  functions that read the FPSCR. `tests/test_disasm.py` (ctest).
+- **Result**: the attract race draws, textured.
+- **Interpreter**: `ppc_interp.py` still treats mcrfs as a no-op.

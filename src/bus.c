@@ -301,6 +301,13 @@ uint8_t *bus_texfifo(size_t *used, size_t *capacity)
 
 void bus_texfifo_reset(void) { g_texfifo_used = 0; }
 
+void bus_texfifo_consume(size_t n)
+{
+    if (n >= g_texfifo_used) { g_texfifo_used = 0; return; }
+    memmove(g_texfifo, g_texfifo + n, g_texfifo_used - n);
+    g_texfifo_used -= n;
+}
+
 uint8_t *bus_vram(size_t *size)
 {
     if (size) *size = TILEGEN_VRAM_SIZE;

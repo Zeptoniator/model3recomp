@@ -1,5 +1,17 @@
 # Status
 
+## 2026-10-05 (evening)
+
+- **Scud Race's attract race draws in 3D on the desktop**, textured: the
+  village course, buildings, trees, signs, with the 2D over it. Two fixes:
+  mcrfs/FPRF (DC-BUG-013), and the texture FIFO now drains (DC-BUG-008).
+- Remaining visual faults: black holes in some textures (transparency or
+  sheet regions overwritten), not yet looked at. No cars seen yet in the
+  sampled frames.
+- Next: Dreamcast — ROM streaming and memory sizing, then Scud headless on
+  the console (DC-03); the 3D on the desktop is now the reference for the
+  PVR back end.
+
 ## 2026-10-05 (later the same day)
 
 ### Working
