@@ -120,6 +120,8 @@ if(MODEL3RECOMP_BUILD_TESTS)
         target_include_directories(model3recomp_guest_smoke PRIVATE ${SMOKE_DIR})
         target_link_libraries(model3recomp_guest_smoke PRIVATE model3recomp)
         add_test(NAME guest_smoke COMMAND model3recomp_guest_smoke)
+        add_test(NAME disasm_cases COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_disasm.py)
     endif()
 endif()
 
