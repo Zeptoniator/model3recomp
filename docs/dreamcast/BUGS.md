@@ -176,3 +176,28 @@ the Dreamcast) is still open.
   functions that read the FPSCR. `tests/test_disasm.py` (ctest).
 - **Result**: the attract race draws, textured.
 - **Interpreter**: `ppc_interp.py` still treats mcrfs as a no-op.
+
+## DC-BUG-014 — Real3D sink receives no polygon on the Dreamcast (fixed)
+
+- **Symptom**: with the PVR sink installed, `[pvr] last frame: 0 opaque` at
+  every field to 1400 while the desktop draws the attract race; screenshot
+  black.
+- **Chased**: two causes stacked. (1) `real3d.c` read culling and polygon
+  RAM through `bus_cull_lo/hi/bus_poly`, which return NULL on the Dreamcast
+  (paged). Fixed with `bus_r3d_read`, a copying reader for all four Real3D
+  memories — still 0. (2) A desktop counting sink (`M3_SINK_COUNT=1`)
+  reproduced the zero only when `scud_vrom.bin` was absent: **Scud Race's
+  models are in VROM**, and the Dreamcast build had no VROM at all.
+- **Fix**: VROM streamed — SCUD.DAT version 2 carries it (2-bit `which`),
+  a VROM page cache separate from the CROM one (48 × 32 KB), and the
+  renderer reads models a polygon at a time through `bus_r3d_read`.
+- **Made affordable**: the renderer always took the most detailed LOD and
+  never culled: 0.5–1.7 MB of VROM read per field. Supermodel's LOD
+  selection (blend table at viewport word 0x17, radii at node word 9, model
+  scale at word 1) and a cull-radius frustum test bring it to ≤ 456 KB per
+  field (34 × 32 KB pages at most). Desktop pictures unchanged at fields
+  1500–6000 (`M3_LOD_FINEST=1` for the old behaviour).
+- **Result**: 455 polygons at field 1000 on the Dreamcast, the same count
+  as the desktop sink; signatures identical; first 3D picture (flat).
+- **Note**: compare desktop runs only from a fresh NVRAM: a leftover
+  `scudrace.nv` changes the run from field 100 on.

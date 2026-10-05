@@ -8,9 +8,9 @@
 
 typedef struct {
     FILE     *f;
-    uint32_t  page, count, prog_bytes, bank_bytes, first, hot;
-    uint16_t *slot[2];            /* page -> position in the file */
-    uint32_t  pages[2];
+    uint32_t  page, count, prog_bytes, bank_bytes, first, hot, vrom_bytes;
+    uint16_t *slot[3];            /* page -> position in the file */
+    uint32_t  pages[3];
     uint8_t  *ra;                 /* read-ahead window, ra_cap pages */
     uint32_t  ra_first, ra_n, ra_cap;
     long      pos;                /* file position, to skip seeks */

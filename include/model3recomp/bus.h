@@ -128,12 +128,14 @@ uint8_t *bus_poly(size_t *size);
  * the CPU's address map -- on hardware only the graphics processor reads it --
  * so the renderer gets at it through here. */
 const uint8_t *bus_vrom(size_t *size);
+size_t   bus_r3d_read(int region, size_t off, void *dst, size_t len);
 
 /* What the guest streamed into the Real3D's FIFO at 0x94000000. It is one
  * port rather than a window, so this is the order the bytes arrived in, not
  * an address space. */
 uint8_t *bus_texfifo(size_t *used, size_t *capacity);
 uint64_t bus_rom_cache_misses(void);
+uint64_t bus_vrom_cache_misses(void);
 size_t   bus_real3d_bytes(void);
 uint64_t bus_ram_overruns(void);      /* see M3_RAM_BYTES */      /* Dreamcast: Real3D RAM paged in so far */   /* pages fetched through m3_roms_t.read */
 void     bus_texfifo_reset(void);

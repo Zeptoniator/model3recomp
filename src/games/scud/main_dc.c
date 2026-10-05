@@ -8,6 +8,7 @@
 #include "scud.h"
 #include "model3recomp/bus.h"
 #include "scudpack.h"
+#include "../../renderer/pvr/pvr_r3d.h"
 
 #include <kos.h>
 #include <malloc.h>
@@ -20,6 +21,9 @@
 #endif
 #ifndef SCUD_DC_SIG_EVERY
 #define SCUD_DC_SIG_EVERY "100"
+#endif
+#ifndef SCUD_DC_SHOT_AT
+#define SCUD_DC_SHOT_AT 1300     /* prints "SCUD SHOT" for the harness to photograph */
 #endif
 #ifndef M3_GIT_REV
 #define M3_GIT_REV "unknown"
@@ -91,12 +95,14 @@ static void report(const char *when)
 {
     struct mallinfo mi = mallinfo();
     printf("[scud] %s: field %llu, %llu ms, heap %lu KB, Real3D %u KB, "
-           "ROM pages missed %llu, disc reads %llu (%llu ms)\n", when,
+           "ROM pages missed %llu (VROM %llu), disc reads %llu (%llu ms)\n",
+           when,
            (unsigned long long)model3recomp_frame_count(),
            (unsigned long long)((timer_us_gettime64() - g_t0) / 1000),
            (unsigned long)mi.uordblks >> 10,
            (unsigned)(bus_real3d_bytes() >> 10),
            (unsigned long long)bus_rom_cache_misses(),
+           (unsigned long long)bus_vrom_cache_misses(),
            (unsigned long long)g_pack.reads,
            (unsigned long long)(g_rom_us / 1000));
 }
@@ -105,8 +111,13 @@ static void on_field(void)
 {
     uint64_t f = model3recomp_frame_count();
     scud_operator_settings();
-    if (f % 100 == 0)
+    if (f % 100 == 0) {
         report("progress");
+        printf("[pvr] last frame: %u opaque, %u translucent polygons\n",
+               pvr_r3d_last_opaque(), pvr_r3d_last_translucent());
+    }
+    if (f == SCUD_DC_SHOT_AT)
+        printf("SCUD SHOT field %llu\n", (unsigned long long)f);
     if (f > SCUD_DC_FIELDS) {          /* after field N's signature */
         report("end");
 #ifdef SCUD_DC_PROFILE
@@ -142,6 +153,9 @@ int main(void)
            (unsigned long)g_pack.count, (unsigned long)g_pack.hot);
     cfg.roms.crom_size = g_pack.prog_bytes;
     cfg.roms.crom_bank_size = g_pack.bank_bytes;
+    /* The models the Real3D draws are in VROM; a version-1 pack has none,
+     * and then nothing is drawn. */
+    cfg.roms.vrom_size = g_pack.vrom_bytes;
     cfg.roms.read = read_rom;
     cfg.roms.read_ctx = &g_pack;
 
@@ -149,6 +163,10 @@ int main(void)
         printf("model3recomp_init failed\nSCUD DC FAILED\n");
         return 1;
     }
+    if (!pvr_r3d_install())
+        printf("PVR: init failed, running headless\n");
+    else
+        printf("PVR: Real3D sink installed\n");
     model3recomp_set_frame_hook(on_field);
     scud_register_lifted();
 #ifdef SCUD_DC_PROFILE

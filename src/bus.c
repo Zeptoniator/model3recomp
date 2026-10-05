@@ -188,7 +188,7 @@ const uint32_t *bus_tilegen_regs(void) { return g_tilegen_regs; }
  * addresses. */
 #ifdef M3_DREAMCAST
 /* Scud Race peaks at 175 KB a field once the FIFO drains each field. */
-#define TEXFIFO_CAP 0x80000u
+#define TEXFIFO_CAP 0x40000u
 #else
 #define TEXFIFO_CAP 0x400000u
 #endif
@@ -425,21 +425,34 @@ static inline void wbe16(uint8_t *p, uint16_t v)
 #ifndef M3_ROM_PAGES
 #define M3_ROM_PAGES 32u
 #endif
-static struct {
-    uint8_t *buf;            /* M3_ROM_PAGES * (M3_ROM_PAGE + 8) */
-    uint32_t key[M3_ROM_PAGES];      /* which << 31 | page index, + 1 */
-    uint32_t used[M3_ROM_PAGES];
+#ifndef M3_VROM_PAGES
+#define M3_VROM_PAGES 48u
+#endif
+/* Two caches: the CROMs, which the guest reads, and the VROM, which only
+ * the renderer reads (models, every field). Shared, the renderer's
+ * 20-30 pages a field evicted the guest's and both thrashed. */
+typedef struct {
+    uint8_t *buf;            /* pages * (M3_ROM_PAGE + 8) */
+    uint32_t *key;           /* which << 30 | page index, + 1 */
+    uint32_t *used;
+    unsigned pages;
     uint32_t tick;
     unsigned last;                   /* the slot hit most recently */
     uint64_t misses, hits;
-} g_rc;
+} rom_cache_t;
+static rom_cache_t g_rc[2];
 
-uint64_t bus_rom_cache_misses(void) { return g_rc.misses; }
+uint64_t bus_rom_cache_misses(void) { return g_rc[0].misses + g_rc[1].misses; }
+uint64_t bus_vrom_cache_misses(void) { return g_rc[1].misses; }
 
+/* which: 0 program CROM, 1 banked CROM, 2 VROM. */
 static uint8_t *rom_at(int which, uint32_t off)
 {
-    const uint8_t *data = which ? g_roms.crom_bank : g_roms.crom;
-    size_t size = which ? g_roms.crom_bank_size : g_roms.crom_size;
+    const uint8_t *data = which == 2 ? g_roms.vrom
+                        : which ? g_roms.crom_bank : g_roms.crom;
+    size_t size = which == 2 ? g_roms.vrom_size
+                : which ? g_roms.crom_bank_size : g_roms.crom_size;
+    rom_cache_t *c = &g_rc[which == 2];
     uint32_t page, key;
     unsigned i, victim = 0;
     uint8_t *p;
@@ -447,32 +460,35 @@ static uint8_t *rom_at(int which, uint32_t off)
     if (off >= size) return NULL;
     if (data) return (uint8_t *)data + off;
     if (!g_roms.read) return NULL;
-    if (!g_rc.buf) {
-        g_rc.buf = calloc(M3_ROM_PAGES, M3_ROM_PAGE + 8u);
-        if (!g_rc.buf) {
+    if (!c->buf) {
+        c->pages = which == 2 ? M3_VROM_PAGES : M3_ROM_PAGES;
+        c->buf = calloc(c->pages, M3_ROM_PAGE + 8u);
+        c->key = calloc(c->pages, sizeof *c->key);
+        c->used = calloc(c->pages, sizeof *c->used);
+        if (!c->buf || !c->key || !c->used) {
             fprintf(stderr, "[model3recomp] out of memory for the ROM cache\n");
             abort();
         }
     }
     page = off / M3_ROM_PAGE;
-    key = (((uint32_t)which << 31) | page) + 1u;
+    key = (((uint32_t)which << 30) | page) + 1u;
     /* The guest reads its tables a byte or a word at a time, so the page it
      * touched last is almost always the one it touches next. Without this
      * shortcut, the scan below was 27% of a Dreamcast field. */
-    if (g_rc.key[g_rc.last] == key)
-        return g_rc.buf + g_rc.last * (M3_ROM_PAGE + 8u) + (off % M3_ROM_PAGE);
-    g_rc.tick++;
-    for (i = 0; i < M3_ROM_PAGES; i++) {
-        if (g_rc.key[i] == key) {
-            g_rc.used[i] = g_rc.tick;
-            g_rc.hits++;
-            g_rc.last = i;
-            return g_rc.buf + i * (M3_ROM_PAGE + 8u) + (off % M3_ROM_PAGE);
+    if (c->key[c->last] == key)
+        return c->buf + c->last * (M3_ROM_PAGE + 8u) + (off % M3_ROM_PAGE);
+    c->tick++;
+    for (i = 0; i < c->pages; i++) {
+        if (c->key[i] == key) {
+            c->used[i] = c->tick;
+            c->hits++;
+            c->last = i;
+            return c->buf + i * (M3_ROM_PAGE + 8u) + (off % M3_ROM_PAGE);
         }
-        if (g_rc.used[i] < g_rc.used[victim]) victim = i;
+        if (c->used[i] < c->used[victim]) victim = i;
     }
-    g_rc.misses++;
-    p = g_rc.buf + victim * (M3_ROM_PAGE + 8u);
+    c->misses++;
+    p = c->buf + victim * (M3_ROM_PAGE + 8u);
     memset(p + M3_ROM_PAGE, 0, 8u);
     /* Exactly one page, sector-aligned, so consecutive misses are
      * consecutive reads (a disc does not seek between them). The 8 bytes
@@ -482,14 +498,108 @@ static uint8_t *rom_at(int which, uint32_t off)
     g_roms.read(g_roms.read_ctx, which, page * M3_ROM_PAGE, p,
                 (size_t)page * M3_ROM_PAGE + M3_ROM_PAGE <= size
                     ? M3_ROM_PAGE : size - (size_t)page * M3_ROM_PAGE);
-    g_rc.key[victim] = key;
+    c->key[victim] = key;
     if (off % M3_ROM_PAGE > M3_ROM_PAGE - 8u &&
         (size_t)page * M3_ROM_PAGE + M3_ROM_PAGE + 8u <= size)
         g_roms.read(g_roms.read_ctx, which, (page + 1u) * M3_ROM_PAGE,
                     p + M3_ROM_PAGE, 8u);
-    g_rc.used[victim] = g_rc.tick;
-    g_rc.last = victim;
+    c->used[victim] = c->tick;
+    c->last = victim;
     return p + (off % M3_ROM_PAGE);
+}
+
+/* M3_VROM_WS=1: how many distinct 4 KB pieces of VROM the renderer reads in a
+ * field (its working set), printed every 100 fields -- the number that
+ * sizes a VROM cache for a host that streams it. */
+static int g_vrom_ws_on = -1;
+static uint8_t g_vrom_ws[8192];          /* 4 KB granules, this field */
+static unsigned g_vrom_ws_n, g_vrom_ws_max;
+static uint8_t g_vrom_ws_ever[8192];      /* 4 KB granules, whole run */
+static uint8_t g_vrom_ws32[1024];         /* 32 KB pages, this field */
+static unsigned g_vrom_ws32_n, g_vrom_ws32_max;
+static unsigned g_vrom_ws_ever_n;
+static uint64_t g_vrom_ws_field;
+
+static void vrom_ws_note(size_t off, size_t len)
+{
+    uint64_t f = model3recomp_frame_count();
+    size_t p;
+    if (f != g_vrom_ws_field) {
+        if (g_vrom_ws_n > g_vrom_ws_max) g_vrom_ws_max = g_vrom_ws_n;
+        if (g_vrom_ws32_n > g_vrom_ws32_max) g_vrom_ws32_max = g_vrom_ws32_n;
+        if (f / 100u != g_vrom_ws_field / 100u) {
+            fprintf(stderr, "[vrom] field %llu: %u KB last field, "
+                    "%u KB at most; %u KB ever read; 32 KB pages %u, "
+                    "%u at most\n",
+                    (unsigned long long)f, g_vrom_ws_n * 4u, g_vrom_ws_max * 4u,
+                    g_vrom_ws_ever_n * 4u, g_vrom_ws32_n, g_vrom_ws32_max);
+            g_vrom_ws_max = 0;
+            g_vrom_ws32_max = 0;
+        }
+        memset(g_vrom_ws, 0, sizeof g_vrom_ws);
+        memset(g_vrom_ws32, 0, sizeof g_vrom_ws32);
+        g_vrom_ws_n = 0;
+        g_vrom_ws32_n = 0;
+        g_vrom_ws_field = f;
+    }
+    for (p = off >> 12; p <= (off + len - 1) >> 12 && p < 8192u; p++)
+        if (!g_vrom_ws_ever[p]) { g_vrom_ws_ever[p] = 1; g_vrom_ws_ever_n++; }
+    for (p = off >> 15; p <= (off + len - 1) >> 15 && p < 1024u; p++)
+        if (!g_vrom_ws32[p]) { g_vrom_ws32[p] = 1; g_vrom_ws32_n++; }
+    for (p = off >> 12; p <= (off + len - 1) >> 12 && p < 8192u; p++)
+        if (!g_vrom_ws[p]) { g_vrom_ws[p] = 1; g_vrom_ws_n++; }
+}
+
+/* Copies len bytes of a Real3D memory starting at byte off: 0 culling RAM
+ * low, 1 culling RAM high, 2 polygon RAM, 3 VROM. Returns how many bytes
+ * were copied, short when the range runs off the end. This is how the
+ * renderer reads scene data on a host where those memories are not flat
+ * (Dreamcast: culling and polygon RAM paged, VROM streamed). */
+size_t bus_r3d_read(int which, size_t off, void *dst, size_t len)
+{
+    static const size_t sizes[3] = { CULL_LO_SIZE, CULL_HI_SIZE, POLY_SIZE };
+    uint8_t *d = dst;
+    size_t size, done = 0;
+
+    if (which == 3) {
+        size = g_roms.vrom_size;
+        if (off >= size) return 0;
+        if (len > size - off) len = size - off;
+        if (g_vrom_ws_on < 0) g_vrom_ws_on = getenv("M3_VROM_WS") != NULL;
+        if (g_vrom_ws_on) vrom_ws_note(off, len);
+        if (g_roms.vrom) { memcpy(d, g_roms.vrom + off, len); return len; }
+        while (done < len) {
+            const uint8_t *p = rom_at(2, (uint32_t)(off + done));
+            size_t chunk = M3_ROM_PAGE - (off + done) % M3_ROM_PAGE;
+            if (!p) break;
+            if (chunk > len - done) chunk = len - done;
+            memcpy(d + done, p, chunk);
+            done += chunk;
+        }
+        return done;
+    }
+    if (which < 0 || which > 2) return 0;
+    size = sizes[which];
+    if (off >= size) return 0;
+    if (len > size - off) len = size - off;
+#ifdef M3_DREAMCAST
+    while (done < len) {
+        size_t o = off + done;
+        size_t chunk = SPARSE_PAGE - o % SPARSE_PAGE;
+        if (chunk > len - done) chunk = len - done;
+        memcpy(d + done, sparse_at((unsigned)which, (uint32_t)o,
+                                   (uint32_t)chunk, 0), chunk);
+        done += chunk;
+    }
+    return done;
+#else
+    {
+        const uint8_t *m = which == 0 ? CULL_LO() : which == 1 ? CULL_HI()
+                                                                 : POLY();
+        memcpy(d, m + off, len);
+        return len;
+    }
+#endif
 }
 
 /* ---- region resolution --------------------------------------------------

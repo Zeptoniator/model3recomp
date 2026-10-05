@@ -7,6 +7,7 @@
  * is a test harness, without it a game. */
 #include "scud.h"
 #include "model3recomp/bus.h"
+#include "model3recomp/real3d.h"
 #include "model3recomp/lift.h"
 #include "scudpack.h"
 
@@ -66,18 +67,18 @@ static void shots(void)
     model3recomp_screenshot(path);
 }
 
-/* m3_roms_t.read, both CROMs from their files (M3_ROM_PAGED). With
+/* m3_roms_t.read, both CROMs and the VROM from their files (M3_ROM_PAGED). With
  * M3_ROM_ORDER=<file> it also records, once each, the 32 KB pages in the
  * order the game first touches them: tools/scud/pack.py lays SCUD.DAT out
  * in that order, so a Dreamcast reads the disc sequentially. */
-static FILE *g_romf[2], *g_order;
-static uint8_t g_seen[2][2048];
+static FILE *g_romf[3], *g_order;
+static uint8_t g_seen[3][2048];
 
 static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len)
 {
     FILE *f;
     (void)ctx;
-    if (which < 0 || which > 1 || !(f = g_romf[which])) return 0;
+    if (which < 0 || which > 2 || !(f = g_romf[which])) return 0;
     if (g_order && len > 8 && !g_seen[which][(off >> 15) & 2047]) {
         g_seen[which][(off >> 15) & 2047] = 1;
         fprintf(g_order, "%d %u %llu\n", which, off >> 15,
@@ -87,8 +88,28 @@ static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len
     return fread(dst, 1, len, f);
 }
 
+/* M3_SINK_COUNT=1: the Real3D scene goes to a sink that only counts what
+ * it is handed, the path the Dreamcast's PVR back end takes. */
+static unsigned g_sink_polys[2], g_sink_last[2];
+static void sink_begin(void) { g_sink_polys[0] = g_sink_polys[1] = 0; }
+static void sink_poly(const m3_r3d_vertex *v, int n, uint32_t argb, int tr)
+{
+    (void)v; (void)n; (void)argb;
+    g_sink_polys[tr ? 1 : 0]++;
+}
+static void sink_end(void)
+{
+    g_sink_last[0] = g_sink_polys[0];
+    g_sink_last[1] = g_sink_polys[1];
+}
+static const m3_r3d_sink k_count_sink = { sink_begin, sink_poly, sink_end };
+
 static void on_field(void)
 {
+    if (getenv("M3_SINK_COUNT") && model3recomp_frame_count() % 100 == 0)
+        fprintf(stderr, "[sink] field %llu: %u opaque, %u translucent\n",
+                (unsigned long long)model3recomp_frame_count(),
+                g_sink_last[0], g_sink_last[1]);
     scud_operator_settings();
     if (getenv("M3_ROM_PAGED") && model3recomp_frame_count() % 500 == 0)
         fprintf(stderr, "[rom] field %llu: %llu pages fetched\n",
@@ -144,6 +165,7 @@ int main(int argc, char **argv)
         if (!scudpack_open(&pack, getenv("M3_SCUD_PACK"), 8)) return 2;
         cfg.roms.crom_size = pack.prog_bytes;
         cfg.roms.crom_bank_size = pack.bank_bytes;
+        cfg.roms.vrom_size = pack.vrom_bytes;    /* 0 in a version-1 pack */
         cfg.roms.read = scudpack_read;
         cfg.roms.read_ctx = &pack;
     } else if (getenv("M3_ROM_PAGED")) {
@@ -162,6 +184,11 @@ int main(int argc, char **argv)
                 *sizes[k] = (size_t)ftell(g_romf[k]);
             }
         }
+        snprintf(path, sizeof path, "%s/scud_vrom.bin", g_roms_dir);
+        if ((g_romf[2] = fopen(path, "rb")) != NULL) {
+            fseek(g_romf[2], 0, SEEK_END);
+            cfg.roms.vrom_size = (size_t)ftell(g_romf[2]);
+        }
         cfg.roms.read = read_rom;
         if (getenv("M3_ROM_ORDER"))
             g_order = fopen(getenv("M3_ROM_ORDER"), "w");
@@ -169,8 +196,10 @@ int main(int argc, char **argv)
         cfg.roms.crom_bank = slurp("scud_bank.bin", &n, 0);
         if (cfg.roms.crom_bank) cfg.roms.crom_bank_size = n;
     }
-    cfg.roms.vrom = slurp("scud_vrom.bin", &n, 0);
-    if (cfg.roms.vrom) cfg.roms.vrom_size = n;
+    if (!g_romf[2] && !cfg.roms.vrom_size) {
+        cfg.roms.vrom = slurp("scud_vrom.bin", &n, 0);
+        if (cfg.roms.vrom) cfg.roms.vrom_size = n;
+    }
     cfg.roms.sndrom = slurp("scud_snd.bin", &n, 0);
     if (cfg.roms.sndrom) cfg.roms.sndrom_size = n;
     cfg.roms.samples = slurp("scud_samples.bin", &n, 0);
@@ -183,6 +212,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "model3recomp_init failed\n");
         return 1;
     }
+    if (getenv("M3_SINK_COUNT"))
+        real3d_set_sink(&k_count_sink);
     model3recomp_set_frame_hook(on_field);
     scud_register_lifted();
     model3recomp_run();

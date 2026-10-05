@@ -1,4 +1,5 @@
-/* SCUD.DAT reader. The pack holds every 32 KB page of both CROMs, the ones
+/* SCUD.DAT reader. The pack holds every 32 KB page of both CROMs and the
+ * VROM (version 2; version 1 had the CROMs only), the ones
  * the game touches first laid out first, in that order (tools/scud/pack.py).
  * A miss reads a window of consecutive pages from the file -- which, by
  * construction, are the pages the game is about to want -- so the disc is
@@ -26,36 +27,41 @@ static uint32_t le32(const uint8_t *b)
 int scudpack_open(scudpack_t *p, const char *path, unsigned ra_pages)
 {
     uint8_t h[0x40], *idx;
-    uint32_t i;
+    uint32_t i, ver;
 
     memset(p, 0, sizeof *p);
     p->pos = -1;
     if (!(p->f = fopen(path, "rb")) || fread(h, 1, sizeof h, p->f) != sizeof h ||
-        memcmp(h, "SCUDPACK", 8) || le32(h + 8) != 1) {
+        memcmp(h, "SCUDPACK", 8) || (ver = le32(h + 8)) < 1 || ver > 2) {
         fprintf(stderr, "%s: not a SCUD.DAT (tools/scud/pack.py)\n", path);
         return 0;
     }
     p->page = le32(h + 12);   p->count = le32(h + 16);
     p->prog_bytes = le32(h + 20); p->bank_bytes = le32(h + 24);
     p->first = le32(h + 28);  p->hot = le32(h + 32);
+    p->vrom_bytes = ver >= 2 ? le32(h + 36) : 0;
     p->pages[0] = (p->prog_bytes + p->page - 1) / p->page;
     p->pages[1] = (p->bank_bytes + p->page - 1) / p->page;
-    p->slot[0] = calloc(p->pages[0] + 1, sizeof(uint16_t));
-    p->slot[1] = calloc(p->pages[1] + 1, sizeof(uint16_t));
+    p->pages[2] = (p->vrom_bytes + p->page - 1) / p->page;
+    for (i = 0; i < 3; i++)
+        p->slot[i] = calloc(p->pages[i] + 1, sizeof(uint16_t));
     idx = malloc((size_t)p->count * 4u);
     p->ra_cap = ra_pages ? ra_pages : 1;
     p->ra = RA_ALLOC((size_t)p->ra_cap * p->page);
     /* No stdio buffer: fread then hands the aligned window to the file
      * system directly. */
     setvbuf(p->f, NULL, _IONBF, 0);
-    if (!p->slot[0] || !p->slot[1] || !idx || !p->ra ||
+    if (!p->slot[0] || !p->slot[1] || !p->slot[2] || !idx || !p->ra ||
         fread(idx, 4, p->count, p->f) != p->count) {
         fprintf(stderr, "%s: short or out of memory\n", path);
         free(idx);
         return 0;
     }
     for (i = 0; i < p->count; i++) {
-        uint32_t e = le32(idx + 4 * i), w = e >> 31, pg = e & 0x7FFFFFFFu;
+        uint32_t e = le32(idx + 4 * i);
+        uint32_t w = ver >= 2 ? e >> 30 : e >> 31;
+        uint32_t pg = e & (ver >= 2 ? 0x3FFFFFFFu : 0x7FFFFFFFu);
+        if (w > 2) continue;
         if (pg < p->pages[w]) p->slot[w][pg] = (uint16_t)i;
     }
     free(idx);
@@ -69,7 +75,7 @@ size_t scudpack_read(void *ctx, int which, uint32_t off, void *dst, size_t len)
     uint8_t *out = (uint8_t *)dst;
     size_t done = 0;
 
-    if (which < 0 || which > 1) return 0;
+    if (which < 0 || which > 2) return 0;
     while (done < len) {
         uint32_t pg = (off + done) / p->page, in = (off + done) % p->page;
         uint32_t s, n;

@@ -1,5 +1,18 @@
 # Status
 
+## 2026-10-05 (late morning) — DC-05
+
+- **First Real3D polygons on the PowerVR2.** The attract race's village
+  (bridge, houses, roofs, crash barriers) drawn by the PVR on the Dreamcast
+  (Flycast), flat-shaded, no textures yet. Same polygon count as the
+  desktop's counting sink (455 at field 1000), same frame signatures.
+- VROM is now streamed from SCUD.DAT v2 (DC-BUG-014); distance LOD and
+  culling after Supermodel cut VROM reads per field by ~4×.
+- Heap 11.1 MB at field 1400 (VROM cache 1.5 MB added); 53 VROM page
+  misses by field 1400.
+- Next: textures (a PVR texture cache fed from the FIFO and VROM loads),
+  then the tilemap layers on the PVR, then speed (~8 fields/s here).
+
 ## 2026-10-05 (night) — DC-03
 
 - **Scud Race runs on the Dreamcast** (Flycast), headless: 600 fields in

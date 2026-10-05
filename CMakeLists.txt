@@ -67,7 +67,7 @@ if(WIN32)
 endif()
 if(M3_DREAMCAST)
     target_compile_definitions(model3recomp PUBLIC M3_DREAMCAST=1
-        M3_RAM_BYTES=0x400000 M3_ROM_PAGES=64u)
+        M3_RAM_BYTES=0x400000 M3_ROM_PAGES=32u)
     # KOS keeps pthreads in an addon (the sound board and the banded
     # rasteriser use them).
     target_link_libraries(model3recomp PUBLIC pthread)
@@ -141,7 +141,7 @@ if(SCUD_LIFTED_DIR)
         message(FATAL_ERROR "SCUD_LIFTED_DIR has no scud*.c -- run tools/scud/lift.py")
     endif()
     if(M3_DREAMCAST)
-        set(SCUD_MAIN src/games/scud/main_dc.c)
+        set(SCUD_MAIN src/games/scud/main_dc.c src/renderer/pvr/pvr_r3d.c)
     else()
         set(SCUD_MAIN src/games/scud/main_host.c)
     endif()

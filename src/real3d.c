@@ -58,6 +58,8 @@
 #include <string.h>
 
 #define MAX_TRIS   40000u
+#define SINK_MAX_TRIS 6144u      /* 768 KB of tri_t; an attract viewport decodes ~4 750 */
+static unsigned g_max_tris = MAX_TRIS;
 #define MAX_DEPTH  24
 #define AMBIENT    g_ambient
 
@@ -149,25 +151,27 @@ static uint32_t rd32be(const uint8_t *p)
 
 /* A culling address is a word index, not a byte offset: viewport 0 links to
  * 0x800030 and the next viewport node begins exactly at word 0x30. */
-static const uint8_t *cull_at(uint32_t addr, unsigned words)
+static const uint8_t *cull_at(uint32_t addr, unsigned words, uint8_t *buf)
 {
-    size_t n = 0;
-    const uint8_t *m;
-    uint32_t base;
+    int region;
+    size_t base;
 
     addr &= 0x00FFFFFFu;
     if (addr >= 0x800000u && addr < 0x840000u) {
-        m = bus_cull_hi(&n);
-        base = (addr & 0x3FFFFu) * 4u;
+        region = 1;
+        base = (size_t)(addr & 0x3FFFFu) * 4u;
     } else if (addr < 0x100000u) {
-        m = bus_cull_lo(&n);
-        base = addr * 4u;
+        region = 0;
+        base = (size_t)addr * 4u;
     } else {
         return NULL;
     }
-    if (!m || (size_t)base + (size_t)words * 4u > n)
+    /* Copied rather than pointed at: on a Dreamcast these memories are
+     * paged and have no flat copy (bus_r3d_read). */
+    if (bus_r3d_read(region, base, buf, (size_t)words * 4u)
+        != (size_t)words * 4u)
         return NULL;
-    return m + base;
+    return buf;
 }
 
 static float f32_of(uint32_t w)
@@ -191,7 +195,8 @@ static const mat_t IDENT = {{{1,0,0,0},{0,1,0,0},{0,0,1,0}}};
 
 static int mat_load(uint32_t base, uint32_t off, mat_t *out)
 {
-    const uint8_t *p = cull_at(base + off * 12u, 12);
+    uint8_t pb_[12 * 4];
+    const uint8_t *p = cull_at(base + off * 12u, 12, pb_);
     float v[12];
     int i;
     if (!p) return 0;
@@ -390,14 +395,26 @@ void real3d_vrom_texture(uint32_t addr, uint32_t header, uint32_t ctrl)
     if (getenv("M3_VROMTEX_TRACE"))
         fprintf(stderr, "[vromtex] load addr %08X header %08X ctrl %08X\n",
                 a, h, bswap32_(ctrl));
-    if (!v) return;
+    if (!n || !g_sheet) return;
     /* The address counts 32-bit words, like a model pointer: consecutive
      * loads step by exactly one texture's size in words. The image is 32 MB
      * and the addresses reach past it, so it is mirrored -- the way bit 23
      * of a model address selects VROM and is then dropped. */
     off = ((size_t)a * 4u) % n;
     g_src_be = 1;                  /* VROM is big-endian; the FIFO is not */
-    upload_texture(h, v + off, n - off);
+    if (v) {
+        upload_texture(h, v + off, n - off);
+    } else {
+        /* VROM streamed (m3_roms_t.read): copy the base level out. */
+        size_t want = (size_t)(32u << ((h >> 14) & 7u))
+                    * (size_t)(32u << ((h >> 17) & 7u)) * 2u;
+        uint8_t *buf = malloc(want);
+        if (buf) {
+            size_t got = bus_r3d_read(3, off, buf, want);
+            upload_texture(h, buf, got);
+            free(buf);
+        }
+    }
     g_src_be = 0;
 }
 
@@ -572,7 +589,7 @@ static void emit(const float a[3], const float b[3], const float c[3],
                  const texdesc_t *td)
 {
     tri_t *t;
-    if (g_ntris >= MAX_TRIS) return;
+    if (g_ntris >= g_max_tris) return;
     t = &g_tris[g_ntris++];
     memcpy(t->v[0], a, sizeof t->v[0]);
     memcpy(t->v[1], b, sizeof t->v[1]);
@@ -609,24 +626,25 @@ static uint32_t g_ctab;     /* colour table, a word index into polygon RAM */
 
 static void draw_model(uint32_t addr, const mat_t *m)
 {
-    const uint8_t *mem;
-    size_t n = 0;
+    int region;
+    uint8_t pb[(7u + 16u) * 4u];        /* one polygon: header + 4 vertices */
     uint32_t (*rd)(const uint8_t *);
     size_t i;
     float prev[4][3], prevn[4][3], prevuv[4][2];
     unsigned nprev = 0;
     unsigned guard;
 
+    /* Read a polygon at a time through bus_r3d_read: on a Dreamcast
+     * polygon RAM is paged and VROM is streamed off the disc. */
     if (addr & 0x800000u) {
-        mem = bus_vrom(&n);
+        region = 3;
         rd = rd32be;                    /* VROM alone is read big-endian */
         i = (size_t)(addr & 0x7FFFFFu) * 4u;
     } else {
-        mem = bus_poly(&n);
+        region = 2;
         rd = rd32le;
         i = (size_t)addr * 4u;
     }
-    if (!mem) return;
 
     /* M3_MODEL_DUMP=<n>: the first n models drawn, with where they live,
      * how many polygons they have, the biggest raw coordinate in them and
@@ -650,8 +668,8 @@ static void draw_model(uint32_t addr, const mat_t *m)
             for (kk = 0; kk < 7; kk++) { hor[kk] = 0; han[kk] = 0xFFFFFFFFu; }
             for (g2 = 0; g2 < 20000u; g2++) {
                 uint32_t h2[7]; unsigned nv2, new2, q;
-                if (j2 + 28u > n) break;
-                for (kk = 0; kk < 7; kk++) h2[kk] = rd(mem + j2 + kk * 4);
+                if (bus_r3d_read(region, j2, pb, 28u) != 28u) break;
+                for (kk = 0; kk < 7; kk++) h2[kk] = rd(pb + kk * 4);
                 { float nn[3]; float l2;
                   for (kk = 0; kk < 3; kk++)
                       nn[kk] = (float)sx24(h2[kk + 1]) / 4194304.0f;
@@ -664,9 +682,9 @@ static void draw_model(uint32_t addr, const mat_t *m)
                 for (q = 0; q < new2; q++) {
                     size_t o2 = j2 + 28u + (size_t)q * 16u;
                     unsigned c2;
-                    if (o2 + 12u > n) break;
+                    if (bus_r3d_read(region, o2, pb, 12u) != 12u) break;
                     for (c2 = 0; c2 < 3; c2++) {
-                        long v2 = sx24(rd(mem + o2 + c2 * 4));
+                        long v2 = sx24(rd(pb + c2 * 4));
                         if (v2 < 0) v2 = -v2;
                         if (v2 > biggest) biggest = v2;
                     }
@@ -699,8 +717,8 @@ static void draw_model(uint32_t addr, const mat_t *m)
         uint32_t rgb;
         float len;
 
-        if (i + 7u * 4u > n) return;
-        for (k = 0; k < 7; k++) ph[k] = rd(mem + i + k * 4);
+        if (bus_r3d_read(region, i, pb, 28u) != 28u) return;
+        for (k = 0; k < 7; k++) ph[k] = rd(pb + k * 4);
 
         /* Header words 1..3 are the polygon normal, 24-bit fixed over 2^22.
          * A real header's normal is a unit vector; this is the check that
@@ -722,12 +740,13 @@ static void draw_model(uint32_t addr, const mat_t *m)
             }
         if (slot > nv) return;
         nnew = nv - slot;
-        if (i + (7u + 4u * nnew) * 4u > n) return;
+        if (nnew && bus_r3d_read(region, i + 28u, pb + 28u, nnew * 16u)
+                    != nnew * 16u)
+            return;
 
         for (k = 0; k < nnew && slot < 4; k++, slot++) {
-            size_t o = i + (7u + 4u * k) * 4u;
-            uint32_t wx = rd(mem + o), wy = rd(mem + o + 4),
-                     wz = rd(mem + o + 8);
+            const uint8_t *o = pb + (7u + 4u * k) * 4u;
+            uint32_t wx = rd(o), wy = rd(o + 4), wz = rd(o + 8);
             vs[slot][0] = (float)sx24(wx) / g_vertex_scale;
             vs[slot][1] = (float)sx24(wy) / g_vertex_scale;
             vs[slot][2] = (float)sx24(wz) / g_vertex_scale;
@@ -743,7 +762,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
                 /* Word 3 of a vertex is u in the high half and v in the low,
                  * in eighths of a texel -- or whole texels when bit 6 of
                  * header word 1 is set (Supermodel's UVScale). */
-                uint32_t wt = rd(mem + o + 12);
+                uint32_t wt = rd(o + 12);
                 float us = (ph[1] & 0x40u) ? 1.0f : 0.125f;
                 uv[slot][0] = (float)((wt >> 16) & 0xFFFFu) * us;
                 uv[slot][1] = (float)(wt & 0xFFFFu) * us;
@@ -755,10 +774,10 @@ static void draw_model(uint32_t addr, const mat_t *m)
         /* Bit 1 of word 1 clear: the colour is an index into a table in
          * polygon RAM that a culling node above set up. */
         if (!(ph[1] & 2u)) {
-            size_t pn = 0;
-            const uint8_t *pr = bus_poly(&pn);
+            uint8_t cb[4];
             size_t co = ((size_t)g_ctab + ((ph[4] >> 8) & 0xFFFu)) * 4u;
-            if (pr && co + 4u <= pn) rgb = rd32le(pr + co) & 0xFFFFFFu;
+            if (bus_r3d_read(2, co, cb, 4u) == 4u)
+                rgb = rd32le(cb) & 0xFFFFFFu;
         }
 
         /* The texture descriptor. Bit 26 of word 6 is the enable: it is set
@@ -848,6 +867,7 @@ static void descend(uint32_t addr, const mat_t *m, int depth);
 int m3_node_dump;
 uint64_t m3_node_from;
 static unsigned g_mat_loads, g_mat_max, g_mat_zero, g_mat_bigi;
+static unsigned g_lod_culled;      /* nodes not drawn: too small or out of view */
 static unsigned g_node_translate, g_node_matrix, g_node_neither;
 static float    g_mat_bigt;
 
@@ -871,7 +891,8 @@ static void follow(uint32_t p, const mat_t *m, int depth)
         unsigned k;
         if (depth >= MAX_DEPTH) return;
         for (k = 0; k < 256u; k++) {
-            const uint8_t *e = cull_at(a + k, 1);
+            uint8_t eb_[4];
+            const uint8_t *e = cull_at(a + k, 1, eb_);
             uint32_t v;
             if (!e) break;
             v = rd32le(e);
@@ -889,6 +910,31 @@ static void follow(uint32_t p, const mat_t *m, int depth)
     }
 }
 
+/* Level of detail and culling, after Supermodel's New3D. Each viewport
+ * names a table in culling RAM (word 0x17) of 128 entries, four levels
+ * each, a (delete size, blend factor) pair of floats per level. A node
+ * names its entry (word 3 bits 12..18) and its blend and cull radii (word
+ * 9, two 16-bit Real3D floats) scaled by the inherited model scale (word
+ * 1). The node's "size" is blend radius over distance from the eye: below
+ * level 3's delete size it is not drawn at all; otherwise the first of
+ * levels 0..2 whose delete size it reaches, and which exists, is the one
+ * drawn. Taking the most detailed level always, as this did, read every
+ * model at full detail -- a megabyte and a half of VROM a field. Blending
+ * between levels is not done. M3_LOD_FINEST=1 brings that back. */
+static uint32_t g_lodtab;            /* culling address, 0 = none */
+static float g_mscale = 1.0f;
+static int g_nocull;
+static float g_fr_sh, g_fr_ch, g_fr_sv, g_fr_cv;   /* frustum half angles */
+static int g_lod_finest = -1;
+
+static float r3d_float16(uint32_t v)
+{
+    uint32_t a = (v & 0xFFFFu) << 15;
+    uint32_t e = (a & 0x7E000000u) >> 25;
+    e += e <= 31u ? 127u : 127u - 64u;
+    return f32_of((a & 0x80000000u) | (e << 23) | ((a & 0x1FFFFFFu) >> 2));
+}
+
 /* One culling node and then its siblings. Siblings share the parent's
  * transform, not this node's, and are always culling nodes -- bit 24 on the
  * sibling pointer means there is none. They are walked in a loop: a level of
@@ -900,11 +946,16 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
 
     if (depth >= MAX_DEPTH) return;
     for (chain = 0; addr && chain < 4096u; chain++) {
-        const uint8_t *node = cull_at(addr, 10);
+        uint8_t nb_[10 * 4];
+        const uint8_t *node = cull_at(addr, 10, nb_);
         mat_t cur, mm;
         uint32_t mo, w0, child, sib;
         unsigned sx_ = g_texoff_x, sy_ = g_texoff_y, sp_ = g_texoff_page;
+        float ms_ = g_mscale;
+        int nc_ = g_nocull;
         float tx, ty, tz;
+        float lodscale = 1e30f, del[4] = { 0, 0, 0, 0 };
+        int have_lod = 0, visible = 1;
 
         if (!node) return;
         cur = *m;
@@ -918,6 +969,11 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
                     | ((rd32le(node + 8 * 4) >> 25) << 17)) & 0xFFFFFu;
         if ((w0 & 7u) == 6u) sib = 0;      /* colour-table node: no siblings */
 
+        {
+            uint32_t w1 = rd32le(node + 1 * 4);
+            if (w1 & 1u) g_mscale = f32_of(w1 & ~3u);
+            if (w1 & 2u) g_nocull = 1;
+        }
         {
             uint32_t w2 = rd32le(node + 2 * 4);
             if (w2 & 0x8000u) {
@@ -976,18 +1032,57 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
         cur = mat_mul(m, &mm);
     }
 
+        if (g_lod_finest < 0) g_lod_finest = getenv("M3_LOD_FINEST") != NULL;
+        if (g_lodtab && !g_lod_finest) {
+            uint8_t tb_[8 * 4];
+            unsigned sel = (rd32le(node + 3 * 4) >> 12) & 0x7Fu;
+            const uint8_t *t = cull_at(g_lodtab + sel * 8u, 8, tb_);
+            if (t) {
+                uint32_t w9 = rd32le(node + 9 * 4);
+                float cr = r3d_float16(w9) * g_mscale;
+                float br = r3d_float16(w9 >> 16) * g_mscale;
+                float x = cur.m[0][3], y = cur.m[1][3], z = cur.m[2][3];
+                float d = sqrtf(x * x + y * y + z * z);
+                unsigned k;
+                for (k = 0; k < 4u; k++) del[k] = f32_of(rd32le(t + k * 8));
+                have_lod = 1;
+                if (!g_nocull) {
+                    lodscale = d > 0.0f ? br / d : 1e30f;
+                    if (!(lodscale >= 0.0f)) lodscale = 0.0f;
+                    /* Outside the view volume by more than the cull
+                     * radius: behind the eye, or past a side plane. View
+                     * space has z forward. */
+                    if (z < -cr
+                        || x * g_fr_ch - z * g_fr_sh > cr
+                        || -x * g_fr_ch - z * g_fr_sh > cr
+                        || y * g_fr_cv - z * g_fr_sv > cr
+                        || -y * g_fr_cv - z * g_fr_sv > cr
+                        || lodscale < del[3])
+                        visible = 0;
+                }
+            }
+        }
+        if (!visible) g_lod_culled++;
+
         child = rd32le(node + 7 * 4) & 0x07FFFFFFu;
-        if (w0 & 0x08u) {
-            /* A four-entry LOD table: take the most detailed level that
-             * exists. Supermodel picks by distance; the nearest level is
-             * what a 496-pixel screen wants almost always. */
-            const uint8_t *lod = cull_at(child & 0x00FFFFFFu, 4);
+        if (!visible) {
+            /* not drawn; its siblings still are */
+        } else if (w0 & 0x08u) {
+            /* A four-entry LOD table: the first level whose delete size
+             * the node reaches and which exists (bit 24), else level 3.
+             * Without a blend table, the most detailed level that exists. */
+            uint8_t lb_[4 * 4];
+            const uint8_t *lod = cull_at(child & 0x00FFFFFFu, 4, lb_);
             if (lod) {
                 unsigned k;
                 uint32_t e = 0;
                 for (k = 0; k < 4u; k++) {
                     e = rd32le(lod + k * 4);
-                    if (e & 0x01000000u) break;
+                    if (k == 3u) break;
+                    if (have_lod && !g_nocull
+                        ? (lodscale >= del[k] && (e & 0x01000000u))
+                        : (e & 0x01000000u) != 0)
+                        break;
                 }
                 if (rd32le(node + 3 * 4) & 0x20000000u)
                     descend(e & 0x00FFFFFFu, &cur, depth + 1);
@@ -999,6 +1094,7 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
         }
 
         g_texoff_x = sx_; g_texoff_y = sy_; g_texoff_page = sp_;
+        g_mscale = ms_; g_nocull = nc_;
         /* 0x800800 is the dummy node, and an unused node is all dummy
          * words, so its sibling is itself: stop rather than spin. */
         sib = (sib & 0x01000000u) ? 0 : (sib & 0x00FFFFFFu);
@@ -1451,6 +1547,60 @@ static void pool_start(void)
     }
 }
 
+/* ---- the hardware path (real3d_set_sink) ------------------------------- */
+static const m3_r3d_sink *g_sink;
+void real3d_set_sink(const m3_r3d_sink *sink) { g_sink = sink; }
+
+/* The same culling, near-plane cut, projection and flat shade as raster(),
+ * handed to the sink polygon by polygon instead of rasterised. */
+static void sink_submit(const float L[3], float intensity)
+{
+    unsigned t;
+    for (t = 0; t < 2u * g_ntris; t++) {
+        const tri_t *tr = &g_tris[t % g_ntris];
+        float clipped[4][5], src[3][5], lit, sh;
+        m3_r3d_vertex out[4];
+        int nclip, k, r, g, b;
+        if ((tr->alpha < 255) != (t >= g_ntris)) continue;
+        {
+            float cx = (tr->v[0][0] + tr->v[1][0] + tr->v[2][0]) / 3.0f;
+            float cy = (tr->v[0][1] + tr->v[1][1] + tr->v[2][1]) / 3.0f;
+            float cz = (tr->v[0][2] + tr->v[1][2] + tr->v[2][2]) / 3.0f;
+            if (!tr->two_sided && tr->n[0]*cx + tr->n[1]*cy + tr->n[2]*cz > 0.0f)
+                continue;
+        }
+        for (k = 0; k < 3; k++) {
+            src[k][0] = tr->v[k][0]; src[k][1] = tr->v[k][1];
+            src[k][2] = tr->v[k][2];
+            src[k][3] = tr->uv[k][0]; src[k][4] = tr->uv[k][1];
+        }
+        nclip = clip_near(src, clipped);
+        if (nclip < 3) continue;
+        for (k = 0; k < nclip; k++) {
+            double iz = 1.0 / clipped[k][2];
+            out[k].x = (float)(g_proj.ax * (double)clipped[k][0] * iz + g_proj.bx);
+            out[k].y = (float)(g_proj.ay * (double)clipped[k][1] * iz + g_proj.by);
+            out[k].w = (float)iz;
+            out[k].u = clipped[k][3];
+            out[k].v = clipped[k][4];
+        }
+        lit = tr->n[0]*L[0] + tr->n[1]*L[1] + tr->n[2]*L[2];
+        if (lit < 0) lit = 0;
+        if (lit > 1.0f) lit = 1.0f;
+        sh = tr->luminous ? intensity
+                          : (AMBIENT + (1.0f - AMBIENT) * lit) * intensity;
+        r = (int)(tr->r * sh); g = (int)(tr->g * sh); b = (int)(tr->b * sh);
+        if (r > 255) r = 255;
+        if (g > 255) g = 255;
+        if (b > 255) b = 255;
+        g_drawn++;
+        g_sink->polygon(out, nclip,
+                        ((uint32_t)tr->alpha << 24) | ((uint32_t)r << 16) |
+                        ((uint32_t)g << 8) | (uint32_t)b,
+                        tr->alpha < 255);
+    }
+}
+
 static void raster_bands(uint32_t *fb, int fw, int fh, float sx, float sy,
                          const float L[3], float intensity)
 {
@@ -1487,12 +1637,16 @@ static void raster_bands(uint32_t *fb, int fw, int fh, float sx, float sy,
 void real3d_render(void)
 {
     int fw = 0, fh = 0;
-    uint32_t *fb = platform_framebuffer(&fw, &fh);
+    /* A sink, when installed, takes the scene instead of the software
+     * rasteriser -- on any host, so the hardware path can be checked on a
+     * desktop too. */
+    uint32_t *fb = g_sink ? NULL : platform_framebuffer(&fw, &fh);
     uint32_t vpaddr;
     unsigned guard, total = 0, prio;
     static int inited;
 
-    if (!fb) return;
+    if (!fb && !g_sink) return;
+    if (!fb) { fw = 496; fh = 384; }     /* the board's screen, for g_proj */
 
     if (!inited) {
         const char *e = getenv("M3_VERTEX_SCALE");
@@ -1505,9 +1659,12 @@ void real3d_render(void)
         g_old_proj = getenv("M3_OLD_PROJ") != NULL;
         e = getenv("M3_AMBIENT");
         if (e) { g_ambient = (float)atof(e); g_ambient_forced = 1; }
-        g_tris = (tri_t *)malloc(sizeof(tri_t) * MAX_TRIS);
-        if (!g_sheet) g_sheet = (uint16_t *)calloc(TEX_W * TEX_H, sizeof(uint16_t));
-        if (!g_sheet_set) g_sheet_set = (uint8_t *)calloc(TEX_W * TEX_H, 1);
+        /* A sink gets a smaller queue (one viewport at a time is all it
+         * holds) and no texture sheet: 12 MB a Dreamcast does not have. */
+        g_max_tris = fb ? MAX_TRIS : SINK_MAX_TRIS;
+        g_tris = (tri_t *)malloc(sizeof(tri_t) * g_max_tris);
+        if (fb && !g_sheet) g_sheet = (uint16_t *)calloc(TEX_W * TEX_H, sizeof(uint16_t));
+        if (fb && !g_sheet_set) g_sheet_set = (uint8_t *)calloc(TEX_W * TEX_H, 1);
         inited = 1;
     }
     if (!g_tris) return;
@@ -1517,13 +1674,15 @@ void real3d_render(void)
     /* No clear: the tilemap layers the guest put behind the 3D have
      * already been drawn into this buffer. */
 
-    if (g_zw != fw || g_zh != fh) {
+    if (!fb) {
+        g_sink->begin_frame();
+    } else if (g_zw != fw || g_zh != fh) {
         free(g_zbuf);
         g_zbuf = (float *)malloc(sizeof(float) * (size_t)fw * (size_t)fh);
         g_zw = fw; g_zh = fh;
     }
-    if (!g_zbuf) return;
-    {
+    if (fb && !g_zbuf) return;
+    if (fb) {
         int i, nn = fw * fh;
         for (i = 0; i < nn; i++) g_zbuf[i] = 1e30f;
     }
@@ -1556,7 +1715,8 @@ void real3d_render(void)
     for (prio = 0; prio < 4u; prio++) {
     vpaddr = 0x800000u;
     for (guard = 0; guard < 16u && vpaddr; guard++) {
-        const uint8_t *vp = cull_at(vpaddr, 0x20);
+        uint8_t vb_[0x30 * 4];
+        const uint8_t *vp = cull_at(vpaddr, 0x30, vb_);
         mat_t cam;
         float hf, vf, sx, sy, light[3], intensity;
         uint32_t next;
@@ -1569,6 +1729,9 @@ void real3d_render(void)
             continue;
         }
         g_matbase = rd32le(vp + 0x16 * 4) & 0x00FFFFFFu;
+        g_lodtab = rd32le(vp + 0x17 * 4) & 0x00FFFFFFu;
+        g_mscale = 1.0f;
+        g_nocull = 0;
 
         /* Words 0x0C and 0x0E are the sines of the horizontal and vertical
          * half angles. For this game they are 19.38 and 15 degrees, whose
@@ -1582,6 +1745,8 @@ void real3d_render(void)
         if (vf > 1.0f) vf = 1.0f;
         hf = asinf(hf); vf = asinf(vf);
         if (hf < 1e-3f || vf < 1e-3f) { hf = 0.338f; vf = 0.262f; }
+        g_fr_sh = sinf(hf); g_fr_ch = cosf(hf);
+        g_fr_sv = sinf(vf); g_fr_cv = cosf(vf);
         sx = (fw * 0.5f) / tanf(hf);
         sy = (fh * 0.5f) / tanf(vf);
         g_proj.ax = sx; g_proj.bx = fw * 0.5;
@@ -1650,7 +1815,7 @@ void real3d_render(void)
          * one scene: sharing a buffer lets whichever viewport is walked
          * first decide the depth of the whole screen, and the first one
          * here holds a flat quad that covers it. */
-        {
+        if (fb) {
             int i, nn = fw * fh;
             for (i = 0; i < nn; i++) g_zbuf[i] = 1e30f;
         }
@@ -1705,7 +1870,8 @@ void real3d_render(void)
                   if (e) { int px = atoi(e), py = 0; const char *c = strchr(e, ',');
                            if (c) py = atoi(c + 1);
                            g_pick = (long)py * fw + px; } }
-                raster_bands(fb, fw, fh, sx, sy, light, intensity);
+                if (fb) raster_bands(fb, fw, fh, sx, sy, light, intensity);
+                else    sink_submit(light, intensity);
                 if (g_pick_tri >= 0) {
                     const tri_t *p = &g_tris[g_pick_tri];
                     fprintf(stderr, "[pick] vp%u tri %ld tex %d at %u,%u page %u"
@@ -1788,7 +1954,8 @@ void real3d_render(void)
     }
     /* And a fingerprint of what came out, so a scene that changes while the
      * picture does not shows up as exactly that. */
-    if (getenv("M3_REAL3D_STATS")) {
+    if (!fb) g_sink->end_frame();
+    if (fb && getenv("M3_REAL3D_STATS")) {
         uint32_t h = 2166136261u;
         int k, nn = fw * fh;
         for (k = 0; k < nn; k += 7)
