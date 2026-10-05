@@ -1,5 +1,20 @@
 # Status
 
+## 2026-10-05 (night) — DC-03
+
+- **Scud Race runs on the Dreamcast** (Flycast), headless: 600 fields in
+  96 s, heap 7.6 MB, Real3D RAM paged in 1 088 KB, 161 CROM pages read off
+  the disc, exit clean.
+- **The SH-4 runs it bit for bit like the desktop**: frame signatures (hash
+  of the first 4 MB of guest RAM + Real3D trigger count) at fields 100,
+  200, 300, 400 and 500 are identical to the desktop build's.
+- Speed (Flycast, not hardware): ~16 fields/s during boot, ~2.4 fields/s
+  once the 3D scene is built (fields 500–600). Not a measurement of the
+  console — Flycast does not model cycle costs (see the Flycast notes) —
+  but the order of magnitude says the guest must get much cheaper.
+- Next: the PVR back end fed from the Real3D decode; a profile of where an
+  SH-4 field goes (bus accesses are the first suspect).
+
 ## 2026-10-05 (evening)
 
 - **Scud Race's attract race draws in 3D on the desktop**, textured: the

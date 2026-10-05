@@ -65,7 +65,7 @@ static void on_field(void)
     scud_operator_settings();
     if (f % 100 == 0)
         report("progress");
-    if (f >= SCUD_DC_FIELDS) {
+    if (f > SCUD_DC_FIELDS) {          /* after field N's signature */
         report("end");
         printf("SCUD DC DONE\n");
         fflush(stdout);

@@ -74,3 +74,19 @@ cmake -S . -B build-scud -DSCUD_LIFTED_DIR=$PWD/lifted -DMODEL3RECOMP_LOOP_GUARD
 cmake --build build-scud -j
 SDL_VIDEODRIVER=dummy M3_DROPPED=1 build-scud/scudrace 600 --roms roms
 ```
+
+## On the Dreamcast (DC-03)
+
+```
+python tools/scud/lift.py roms/ lifted/ --entries src/games/scud/entries.txt
+cmake -S . -B build-scud-dc -DCMAKE_TOOLCHAIN_FILE=$KOS_BASE/utils/cmake/kallistios.toolchain.cmake \
+      -DCMAKE_BUILD_TYPE=Release -DSCUD_LIFTED_DIR=$PWD/lifted
+cmake --build build-scud-dc -j
+mkdir discroot && ln -s $PWD/roms/scud_prog.bin $PWD/roms/scud_bank.bin discroot/
+tools/dreamcast/make-cdi.sh build-scud-dc/scudrace.elf scud_dc.cdi discroot "SCUD RACE DC"
+tools/dreamcast/dc-run.sh scud_dc.cdi 1500 "SCUD DC DONE"
+```
+
+Compare the `[sig]` lines with a desktop run of the same lift:
+`M3_NO_SOUND=1 M3_SIG_EVERY=100 scudrace 600 --roms roms`. They matched for
+fields 100..500 on the first run.
