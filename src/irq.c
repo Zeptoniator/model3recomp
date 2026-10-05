@@ -102,7 +102,13 @@ static void dec_dispatch(void)
     m3_ctx.msr &= ~MSR_EE;
 
     g_in_dispatch = 1;
-    func_table_call(vec_base + 0x900u);
+    {
+        /* The interrupted code may be between a return and its check. */
+        uint32_t ret_to = m3_ret_to;
+        m3_ret_to = 0;
+        func_table_call(vec_base + 0x900u);
+        m3_ret_to = ret_to;
+    }
     g_in_dispatch = 0;
 
     m3_ctx.msr = saved_msr;
@@ -206,11 +212,18 @@ int irq_dispatch(void)
     m3_ctx.msr &= ~MSR_EE;             /* EE off for the duration */
 
     g_in_dispatch = 1;
-    if (!func_table_call(vec_base + 0x500))
-        fprintf(stderr, "[model3recomp] no handler lifted at %08X "
-                        "(external interrupt)\n", vec_base + 0x500);
-    else
-        ran++;
+    {
+        /* The interrupted code may be between a return and its check
+         * (M3_RETURNED in lift.h); the handler must not answer for it. */
+        uint32_t ret_to = m3_ret_to;
+        m3_ret_to = 0;
+        if (!func_table_call(vec_base + 0x500))
+            fprintf(stderr, "[model3recomp] no handler lifted at %08X "
+                            "(external interrupt)\n", vec_base + 0x500);
+        else
+            ran++;
+        m3_ret_to = ret_to;
+    }
     g_in_dispatch = 0;
 
     m3_ctx.msr = saved_msr;            /* the guest's rfi became a return */

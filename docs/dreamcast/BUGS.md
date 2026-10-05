@@ -62,15 +62,45 @@
   programs are wrapped by `tools/dreamcast/make-cdi.sh`. Calibrated against
   the same CDI under a known-good harness before trusting it.
 
-## DC-BUG-007 — Scud Race's byte-stream routine runs off its buffers (open)
+## DC-BUG-007 — Scud Race's text printer runs off its string (fixed)
 
 - **Symptom**: after ~60 fields, writes past tilegen VRAM (`0xF1120000..`)
   and reads at wild addresses (`0x060B16F0`, `0x0BE97E50`); "20000000
   device accesses with no field advance".
-- **First bad stage**: unknown — the routine at `0x4170` is the first
-  visible victim.
-- **Next step**: differential device trace, interpreter vs runtime
-  (docs/scud/BRINGUP.md).
+- **First bad stage**: lifted `0x4130`, a text printer. Oracle: the
+  interpreter, run past the RAM hand-off for 136 fields, calls it six times
+  and it returns every time; the runtime's first call never returns.
+- **Root cause**: `0x4130` calls a local routine with `bl 0x41C0`; that
+  routine leaves through a jump table, and the arm (`0x41F8`) runs the outer
+  function's epilogue and `blr`s to the outer caller. A lifted `blr` was a C
+  `return`, which landed after the `bl` instead, inside the printer's loop.
+- **Fix**: every lifted return publishes its target (`M3_RETURN`), every
+  call site checks it is the one being returned to (`M3_RETURNED`) and
+  otherwise keeps returning; an orphaned target is resumed from
+  `model3recomp_run()`. Interrupt dispatch saves and restores the pending
+  target. One compare per call.
+- **Regression test**: `guest_smoke` (desktop and SH-4) still passes with a
+  `bl`; Scud's 1500-field run reaches the settings screen.
+
+## DC-BUG-009 — `mtlr`/`blr` jumps through computed LR were dropped
+
+- **Symptom**: found by DC-BUG-007's fix — "guest returned to 00001A3C,
+  which no host frame was waiting for".
+- **Root cause**: the lifter only read `mtlr rX ; blr` as a jump when rX was
+  built purely from immediates. Scud's PCI configuration helpers build LR as
+  `0x1A24 + 12*size` and `blr` into a table of three-instruction stubs
+  (`mtlr r0 ; stbx/sthbrx/stwbrx ; blr`), and its printers load LR from a
+  jump table (`lwzx r3,r3,r4 ; mtlr r3 ; blr`). As returns, **the stubs never
+  ran**: every PCI config access of size 1, 2 or 4 was silently skipped,
+  and every table dispatch fell through. That is why the guest's stack
+  pointer read `0x40` at the first decrementer interrupt in every earlier
+  run, and `0x001EFFC0` after.
+- **Fix**: the lifter tracks a provenance per GPR (immediate-derived,
+  loaded through an immediate-derived address, loaded from elsewhere, mflr).
+  LR from the first two is a jump; the jump-table scanner also follows
+  `mtlr`. 17 sites in Scud's lift, all reviewed by hand: table dispatches,
+  the two stub tables, and the boot hand-off. The stubs are in
+  `src/games/scud/entries.txt`.
 
 ## DC-BUG-008 — with no framebuffer, VROM texture loads vanish (open)
 

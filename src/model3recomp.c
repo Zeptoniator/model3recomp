@@ -200,6 +200,19 @@ void model3recomp_run(void)
                         "lifted -- nothing to run\n");
         return;
     }
+    /* A guest return that no C frame owned unwound all the way out (see
+     * M3_RETURNED in lift.h): its target is where the guest goes next, with
+     * whatever is on the guest's own stack. Carry on from there. */
+    while (m3_ret_to && g_running) {
+        static unsigned reported;
+        uint32_t t = m3_ret_to;
+        m3_ret_to = 0;
+        if (reported++ < 8)
+            fprintf(stderr, "[model3recomp] guest returned to %08X, which no "
+                            "host frame was waiting for; continuing there\n", t);
+        if (!func_table_call(t))
+            break;
+    }
     /* Reached only if the guest's init returns, which a running game never
      * does. Keep presenting so the host does not appear hung. */
     while (g_running)

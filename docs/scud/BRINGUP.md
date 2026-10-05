@@ -9,7 +9,7 @@
 | SCUD-PC-05 RAM image generated | done | `scud_ram.bin`; RAM `0x0..0xEFFFF` = program ROM `0x110000..` |
 | SCUD-PC-06 lift generated | done | 2 011 functions, 114 517 instructions, 0.06 % untranslated |
 | SCUD-PC-07 generated C compiles | done | `scudrace` links (host, GCC 15) |
-| SCUD-PC-08 hardware init progresses | **in progress** | VBlank handler and the game's field routine run ~500 fields; see "Where it stops" |
+| SCUD-PC-08 hardware init progresses | **reached** | the game draws its boot settings screen (run log 4) |
 | SCUD-PC-09 attract mode reached | not yet | |
 
 ## Run log
@@ -27,7 +27,12 @@
    `0x432C`: a hand-written routine at `0x4170` calls `bl 0x41C0`, which
    computes a target and leaves through `mtctr ; bctr`. Added to
    `entries.txt`.
-4. **Where it stops now.** The byte-stream routine at `0x4170` (`lbzu`
+4. **Fixed: the printer's non-local return** (DC-BUG-007) and **the computed
+   `blr` jumps** (DC-BUG-009). With both, the 1500-field run draws Scud
+   Race's own boot settings screen (LINK ID, CABINET TWIN, COUNTRY JAPAN,
+   GAME MODE NORMAL (SPRINT), MOTOR POWER 80%, COIN/CREDIT #1) through the
+   tilemap — the first picture of the game from recompiled code.
+5. **Was: where it stopped.** The byte-stream routine at `0x4170` (`lbzu`
    in, `stwbrx` out through `r11`) runs off its buffers: writes past the
    tilegen VRAM (`0xF1120000..`), reads at `0x060B16F0`, `0x0BE97E50`,
    twenty million device accesses with no field advancing. The routine is

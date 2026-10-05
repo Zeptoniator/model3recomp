@@ -205,6 +205,31 @@ extern uint32_t m3_loop_n;
 void m3_loop_tick(void);
 #define M3_LOOPED(a)                                                       do {                                                                       M3_LOOP_NOTE(a); M3_SAFEPOINT(a);                                                       if (!(++m3_loop_n & (M3_LOOP_PERIOD - 1u))) m3_loop_tick();        } while (0)
 
+/* Returns that do not go back to the caller.
+ *
+ * Lifted code mirrors the guest's calls with C calls, so a `blr` is a C
+ * `return` -- correct whenever LR holds the address after the `bl` that
+ * made this call, which is nearly always. Scud Race's text printer at
+ * 0x4130 is the exception that proves it is not always: it calls a local
+ * routine with `bl 0x41C0`, that routine leaves through a jump table, and
+ * the arm it lands in runs the *outer* function's epilogue and returns to
+ * the outer caller. As a C return that landed back after the `bl`, the
+ * printer carried on past the end of its string, and wrote across the
+ * tilemap and then the address space.
+ *
+ * So a return publishes where it is going (M3_RETURN), and every call site
+ * checks that it was meant for it (M3_RETURNED). A mismatch keeps
+ * returning until a frame whose own return address it is; a target no
+ * frame owns reaches model3recomp_run(), which carries on from there. A
+ * zero target -- an rfi, or a function that ran off its end -- means
+ * "nothing to check". One compare per call. */
+#define M3_RETURN()   do { m3_ret_to = PPC_LR; return; } while (0)
+#define M3_RETURNED(r)                                                     \
+    do {                                                                   \
+        if (m3_ret_to != (uint32_t)(r) && m3_ret_to) return;               \
+        m3_ret_to = 0;                                                     \
+    } while (0)
+
 /* An instruction the lifter does not translate. Greppable and countable --
  * never a silent wrong answer. See tools/ppc_lifter.py --stats. */
 void m3_unimplemented(uint32_t addr, uint32_t raw, const char *mn);

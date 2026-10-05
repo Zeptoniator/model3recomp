@@ -938,7 +938,9 @@ def discover(image, base, seeds, scan_pointers=False, scan_consts=True,
                         entries.add(tbl + w)
             elif i.mn == "lwzx" and (i.ra in base_of or i.rb in base_of):
                 tbl_reg[i.rd] = base_of.get(i.ra, base_of.get(i.rb))
-            elif i.mn == "mtspr" and i.spr == 9 and i.rd in tbl_reg:
+            elif i.mn == "mtspr" and i.spr in (8, 9) and i.rd in tbl_reg:
+                # mtctr+bctr, or mtlr+blr: Scud Race dispatches the same way
+                # through LR (0x40BC: lwzx r3,r3,r4 ; mtlr r3 ; blr).
                 tbl = tbl_reg.pop(i.rd)
                 if tbl is None or not (lo <= tbl < hi_):
                     continue
@@ -1043,41 +1045,100 @@ def emit_function(em, fn, prefix, entries):
     #
     # and as `return;` that is the same silent no-op. Same rule: SRR0 built
     # from an immediate means a jump.
-    imm_regs = set()
+    #
+    # Both rules are about where the value came from, so the walk tracks a
+    # provenance per GPR: "imm" (built from immediates and arithmetic on
+    # them -- lis/addi, then add, mulli, ...), "mem" (loaded), "lr" (mflr),
+    # or unknown. LR moved from a loaded or mflr'd register is the caller's,
+    # and `blr` returns. LR moved from an "imm" register is a jump. Scud
+    # Race's 0x19EC builds LR as 0x1A24 + 12*r8 and `blr`s into a table of
+    # three-instruction store stubs; read as a return, the stub never ran
+    # and its store was lost without a word.
+    prov = {}
     lr_from_imm = False
     srr0_from_imm = False
+    LOGICAL = ("and", "or", "xor", "nand", "nor", "eqv", "andc", "orc",
+               "rlwinm", "rlwimi", "rlwnm", "slw", "srw", "sraw", "srawi",
+               "extsb", "extsh", "cntlzw", "andi.", "andis.", "ori", "oris",
+               "xori", "xoris")
+    ARITH = ("addi", "addis", "add", "addc", "adde", "addze", "addic",
+             "addic.", "subf", "subfc", "subfe", "subfic", "neg", "mulli",
+             "mullw")
+    NO_GPR_DEST = ("stw", "stb", "sth", "stwu", "stbu", "sthu", "stwx",
+                   "stbx", "sthx", "stwux", "stbux", "sthux", "stwbrx",
+                   "sthbrx", "stmw", "stfs", "stfd", "stfsu", "stfdu",
+                   "stfsx", "stfdx", "stfiwx", "cmp", "cmpi", "cmpl",
+                   "cmpli", "fcmpu", "fcmpo", "sync", "isync", "eieio",
+                   "b", "bc", "bclr", "bcctr", "mtspr", "mtcrf", "mtmsr",
+                   "mtsr", "mtsrin", "dcbz", "dcbf", "dcbst", "dcbi",
+                   "dcbt", "dcbtst", "icbi", "rfi", "sc", "tw", "twi")
 
     for addr, i in fn.insns:
         if addr in fn.labels:
             out.append("L_%08X: ;" % addr)
-            imm_regs.clear()          # unknown path in: assume nothing
+            prov.clear()              # unknown path in: assume nothing
             lr_from_imm = False
             srr0_from_imm = False
         ret = "0x%08Xu" % (addr + 4)
 
-        # Track which GPRs currently hold an immediate-derived value.
-        if i.mn == "addis" and i.ra == 0:
-            imm_regs.add(i.rd)
-        elif i.mn == "addi" and i.ra == 0:
-            imm_regs.add(i.rd)
-        elif i.mn in ("addi", "ori", "oris") and i.ra in imm_regs and i.rd == i.ra:
-            pass                       # still immediate-derived
-        elif i.mn == "mtspr" and i.spr == 8:
-            lr_from_imm = i.rd in imm_regs
-        elif i.mn == "mtspr" and i.spr == 26:
-            srr0_from_imm = i.rd in imm_regs
+        mn = i.mn
+        if mn == "mtspr" and i.spr == 8:
+            lr_from_imm = prov.get(i.rd) == "imm"
+        elif mn == "mtspr" and i.spr == 26:
+            srr0_from_imm = prov.get(i.rd) == "imm"
         elif D.is_call(i):
-            imm_regs.clear()           # a call clobbers LR and the volatiles
+            prov.clear()              # a call clobbers LR and the volatiles
             lr_from_imm = False
             srr0_from_imm = False
-        elif i.mn is not None and i.mn not in ("stw", "stb", "sth", "stwu",
-                                               "cmp", "cmpi", "cmpl", "cmpli",
-                                               "sync", "isync", "eieio"):
-            imm_regs.discard(i.rd)     # conservatively: rD is no longer known
-            if i.mn in ("and", "or", "xor", "nand", "nor", "eqv", "andc",
-                        "orc", "rlwinm", "rlwimi", "rlwnm", "slw", "srw",
-                        "sraw", "srawi", "extsb", "extsh", "cntlzw"):
-                imm_regs.discard(i.ra)
+        elif mn is not None and mn not in NO_GPR_DEST and not mn.startswith("f"):
+            if mn in LOGICAL:
+                dest = i.ra
+                srcs = [i.rd] + ([i.rb] if mn in ("and", "or", "xor", "nand",
+                                                  "nor", "eqv", "andc", "orc",
+                                                  "rlwnm", "slw", "srw",
+                                                  "sraw") else [])
+                if mn == "or" and i.rd == i.rb:          # mr
+                    p_ = prov.get(i.rd)
+                elif all(prov.get(r) == "imm" for r in srcs):
+                    p_ = "imm"
+                else:
+                    p_ = None
+            elif mn in ARITH:
+                dest = i.rd
+                if mn in ("addi", "addis") and i.ra == 0:
+                    p_ = "imm"
+                else:
+                    srcs = [i.ra] + ([i.rb] if mn in ("add", "addc", "adde",
+                                                      "subf", "subfc", "subfe",
+                                                      "mullw") else [])
+                    # A base built from immediates plus anything is an
+                    # address computed from that base (0x1A24 + 12*r8).
+                    p_ = "imm" if any(prov.get(r) == "imm" for r in srcs) else None
+            elif mn.startswith(("lwz", "lhz", "lha", "lbz", "lmw", "lwbrx",
+                                "lhbrx", "lwarx")):
+                dest = i.rd
+                # Loaded through an address built from immediates is a
+                # table lookup (a jump table's target); anything else -- the
+                # stack, a frame pointer -- is a saved value, LR included.
+                addr_regs = [i.ra] + ([i.rb] if mn.endswith("x") else [])
+                p_ = ("imm" if any(prov.get(r) == "imm" for r in addr_regs if r)
+                      else "mem")
+                if mn.endswith("u") or mn.endswith("ux"):
+                    prov.pop(i.ra, None)
+            elif mn == "mfspr" and i.spr == 8:
+                dest, p_ = i.rd, "lr"
+            else:
+                dest, p_ = i.rd, None
+            if mn == "lmw":
+                for r in range(i.rd, 32):
+                    prov[r] = "mem"
+            elif p_ is None:
+                prov.pop(dest, None)
+            else:
+                prov[dest] = p_
+        if mn in ("stwu", "stbu", "sthu", "stwux", "stbux", "sthux",
+                  "stfsu", "stfdu"):
+            prov.pop(i.ra, None)
 
         if i.mn == "b" and not i.lk:
             t = i.target
@@ -1093,13 +1154,14 @@ def emit_function(em, fn, prefix, entries):
                 c = "CALL(0x%08Xu); return; /* tail call, unresolved */" % t
         elif i.mn == "b" and i.lk:
             t = i.target
-            c = ("PPC_LR = %s; %s();" % (ret, fname(prefix, t)) if t in entries
-                 else "PPC_LR = %s; CALL(0x%08Xu);" % (ret, t))
+            c = ("PPC_LR = %s; %s(); M3_RETURNED(%s);" % (ret, fname(prefix, t), ret)
+                 if t in entries
+                 else "PPC_LR = %s; CALL(0x%08Xu); M3_RETURNED(%s);" % (ret, t, ret))
         elif i.mn == "bc":
             cond = branch_cond(i)
             t = i.target
             if i.lk:
-                act = "{ PPC_LR = %s; CALL(0x%08Xu); }" % (ret, t)
+                act = "{ PPC_LR = %s; CALL(0x%08Xu); M3_RETURNED(%s); }" % (ret, t, ret)
             elif t in fn.labels:
                 act = ("{ M3_LOOPED(0x%08Xu); goto L_%08X; }" % (addr, t) if t <= addr
                        else "goto L_%08X;" % t)
@@ -1111,16 +1173,21 @@ def emit_function(em, fn, prefix, entries):
         elif i.mn == "bclr":
             cond = branch_cond(i)
             if i.lk:
-                act = "{ uint32_t _t = PPC_LR; PPC_LR = %s; CALL(_t); }" % ret
+                act = ("{ uint32_t _t = PPC_LR; PPC_LR = %s; CALL(_t); M3_RETURNED(%s); }"
+                       % (ret, ret))
             elif lr_from_imm:
                 # mtlr from an immediate: this is a jump, not a return.
                 act = "{ CALL(PPC_LR); return; } /* computed jump via LR */"
             else:
-                act = "return;"
+                # A return goes wherever LR says, which is usually -- not
+                # always -- the caller. M3_RETURN publishes the target and
+                # the call sites above check it; see M3_RETURNED in lift.h.
+                act = "M3_RETURN();"
             c = act if cond is None else "if (%s) %s" % (cond, act)
         elif i.mn == "bcctr":
             cond = branch_cond(i)
-            act = ("{ uint32_t _t = PPC_CTR; PPC_LR = %s; CALL(_t); }" % ret
+            act = ("{ uint32_t _t = PPC_CTR; PPC_LR = %s; CALL(_t); M3_RETURNED(%s); }"
+                   % (ret, ret)
                    if i.lk else "{ CALL(PPC_CTR); return; }")
             c = act if cond is None else "if (%s) %s" % (cond, act)
         elif i.mn == "rfi":
@@ -1128,7 +1195,7 @@ def emit_function(em, fn, prefix, entries):
                 c = ("{ PPC_MSR = m3_ctx.spr[27]; CALL(m3_ctx.spr[26]); return; }"
                      " /* computed jump via SRR0 */")
             else:
-                c = "return; /* rfi */"
+                c = "{ m3_ret_to = 0; return; } /* rfi */"
         else:
             c = em.emit(i)
 

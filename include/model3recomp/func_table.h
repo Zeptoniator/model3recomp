@@ -25,6 +25,10 @@ m3_func_t func_table_lookup(uint32_t guest_addr);
  * see when a port stops making progress. */
 int       func_table_call(uint32_t guest_addr);
 
+/* Where the last lifted `blr` was going, until a call site claims it. See
+ * M3_RETURNED in lift.h. */
+extern uint32_t m3_ret_to;
+
 /* Every lifted translation unit emits one of these; the generated
  * func_table_gen.c calls them all. */
 void      func_table_register_all(void);

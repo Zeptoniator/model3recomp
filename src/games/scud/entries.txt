@@ -5,3 +5,13 @@
 0x000042F0
 0x00004308
 0x0000432C
+# Stubs reached by mtlr/blr through 0x1978 (base 0x19B0) and 0x19EC (base 0x1A24),
+# stride 12: mtlr r0 ; <store> ; blr
+0x000019BC   # lbzx stub
+0x000019C8   # lhbrx stub
+0x00001A30   # stbx stub
+0x00001A3C   # sthbrx stub
+0x000019D4   # nop padding, falls into the lwbrx stub (index 3)
+0x000019E0   # lwbrx stub (index 4)
+0x00001A48   # nop padding, falls into the stwbrx stub
+0x00001A54   # stwbrx stub

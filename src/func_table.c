@@ -105,6 +105,9 @@ static long trace_budget(void)
     return n;
 }
 
+/* Where the last guest return was going; see M3_RETURNED in lift.h. */
+uint32_t m3_ret_to;
+
 int func_table_call(uint32_t addr)
 {
     enum { MISS_MAX = 64 };

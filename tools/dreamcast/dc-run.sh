@@ -64,8 +64,8 @@ FLY=$!
 # DC_SHOT=<token>:<file.png> photographs the display when <token> first
 # appears on the console -- while the picture is up, not after Flycast has
 # exited (a capture then is of an empty desktop, and reads as "black").
-SHOT_TOKEN=${DC_SHOT%%:*}
-SHOT_FILE=${DC_SHOT#*:}
+SHOT_TOKEN=${DC_SHOT:-}; SHOT_TOKEN=${SHOT_TOKEN%%:*}
+SHOT_FILE=${DC_SHOT:-}; SHOT_FILE=${SHOT_FILE#*:}
 shot_done=""
 
 rc=1
