@@ -9,6 +9,7 @@
  */
 #include "model3recomp/ppc.h"
 #include "model3recomp/func_table.h"
+#include "model3recomp/lift.h"
 
 #include <stdio.h>
 
@@ -160,6 +161,19 @@ static void test_fcmp(void)
     CHECK(m3_cr_get(c, 0) == 1u);
 }
 
+/* Signed zeros through the lifter's forms. GCC 13 for the SH-4 lost the
+ * sign of (double)(float)(-x) (see m3_fneg in ppc.h); fnmsubs and fnmadds
+ * of zero products must give -0, as on the 603e. */
+static volatile double g_zero = 0.0, g_one = 1.0;
+static void test_signed_zero(void)
+{
+    double a = g_zero, b = g_zero, c = g_one;
+    CHECK(m3_f64_to_bits(F32(m3_fneg(a * c - b))) == 0x8000000000000000ull);   /* fnmsubs */
+    CHECK(m3_f64_to_bits(F32(m3_fneg(a * c + b))) == 0x8000000000000000ull);   /* fnmadds */
+    CHECK(m3_f64_to_bits(m3_fneg(a)) == 0x8000000000000000ull);                /* fneg    */
+    CHECK(m3_f64_to_bits(m3_fneg(m3_fneg(a))) == 0);
+}
+
 static int g_hit;
 static void hit_fn(void) { g_hit++; }
 
@@ -195,6 +209,7 @@ int main(void)
     test_rlwinm_clear_one_bit();
     test_cr();
     test_carry();
+    test_signed_zero();
     test_cntlzw();
     test_fcmp();
     test_func_table();

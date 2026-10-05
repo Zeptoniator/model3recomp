@@ -517,10 +517,10 @@ class Emitter:
         return self._fp(i, "%s * %s - %s" % (F(i.ra), F(i.rc_reg), F(i.rb)))
 
     def i_fnmadd(self, i):
-        return self._fp(i, "-(%s * %s + %s)" % (F(i.ra), F(i.rc_reg), F(i.rb)))
+        return self._fp(i, "m3_fneg(%s * %s + %s)" % (F(i.ra), F(i.rc_reg), F(i.rb)))
 
     def i_fnmsub(self, i):
-        return self._fp(i, "-(%s * %s - %s)" % (F(i.ra), F(i.rc_reg), F(i.rb)))
+        return self._fp(i, "m3_fneg(%s * %s - %s)" % (F(i.ra), F(i.rc_reg), F(i.rb)))
 
     def i_fmadds(self, i):
         return self._fp(i, "F32(%s * %s + %s)" % (F(i.ra), F(i.rc_reg), F(i.rb)))
@@ -529,22 +529,22 @@ class Emitter:
         return self._fp(i, "F32(%s * %s - %s)" % (F(i.ra), F(i.rc_reg), F(i.rb)))
 
     def i_fnmadds(self, i):
-        return self._fp(i, "F32(-(%s * %s + %s))" % (F(i.ra), F(i.rc_reg), F(i.rb)))
+        return self._fp(i, "F32(m3_fneg(%s * %s + %s))" % (F(i.ra), F(i.rc_reg), F(i.rb)))
 
     def i_fnmsubs(self, i):
-        return self._fp(i, "F32(-(%s * %s - %s))" % (F(i.ra), F(i.rc_reg), F(i.rb)))
+        return self._fp(i, "F32(m3_fneg(%s * %s - %s))" % (F(i.ra), F(i.rc_reg), F(i.rb)))
 
     def i_fmr(self, i):
         return self._fp(i, F(i.rb))
 
     def i_fneg(self, i):
-        return self._fp(i, "-%s" % F(i.rb))
+        return self._fp(i, "m3_fneg(%s)" % F(i.rb))
 
     def i_fabs(self, i):
         return self._fp(i, "m3_fabs(%s)" % F(i.rb))
 
     def i_fnabs(self, i):
-        return self._fp(i, "-m3_fabs(%s)" % F(i.rb))
+        return self._fp(i, "m3_fneg(m3_fabs(%s))" % F(i.rb))
 
     def i_frsp(self, i):
         return self._fp(i, "F32(%s)" % F(i.rb))

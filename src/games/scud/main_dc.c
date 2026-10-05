@@ -128,6 +128,9 @@ int main(void)
     printf("model3recomp %s, built %s %s\n", M3_GIT_REV, __DATE__, __TIME__);
     setenv("M3_NO_SOUND", "1", 1);
     setenv("M3_SIG_EVERY", SCUD_DC_SIG_EVERY, 1);
+#ifdef SCUD_DC_SIGMAP
+    setenv("M3_SIGMAP", SCUD_DC_SIGMAP, 1);
+#endif
 
     memset(&cfg, 0, sizeof cfg);
     scud_board_config(&cfg);

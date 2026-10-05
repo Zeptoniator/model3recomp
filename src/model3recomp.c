@@ -23,8 +23,22 @@ static uint64_t    g_last_field_us;
  * sort of thing nobody notices until the music desyncs. */
 #define FIELD_US 17385
 
+#if defined(__SSE2__) || defined(_M_X64)
+#include <xmmintrin.h>
+#endif
+
 int model3recomp_init(const m3_config_t *cfg)
 {
+#if defined(__SSE2__) || defined(_M_X64)
+    /* M3_FTZ=1: flush denormals to zero, keeping the sign, as the SH-4's
+     * FPU does. The 603e keeps denormals and so does an x86 by default, so
+     * this makes a desktop *less* faithful -- but it makes it compute what
+     * a Dreamcast computes, so frame signatures stay comparable past the
+     * first denormal (Scud Race: field 546, a matrix element that is -0
+     * here and a flushed +0 there). */
+    if (getenv("M3_FTZ"))
+        _mm_setcsr(_mm_getcsr() | 0x8040u);   /* FTZ | DAZ */
+#endif
     g_cfg = *cfg;
     if (!g_cfg.width)  g_cfg.width  = 496;
     if (!g_cfg.height) g_cfg.height = 384;
@@ -200,6 +214,36 @@ void model3recomp_end_frame(void)
         if (every < 0) {
             const char *e = getenv("M3_SIG_EVERY");
             every = e ? strtol(e, NULL, 0) : 0;
+        }
+        {
+            /* M3_SIGMAP=field,base,size,parts: at that field, one hash per
+             * slice of [base, base+size) -- for narrowing a signature
+             * mismatch between two hosts down to the bytes that differ. */
+            static int parsed;
+            static unsigned long at, base, size, parts;
+            if (!parsed) {
+                const char *e = getenv("M3_SIGMAP");
+                parsed = 1;
+                if (e) sscanf(e, "%lu,%li,%li,%lu", &at, (long *)&base,
+                              (long *)&size, &parts);
+            }
+            if (parts && g_frames == at && base + size <= M3_RAM_SIZE) {
+                const uint8_t *r = bus_ram();
+                unsigned long k, step = size / parts, i;
+                for (k = 0; k < parts; k++) {
+                    uint32_t h = 2166136261u;
+                    for (i = 0; i < step; i++)
+                        h = (h ^ r[base + k * step + i]) * 16777619u;
+                    if (step == 4)       /* small enough to show the value */
+                        fprintf(stderr, "[sigmap] %08lX %08lX = %02X%02X%02X%02X\n",
+                                base + k * step, (unsigned long)h,
+                                r[base + k * 4], r[base + k * 4 + 1],
+                                r[base + k * 4 + 2], r[base + k * 4 + 3]);
+                    else
+                        fprintf(stderr, "[sigmap] %08lX %08lX\n",
+                                base + k * step, (unsigned long)h);
+                }
+            }
         }
         if (every > 0 && g_frames % (uint64_t)every == 0) {
             const uint8_t *r = bus_ram();

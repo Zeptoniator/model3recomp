@@ -164,11 +164,29 @@ static M3_INLINE uint32_t m3_cntlzw(uint32_t v) {
     return n;
 }
 
-/* ---- float<->int bit punning (no aliasing UB) -------------------------- */
-static M3_INLINE float  m3_bits_to_f32(uint32_t b) { float  f; memcpy(&f, &b, 4); return f; }
-static M3_INLINE uint32_t m3_f32_to_bits(float f)  { uint32_t b; memcpy(&b, &f, 4); return b; }
-static M3_INLINE double m3_bits_to_f64(uint64_t b) { double d; memcpy(&d, &b, 8); return d; }
-static M3_INLINE uint64_t m3_f64_to_bits(double d) { uint64_t b; memcpy(&b, &d, 8); return b; }
+/* ---- float<->int bit punning (no aliasing UB) --------------------------
+ * __builtin_memcpy, not memcpy: KallistiOS builds with -fno-builtin, under
+ * which a plain memcpy is a real call -- one per guest float load or store
+ * on the Dreamcast. */
+#if defined(__GNUC__)
+#define M3_PUN(dst, src, n) __builtin_memcpy((dst), (src), (n))
+#else
+#define M3_PUN(dst, src, n) memcpy((dst), (src), (n))
+#endif
+static M3_INLINE float  m3_bits_to_f32(uint32_t b) { float  f; M3_PUN(&f, &b, 4); return f; }
+static M3_INLINE uint32_t m3_f32_to_bits(float f)  { uint32_t b; M3_PUN(&b, &f, 4); return b; }
+static M3_INLINE double m3_bits_to_f64(uint64_t b) { double d; M3_PUN(&d, &b, 8); return d; }
+static M3_INLINE uint64_t m3_f64_to_bits(double d) { uint64_t b; M3_PUN(&b, &d, 8); return b; }
+
+/* Negation as a sign-bit flip. GCC 13 for the SH-4 (-m4-single) compiles
+ * (double)(float)(-x) with the negate done in single precision while the
+ * FPSCR is still in double mode, where `fneg fr1` does not touch fr1: -0
+ * came out +0, and Scud Race's frame signatures parted from the desktop's
+ * at field 546 (a matrix element). A flip of the bit cannot be moved past
+ * the conversion. */
+static M3_INLINE double m3_fneg(double d) {
+    return m3_bits_to_f64(m3_f64_to_bits(d) ^ 0x8000000000000000ull);
+}
 
 /* ---- The context -------------------------------------------------------
  * One global, like every other recomp in this family. Lifted code says
