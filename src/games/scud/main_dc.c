@@ -25,6 +25,14 @@
 #ifndef SCUD_DC_SHOT_AT
 #define SCUD_DC_SHOT_AT 1300     /* prints "SCUD SHOT" for the harness to photograph */
 #endif
+/* SCUD_DC_SHOT_EVERY=N: also every N fields from SCUD_DC_SHOT_FROM on,
+ * for dc-run.sh's DC_SHOTS. */
+#ifndef SCUD_DC_SHOT_FROM
+#define SCUD_DC_SHOT_FROM 0
+#endif
+/* A scripted player, as on the desktop (src/input.c): SCUD_DC_COIN_AT,
+ * SCUD_DC_START_AT (fields), SCUD_DC_ADC_SET ("ch:value,..."). With any of
+ * them the pad is ignored, so a run is the same run every time. */
 #ifndef M3_GIT_REV
 #define M3_GIT_REV "unknown"
 #endif
@@ -120,7 +128,11 @@ static void on_field(void)
                pvr_r3d_textures_failed(), pvr_r3d_texture_kb(),
                pvr_r3d_layer_redraws());
     }
-    if (f == SCUD_DC_SHOT_AT)
+    if (f == SCUD_DC_SHOT_AT
+#ifdef SCUD_DC_SHOT_EVERY
+        || (f >= SCUD_DC_SHOT_FROM && f % SCUD_DC_SHOT_EVERY == 0)
+#endif
+        )
         printf("SCUD SHOT field %llu\n", (unsigned long long)f);
     if (f > SCUD_DC_FIELDS) {          /* after field N's signature */
         report("end");
@@ -145,6 +157,29 @@ int main(void)
     setenv("M3_SIG_EVERY", SCUD_DC_SIG_EVERY, 1);
 #ifdef SCUD_DC_SIGMAP
     setenv("M3_SIGMAP", SCUD_DC_SIGMAP, 1);
+#endif
+#ifdef SCUD_DC_FNSIG
+    setenv("M3_FNSIG", SCUD_DC_FNSIG, 1);
+#endif
+#ifdef SCUD_DC_WORKSIG
+    setenv("M3_WORKSIG", SCUD_DC_WORKSIG, 1);
+#endif
+#ifdef SCUD_DC_RAMREF
+    setenv("M3_RAMREF", SCUD_DC_RAMREF, 1);
+#endif
+#ifdef SCUD_DC_SIG_FROM
+    setenv("M3_SIG_FROM", SCUD_DC_SIG_FROM, 1);
+#endif
+#define SCUD_STR_(x) #x
+#define SCUD_STR(x) SCUD_STR_(x)
+#ifdef SCUD_DC_COIN_AT
+    setenv("M3_COIN_AT", SCUD_STR(SCUD_DC_COIN_AT), 1);
+#endif
+#ifdef SCUD_DC_START_AT
+    setenv("M3_START_AT", SCUD_STR(SCUD_DC_START_AT), 1);
+#endif
+#ifdef SCUD_DC_ADC_SET
+    setenv("M3_ADC_SET", SCUD_DC_ADC_SET, 1);
 #endif
 
     memset(&cfg, 0, sizeof cfg);

@@ -561,11 +561,11 @@ class Emitter:
     # fctiw* leave the result in the low 32 bits of the FPR as a bit pattern,
     # which is why the game always follows them with stfd + lwz of the low half.
     def i_fctiw(self, i):
-        return self._fp(i, "m3_bits_to_f64((uint64_t)(uint32_t)(int32_t)m3_round(%s))"
+        return self._fp(i, "m3_bits_to_f64((uint64_t)m3_f2i32(m3_round(%s)))"
                         % F(i.rb))
 
     def i_fctiwz(self, i):
-        return self._fp(i, "m3_bits_to_f64((uint64_t)(uint32_t)(int32_t)%s)" % F(i.rb))
+        return self._fp(i, "m3_bits_to_f64((uint64_t)m3_f2i32(%s))" % F(i.rb))
 
     def i_fcmpu(self, i):
         c = "FCMP(%d, %s, %s);" % (i.crfd, F(i.ra), F(i.rb))

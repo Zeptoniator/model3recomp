@@ -4,6 +4,13 @@ project(model3recomp C)
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# No fused multiply-add the guest did not ask for. Lifted code writes a
+# PowerPC fmadds as F32(a * b + c) in double; GCC for the SH-4 narrows that to
+# single precision and contracts it into fmac (GNU C defaults to
+# -ffp-contract=fast), which rounds differently. 575 lifted functions had one,
+# and a scripted race parted from the desktop's at field 4234 (DC-BUG-017).
+add_compile_options(-ffp-contract=off)
+
 # SDL2 is needed for the platform layer and the example, but not for the
 # semantic tests -- so a machine without it can still run the harness.
 find_package(SDL2 QUIET)
@@ -90,6 +97,12 @@ option(MODEL3RECOMP_LOOP_GUARD "Locate guest spin loops (see lift.h)" OFF)
 if(MODEL3RECOMP_LOOP_GUARD)
     target_compile_definitions(model3recomp PUBLIC M3_LOOP_GUARD)
 endif()
+# Every lifted function entry reports to m3_fn_trace() (M3_FNSIG): for
+# narrowing a divergence between two hosts to a function. Diagnostic only.
+option(MODEL3RECOMP_FN_TRACE "Hash the registers at function entries (M3_FNSIG)" OFF)
+if(MODEL3RECOMP_FN_TRACE)
+    target_compile_definitions(model3recomp PUBLIC M3_FN_TRACE)
+endif()
 
 # Report every store that covers this guest address, with the function that
 # did it (needs MODEL3RECOMP_LOOP_GUARD for the function name). See M3_WATCH
@@ -162,6 +175,14 @@ if(SCUD_LIFTED_DIR)
             OUTPUT_VARIABLE SCUD_GIT_REV OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
         target_compile_definitions(scudrace PRIVATE M3_GIT_REV="${SCUD_GIT_REV}")
         target_link_options(scudrace PRIVATE -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/scud_dc.map)
+        # A compiler-made fneg in lifted code has lost a sign twice (DC-BUG-017).
+        find_program(SH_ELF_OBJDUMP sh-elf-objdump HINTS $ENV{KOS_CC_BASE}/bin)
+        if(SH_ELF_OBJDUMP)
+            add_custom_command(TARGET scudrace POST_BUILD
+                COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/dreamcast/check-fneg.sh
+                        $<TARGET_FILE:scudrace> ${SH_ELF_OBJDUMP}
+                VERBATIM)
+        endif()
         option(SCUD_DC_PROFILE "Sampling profiler in the Dreamcast Scud build" OFF)
         if(SCUD_DC_PROFILE)
             target_compile_definitions(scudrace PRIVATE SCUD_DC_PROFILE=1)

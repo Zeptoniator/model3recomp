@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__SSE__) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
 
 static const char *g_roms_dir = "roms";
 static uint64_t g_stop_after;
@@ -159,6 +162,14 @@ int main(int argc, char **argv)
     m3_config_t cfg;
     size_t n = 0;
     int i;
+
+#if defined(__SSE__) || defined(__x86_64__)
+    /* M3_FTZ=1: flush denormals to zero, inputs and results, as the SH-4
+     * does with FPSCR.DN set -- to tell a Dreamcast divergence that comes
+     * from denormals from one that doesn't. */
+    if (getenv("M3_FTZ"))
+        _mm_setcsr(_mm_getcsr() | 0x8040u);
+#endif
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--roms") && i + 1 < argc)

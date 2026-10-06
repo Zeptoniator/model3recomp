@@ -130,6 +130,15 @@ static M3_INLINE double m3_sqrt(double d)  { return sqrt(d); }
 /* fctiw honours FPSCR[RN]; every Model 3 title leaves it at round-to-nearest,
  * which is what nearbyint gives under the default host mode. */
 static M3_INLINE double m3_round(double d) { return nearbyint(d); }
+/* fctiw/fctiwz: the PowerPC saturates out-of-range values and gives
+ * 0x80000000 for a NaN. A C cast is undefined there, and hosts differ: x86
+ * gives 0x80000000 for both signs, SH-4's ftrc saturates as the 603e does. */
+static M3_INLINE uint32_t m3_f2i32(double d) {
+    if (d != d) return 0x80000000u;
+    if (d >= 2147483647.0) return 0x7FFFFFFFu;
+    if (d <= -2147483648.0) return 0x80000000u;
+    return (uint32_t)(int32_t)d;
+}
 
 uint32_t m3_timebase(unsigned spr);
 void     m3_timebase_set(unsigned spr, uint32_t v);
@@ -169,6 +178,12 @@ extern uint32_t m3_fn_ring[M3_FN_RING];
 extern uint32_t m3_fn_ring_n;
 #define M3_FN(a)        (m3_fn_prev = m3_fn_now, m3_fn_now = (uint32_t)(a), m3_fn_count((uint32_t)(a)), M3_SAFEPOINT(a))
 #define M3_LOOP_NOTE(a) m3_loop_guard((uint32_t)(a))
+#elif defined(M3_FN_TRACE)
+/* Every function entry reported to m3_fn_trace(): see M3_FNSIG in
+ * func_table.c. A diagnostic build only -- it costs a call per entry. */
+void m3_fn_trace(uint32_t addr);
+#define M3_FN(a)        (m3_fn_trace((uint32_t)(a)), M3_SAFEPOINT(a))
+#define M3_LOOP_NOTE(a) ((void)0)
 #else
 #define M3_FN(a)        M3_SAFEPOINT(a)
 #define M3_LOOP_NOTE(a) ((void)0)

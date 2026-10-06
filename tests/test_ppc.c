@@ -174,6 +174,20 @@ static void test_signed_zero(void)
     CHECK(m3_f64_to_bits(m3_fneg(m3_fneg(a))) == 0);
 }
 
+/* fctiw/fctiwz saturate on the 603e; a C cast out of range is undefined, and
+ * x86 and the SH-4 disagree about it. */
+static void test_f2i32(void)
+{
+    static volatile double big = 3.0e9, nbig = -3.0e9, one = 1.0;
+    double nan = (big - big) / (big - big);
+    CHECK(m3_f2i32(big) == 0x7FFFFFFFu);
+    CHECK(m3_f2i32(nbig) == 0x80000000u);
+    CHECK(m3_f2i32(nan) == 0x80000000u);
+    CHECK(m3_f2i32(-one * 2.5) == 0xFFFFFFFEu);           /* truncates toward 0 */
+    CHECK(m3_f2i32(2147483647.0) == 0x7FFFFFFFu);
+    CHECK(m3_f2i32(-2147483648.0) == 0x80000000u);
+}
+
 static int g_hit;
 static void hit_fn(void) { g_hit++; }
 
@@ -210,6 +224,7 @@ int main(void)
     test_cr();
     test_carry();
     test_signed_zero();
+    test_f2i32();
     test_cntlzw();
     test_fcmp();
     test_func_table();

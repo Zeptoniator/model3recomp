@@ -261,3 +261,38 @@ the Dreamcast) is still open.
   old lifter fails the two that matter.
 - **Also**: `model3recomp_run` now says when the guest's code exits and it
   is only presenting empty fields -- this freeze was silent.
+
+## DC-BUG-017 — the race parts from the desktop at field 4234: a sign lost by fneg in double mode (fixed)
+
+- **Symptom**: the scripted race (`SCUD_DC_COIN_AT=1500 SCUD_DC_START_AT=1600
+  SCUD_DC_ADC_SET=1:255`) renders and plays on the Dreamcast, but its RAM
+  signatures leave the desktop's at field 4234 -- equal at 4232 -- just
+  after GO!. By field 5000 the car is at 310 km/h on the Dreamcast.
+- **Ruled out on the way**, each by a run: denormals (`M3_FTZ=1` on the
+  desktop, signatures unchanged); the FPSCR KOS starts with (0x00040000,
+  round to nearest); `fctiw`'s cast out of range (`m3_f2i32` now
+  saturates as the 603e does -- kept; desktop signatures unchanged to field 4250, the furthest that lift was run); the CROM page
+  cache (the desktop through `M3_SCUD_PACK` matches itself); the time base
+  (it runs off `m3_work`).
+- **Narrowed**, three tools, one Dreamcast run each:
+  `M3_RAMREF=field,path` (the desktop writes a hash per 4 KB block, the
+  disc carries it, the Dreamcast prints the blocks that differ: 8, matrices
+  and car state off by ~1e-3); `M3_WORKSIG` (a hash of those blocks at
+  every dispatched call: first change after the call to `0x2ADD0`, the car
+  on its track segment); `MODEL3RECOMP_FN_TRACE` + `M3_FNSIG` (registers
+  at every function entry: between two calls of `0x5B8C` inside
+  `0x2C814`, the cubic `2t^3 - 3t^2 + 1` of a Hermite blend).
+- **Cause**: GCC 13 (`-m4-single`, `-ffp-contract=fast` by default in GNU C)
+  turned `F32(F32(t4 + t4) - t3)` into single precision and contracted it:
+  `fneg fr1 ; fmac fr0,fr2,fr1` for `2 * t4 + (-t3)`. The `fneg` was
+  scheduled after the `lds` that puts the FPSCR in double mode, where
+  `fneg` on an odd register negates nothing: `2*t4 + t3`. The same bug as
+  field 546's -0, by another route. One odd `fneg` in all the lifted code.
+- **Fix**: `-ffp-contract=off` for every target (CMakeLists.txt): the
+  lifted code computes `a*b + c` as written, on both hosts. No `fneg` is
+  left in lifted code, and `tools/dreamcast/check-fneg.sh` runs after
+  every Dreamcast link of `scudrace` and fails the build if one comes back
+  (it flags the old ELF: three `fneg fr0`, one `fneg fr1`).
+- **Lesson**: on the desktop the option changes nothing (signatures to
+  field 6000 identical): the divergence was only ever the Dreamcast's
+  compiler, invisible to every host test.

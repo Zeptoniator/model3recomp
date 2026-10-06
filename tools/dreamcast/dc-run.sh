@@ -4,6 +4,7 @@
 #   tools/dreamcast/dc-run.sh <image.cdi> [seconds] [done-token]
 #
 # DC_SHOT=<token>:<file.png> takes a screenshot when <token> is printed.
+# DC_SHOTS=<dir> photographs every "SCUD SHOT field N" line as <dir>/fN.png.
 # Exits 0 when the done-token appears on the console, 1 on timeout, 2 when
 # Flycast cannot be found. FLYCAST=<binary> picks the emulator.
 #
@@ -76,6 +77,13 @@ for _ in $(seq 1 $((TIMEOUT * 4))); do
             && echo "[dc-run] captured $SHOT_FILE" >&2 \
             || echo "[dc-run] capture FAILED: $SHOT_FILE" >&2
         shot_done=1
+    fi
+    if [ -n "${DC_SHOTS:-}" ]; then
+        for n in $(grep -ao 'SCUD SHOT field [0-9]*' "$LOG" | awk '{print $4}'); do
+            [ -e "$DC_SHOTS/f$n.png" ] && continue
+            DISPLAY=":$DISP" import -window root "$DC_SHOTS/f$n.png" 2>/dev/null \
+                || echo "[dc-run] capture FAILED: field $n" >&2
+        done
     fi
     if [ -n "$DONE" ] && grep -aq -- "$DONE" "$LOG"; then rc=0; break; fi
     kill -0 "$FLY" 2>/dev/null || break

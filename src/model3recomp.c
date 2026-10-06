@@ -211,9 +211,12 @@ void model3recomp_end_frame(void)
          * inputs print the same lines: a desktop and a Dreamcast can be
          * compared field for field (prompt: frame signatures). */
         static long every = -1;
+        static unsigned long sig_from;   /* M3_SIG_FROM: no signature before this field */
         if (every < 0) {
             const char *e = getenv("M3_SIG_EVERY");
             every = e ? strtol(e, NULL, 0) : 0;
+            e = getenv("M3_SIG_FROM");
+            sig_from = e ? strtoul(e, NULL, 0) : 0;
         }
         {
             /* M3_SIGMAP=field,base,size,parts: at that field, one hash per
@@ -245,7 +248,60 @@ void model3recomp_end_frame(void)
                 }
             }
         }
-        if (every > 0 && g_frames % (uint64_t)every == 0) {
+        {
+            /* M3_RAMREF=field,path: at that field, one FNV hash per 4 KB block
+             * of the first 4 MB. Where path holds no such table (a desktop),
+             * write it, and the raw 4 MB as path.ram; where it does (the same
+             * file on a Dreamcast disc), print every block that differs, in
+             * hex, at most eight -- one run finds the bytes two hosts disagree
+             * on, where M3_SIGMAP needs one run per level of bisection. */
+            static int parsed;
+            static unsigned long at;
+            static char path[256];
+            if (!parsed) {
+                const char *e = getenv("M3_RAMREF");
+                parsed = 1;
+                if (e) sscanf(e, "%lu,%255s", &at, path);
+            }
+            if (path[0] && g_frames == at && M3_RAM_SIZE >= 0x400000u) {
+                enum { BLK = 4096, NBLK = 0x400000 / 4096 };
+                static uint32_t mine[NBLK], ref[NBLK];
+                const uint8_t *r = bus_ram();
+                unsigned long k, i, shown = 0;
+                FILE *fp;
+                for (k = 0; k < NBLK; k++) {
+                    uint32_t h = 2166136261u;
+                    for (i = 0; i < BLK; i++) h = (h ^ r[k * BLK + i]) * 16777619u;
+                    mine[k] = h;
+                }
+                fp = fopen(path, "rb");
+                if (fp && fread(ref, sizeof ref, 1, fp) == 1) {
+                    fclose(fp);
+                    for (k = 0; k < NBLK; k++) {
+                        if (mine[k] == ref[k]) continue;
+                        fprintf(stderr, "[ramdiff] block %08lX\n", k * BLK);
+                        if (shown++ >= 8) continue;
+                        for (i = 0; i < BLK; i += 32) {
+                            unsigned j;
+                            fprintf(stderr, "[ramhex] %08lX ", k * BLK + i);
+                            for (j = 0; j < 32; j++) fprintf(stderr, "%02X", r[k * BLK + i + j]);
+                            fprintf(stderr, "\n");
+                        }
+                    }
+                    fprintf(stderr, "[ramdiff] done, %lu blocks differ\n", shown);
+                } else {
+                    char raw[272];
+                    if (fp) fclose(fp);
+                    fp = fopen(path, "wb");
+                    if (fp) { fwrite(mine, sizeof mine, 1, fp); fclose(fp); }
+                    snprintf(raw, sizeof raw, "%s.ram", path);
+                    fp = fopen(raw, "wb");
+                    if (fp) { fwrite(r, 0x400000, 1, fp); fclose(fp); }
+                    fprintf(stderr, "[ramdiff] wrote %s and %s\n", path, raw);
+                }
+            }
+        }
+        if (every > 0 && g_frames % (uint64_t)every == 0 && g_frames >= sig_from) {
             const uint8_t *r = bus_ram();
             uint32_t h = 2166136261u;
             size_t i;

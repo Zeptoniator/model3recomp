@@ -1,5 +1,38 @@
 # Status
 
+## 2026-10-07 — DC-08: the race on the Dreamcast, field for field the desktop's
+
+- **The scripted race runs on the Dreamcast** (Flycast): coin at 1500,
+  start at 1600, accelerator held -- the selection screens, the rolling
+  start, GO!, the beginner course with the HUD live. RAM signatures every
+  200 fields from 200 to 6000: **all 30 equal to the desktop's**. Field
+  6000 on both: lap 1/4, 41 s left, 101 km/h, 39th, one retired.
+- `SCUD_DC_COIN_AT`, `SCUD_DC_START_AT`, `SCUD_DC_ADC_SET` give the
+  Dreamcast build the desktop's scripted player; `SCUD_DC_SHOT_EVERY` /
+  `SCUD_DC_SHOT_FROM` with `DC_SHOTS=<dir>` in `dc-run.sh` photograph it.
+- **DC-BUG-017**: until the fix the race parted from the desktop at field
+  4234, just after GO! -- GCC turned a Hermite blend into `fneg ; fmac`
+  with the `fneg` in double mode, which lost the sign. `-ffp-contract=off`
+  everywhere, and `tools/dreamcast/check-fneg.sh` fails the Dreamcast link
+  if lifted code contains an `fneg`. `fctiw` now saturates as the 603e does
+  (`m3_f2i32`, tested; it was not the cause).
+- **New tools for a divergence between hosts**, each one Dreamcast run:
+  `M3_SIG_FROM` (dense signatures from a field); `M3_RAMREF=field,path`
+  (blocks that differ, against a table the desktop wrote and the disc
+  carries); `M3_WORKSIG` (a RAM hash at each dispatched call);
+  `MODEL3RECOMP_FN_TRACE` + `M3_FNSIG` (registers at each function entry);
+  `M3_FTZ` on the desktop (denormals flushed, as the SH-4 does).
+- **Measured** (Flycast, not hardware): ~330 ms a field on the selection
+  screens, 400-600 ms in the race. **Disc reads: 1214 s of 2983 s** by
+  field 6000, 8568 VROM page misses -- the race streams its VROM through a
+  32-page cache. That, not the CPU, is the first thing to fix for speed.
+- **Seen, not chased**: at field 6000 the Dreamcast draws a large dark
+  triangle across the left of the screen where the desktop draws the
+  overpass (near-plane clipping, probably), and shows palms and sails the
+  desktop capture does not. The game state is the same; the renderers
+  differ.
+- Not yet: sound; steering under a script; real hardware.
+
 ## 2026-10-06 (night) — SCUD-PC: a race, played on the desktop
 
 - **Scud Race runs a race on the desktop**, driven by a script (coin at
