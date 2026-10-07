@@ -112,6 +112,14 @@ int  model3recomp_dump_scene(const char *prefix);
  * no instruction count to read. */
 extern uint64_t m3_work;
 
+/* Wall-clock microseconds of the host (the Dreamcast's timer, CLOCK_MONOTONIC
+ * elsewhere) -- unlike platform_ticks_us(), which paces fields off m3_work
+ * on hosts without a display. For measuring, never for pacing. */
+uint64_t m3_now_us(void);
+/* Accumulated by the parts of a field M3_PROFILE breaks out: disc reads,
+ * waiting for the PVR, drawing the 2D layers. */
+extern uint64_t m3_t_disc_us, m3_t_pvrwait_us, m3_t_2d_us;
+
 /* Boot. Resets the CPU and enters the guest at its reset vector, which for
  * every Model 3 title is 0xFFF00100. Does not return while the game runs --
  * Model 3 main loops never do. */

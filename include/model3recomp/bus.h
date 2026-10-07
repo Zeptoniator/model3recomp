@@ -137,6 +137,8 @@ uint8_t *bus_texfifo(size_t *used, size_t *capacity);
 uint64_t bus_rom_cache_misses(void);
 uint64_t bus_vrom_cache_misses(void);
 uint32_t bus_tilegen_generation(void);
+/* Bumped only by changes to tile patterns or the palette (see bus.c). */
+uint32_t bus_tilegen_content_generation(void);
 size_t   bus_real3d_bytes(void);
 uint64_t bus_ram_overruns(void);      /* see M3_RAM_BYTES */      /* Dreamcast: Real3D RAM paged in so far */   /* pages fetched through m3_roms_t.read */
 void     bus_texfifo_reset(void);

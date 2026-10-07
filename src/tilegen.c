@@ -273,6 +273,43 @@ unsigned tilegen_render_pass_1555(int above, uint16_t *dst, unsigned stride)
     return n;
 }
 
+/* Which name entries draw nothing at all: every one of the 64 pixels of the
+ * tile, through the entry's palette, transparent. Scud Race fills every
+ * name of every layer -- the HUD's empty areas are a real tile of
+ * transparent colours -- so "skip the zero entry" skipped nothing. Per
+ * entry value and depth, two bits (known, clear); forgotten whenever a
+ * pattern or the palette changes (bus_tilegen_content_generation). */
+static uint8_t g_tile_known[2][8192], g_tile_clear[2][8192];
+static uint32_t g_tile_gen = 0xFFFFFFFFu;
+
+static int tile_clear(const uint8_t *v, unsigned e, int four_bit)
+{
+    unsigned b = e >> 3, m = 1u << (e & 7u), row, col;
+    int d = four_bit ? 1 : 0;
+    if (g_tile_known[d][b] & m)
+        return (g_tile_clear[d][b] & m) != 0;
+    g_tile_known[d][b] |= (uint8_t)m;
+    for (row = 0; row < 8u; row++)
+        for (col = 0; col < 8u; col++) {
+            unsigned idx;
+            uint32_t off;
+            if (four_bit) {
+                uint32_t pattern = (((uint32_t)(e & 0x3FFFu) << 1) | ((e >> 15) & 1u))
+                                 * TILE_BYTES;
+                uint8_t byte = v[pattern + row * 4u + (3u - (col >> 1))];
+                idx = (e & 0x7FF0u) | ((col & 1u) ? (byte & 0x0Fu) : (byte >> 4u));
+            } else {
+                uint32_t pattern = (uint32_t)(e & 0x3FFFu) * (TILE_BYTES * 2u);
+                idx = (e & 0x7F00u) | v[pattern + row * 8u + (col ^ 3u)];
+            }
+            off = VRAM_PALETTE + idx * 4u;
+            if (off + 4u <= VRAM_END && !(v[off + 1] & 0x80u))
+                return 0;                      /* an opaque pixel */
+        }
+    g_tile_clear[d][b] |= (uint8_t)m;
+    return 1;
+}
+
 /* One pair of layers on one line, into a 1555 line buffer -- what the
  * per-pixel loop in render_pass() does, a tile at a time: the name entry
  * and pattern row are fetched once per tile, an empty tile is skipped
@@ -302,7 +339,7 @@ static unsigned pair_line_1555(const uint8_t *v, int pair, unsigned lmask,
             unsigned col = sx & 7u, e = name_entry(v, nt, maprow + sx / TILE);
             int run = 8 - (int)col;
             if (x + run > blk_end) run = blk_end - x;
-            if (!e) { x += run; continue; }
+            if (!e || tile_clear(v, e, four[k])) { x += run; continue; }
             for (; run > 0; run--, x++, col++) {
                 unsigned idx, c;
                 uint32_t off;
@@ -341,6 +378,11 @@ static unsigned render_pass(int above, uint32_t *fb, int fbw, int fbh,
 
     if ((!fb && !t16) || !v)
         return 0;
+    if (bus_tilegen_content_generation() != g_tile_gen) {
+        g_tile_gen = bus_tilegen_content_generation();
+        memset(g_tile_known, 0, sizeof g_tile_known);
+        memset(g_tile_clear, 0, sizeof g_tile_clear);
+    }
 
     /* M3_NO_2D: draw the 3D on its own. The tilemaps are opaque over most of
      * the screen and sit above the 3D during a round, so this is the only
@@ -404,6 +446,37 @@ static unsigned render_pass(int above, uint32_t *fb, int fbw, int fbh,
                           layer_above_3d(L)); }
             fflush(stderr);
         }
+    }
+
+    /* M3_TG_USAGE=1: how the game uses the layers, every 100 fields -- which
+     * are on and in front of the 3D, their scroll and line scroll, how many
+     * distinct stencil words the screen has, the colour offsets. What a
+     * renderer that keeps each layer as a texture in map space must handle. */
+    if (!above && getenv("M3_TG_USAGE") &&
+        model3recomp_frame_count() % 100u == 0) {
+        uint32_t words[8];
+        unsigned nw = 0, yy, L;
+        for (yy = 0; yy < 384; yy++) {
+            uint32_t w = le32(v, VRAM_STENCIL + yy * 4u), k;
+            for (k = 0; k < nw && words[k] != w; k++) ;
+            if (k == nw && nw < 8) words[nw++] = w;
+        }
+        fprintf(stderr, "[tgusage] field %llu stencil %u word(s):",
+                (unsigned long long)model3recomp_frame_count(), nw);
+        for (yy = 0; yy < nw; yy++) fprintf(stderr, " %08X", words[yy]);
+        fprintf(stderr, " coff %08X %08X |", reg(0x40), reg(0x44));
+        for (L = 0; L < LAYERS; L++) {
+            uint32_t sr = reg(0x60u + L * 4u), b = VRAM_NAME_BASE + L * LAYER_STRIDE;
+            unsigned nz = 0, i;
+            for (i = 0; i < LAYER_STRIDE / 2u; i++) if (name_entry(v, b, i)) nz++;
+            fprintf(stderr, " L%u %s%s%s%s x%u y%u tiles %u", L,
+                    layer_enabled((int)L) ? "on" : "off",
+                    layer_above_3d((int)L) ? " front" : " back",
+                    layer_4bpp((int)L) ? " 4bpp" : " 8bpp",
+                    (sr & 0x8000u) ? " LINESCROLL" : "",
+                    sr & 0x3FFu, (sr >> 16) & 0x1FFu, nz);
+        }
+        fprintf(stderr, "\n");
     }
 
     /* M3_LAYER_MASK=<bits>: draw only the layers whose bit is set. */

@@ -32,6 +32,7 @@
 #include "model3recomp/real3d.h"
 #include "model3recomp/tilegen.h"
 #include "model3recomp/bus.h"
+#include "model3recomp/model3recomp.h"
 
 #include <kos.h>
 #include <dc/pvr/pvr_regs.h>
@@ -263,13 +264,19 @@ static void begin_frame(void)
     static uint32_t drawn_gen;
     static int ever;
     uint32_t gen = bus_tilegen_generation();
-    pvr_wait_ready();
+    {
+        uint64_t t = m3_now_us();
+        pvr_wait_ready();
+        m3_t_pvrwait_us += m3_now_us() - t;
+    }
     /* Only when the guest has written tilegen VRAM or a register since:
      * through most of attract the 2D does not move, and drawing it costs
      * more than the rest of the field. */
     if (!ever || gen != drawn_gen) {
+        uint64_t t = m3_now_us();
         g_layer_px[0] = tilegen_render_pass_1555(0, g_layer[0], LAYER_W);
         g_layer_px[1] = tilegen_render_pass_1555(1, g_layer[1], LAYER_W);
+        m3_t_2d_us += m3_now_us() - t;
         drawn_gen = gen;
         ever = 1;
         g_layer_redraws++;

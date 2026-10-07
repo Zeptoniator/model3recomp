@@ -13,6 +13,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef M3_DREAMCAST
+#include <arch/timer.h>
+#else
+#include <time.h>
+#endif
+
+uint64_t m3_t_disc_us, m3_t_pvrwait_us, m3_t_2d_us;
+
+uint64_t m3_now_us(void)
+{
+#ifdef M3_DREAMCAST
+    return timer_us_gettime64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+#endif
+}
 
 static m3_config_t g_cfg;
 static int         g_running;
@@ -167,14 +185,20 @@ void model3recomp_end_frame(void)
         if (fb) memset(fb, 0, (size_t)fw * (size_t)fh * sizeof(uint32_t));
     }
     {
-        /* M3_PROFILE: where a field's time goes, printed every 300. */
+        /* M3_PROFILE: where a field's time goes, in wall-clock time, printed
+         * every 300 fields: the mean of each part, and the mean, worst and
+         * 99th percentile of the whole field. Disc, PVR wait and 2D are
+         * inside the other columns (a disc read happens wherever the guest
+         * or the renderer misses), shown on their own. */
         static int on = -1;
-        static uint64_t t_guest, t_2d, t_3d, t_present, last, n;
+        static uint64_t t_guest, t_2d, t_3d, t_present, last, n, sum, worst;
+        static uint64_t disc0, wait0, d2_0;
+        static uint16_t hist[1024];             /* fields by whole ms */
         uint64_t t0, t1, t2, t3, t4;
         if (on < 0) on = getenv("M3_PROFILE") != NULL;
-        t0 = on ? platform_ticks_us() : 0;
+        t0 = on ? m3_now_us() : 0;
         tilegen_render_pass(0);
-        t1 = on ? platform_ticks_us() : 0;
+        t1 = on ? m3_now_us() : 0;
         real3d_render();
 #ifdef M3_DREAMCAST
         /* Nothing drains the texture FIFO while no renderer runs; a field's
@@ -182,24 +206,45 @@ void model3recomp_end_frame(void)
         if (!platform_framebuffer(NULL, NULL))
             bus_texfifo_reset();
 #endif
-        t2 = on ? platform_ticks_us() : 0;
+        t2 = on ? m3_now_us() : 0;
         tilegen_render_pass(1);
-        t3 = on ? platform_ticks_us() : 0;
+        t3 = on ? m3_now_us() : 0;
         platform_present();
-        t4 = on ? platform_ticks_us() : 0;
+        t4 = on ? m3_now_us() : 0;
         if (on) {
-            if (last) t_guest += t0 - last;
-            t_2d += (t1 - t0) + (t3 - t2); t_3d += t2 - t1; t_present += t4 - t3;
-            last = t4;
-            if (++n % 300 == 0) {
-                extern uint64_t g_board_us, g_wait_us;
-                fprintf(stderr, "[profile] per field: guest %.1f ms  2d %.1f  3d %.1f  present %.1f"
-                                "  sound %.1f (guest waited %.1f)\n",
-                        t_guest / 300000.0, t_2d / 300000.0, t_3d / 300000.0, t_present / 300000.0,
-                        g_board_us / 300000.0, g_wait_us / 300000.0);
-                t_guest = t_2d = t_3d = t_present = 0;
-                g_board_us = g_wait_us = 0;
+            if (last) {
+                uint64_t whole = t4 - last, ms = whole / 1000u;
+                t_guest += t0 - last;
+                t_2d += (t1 - t0) + (t3 - t2); t_3d += t2 - t1; t_present += t4 - t3;
+                sum += whole;
+                if (whole > worst) worst = whole;
+                hist[ms < 1023u ? ms : 1023u]++;
+                if (++n % 300 == 0) {
+                    extern uint64_t g_board_us, g_wait_us;
+                    unsigned k, acc = 0, p99 = 0;
+                    for (k = 1024; k-- > 0;) {
+                        acc += hist[k];
+                        if (acc >= 3u) { p99 = k; break; }   /* 1 % of 300 */
+                    }
+                    fprintf(stderr, "[profile] field %llu, per field: %.1f ms (worst %.1f, "
+                                    "99%% %u) = guest %.1f + render %.1f + 2d %.1f + present %.1f;"
+                                    " of which disc %.1f, pvr wait %.1f, 2d layers %.1f;"
+                                    " sound %.1f (guest waited %.1f)\n",
+                            (unsigned long long)model3recomp_frame_count(),
+                            sum / 300000.0, worst / 1000.0, p99,
+                            t_guest / 300000.0, t_3d / 300000.0, t_2d / 300000.0,
+                            t_present / 300000.0,
+                            (m3_t_disc_us - disc0) / 300000.0,
+                            (m3_t_pvrwait_us - wait0) / 300000.0,
+                            (m3_t_2d_us - d2_0) / 300000.0,
+                            g_board_us / 300000.0, g_wait_us / 300000.0);
+                    t_guest = t_2d = t_3d = t_present = sum = worst = 0;
+                    disc0 = m3_t_disc_us; wait0 = m3_t_pvrwait_us; d2_0 = m3_t_2d_us;
+                    memset(hist, 0, sizeof hist);
+                    g_board_us = g_wait_us = 0;
+                }
             }
+            last = t4;
         }
     }
     if (g_frame_hook)

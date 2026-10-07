@@ -191,8 +191,19 @@ uint32_t g_tg_vram_writes, g_tg_reg_writes, g_tg_reg_changes;  /* diagnostics */
  * already there -- Scud Race rewrites 67 bytes of it every field -- leave
  * the generation alone. */
 #define IN_VRAM(p) (g_vram && (p) >= g_vram && (p) < g_vram + TILEGEN_VRAM_SIZE)
-#define VRAM_NOTE(p, changed) do { if (IN_VRAM(p)) { g_tg_vram_writes++;   \
-        if (changed) { g_tilegen_gen++; tg_note((uint32_t)((p) - g_vram), -1); } } } while (0)
+#define VRAM_NOTE(p, changed) VRAM_NOTE_N(p, 1u, changed)
+/* Patterns (below the line scroll tables) and the palette: what a tile's
+ * pixels are made of. Name tables, scroll and stencil only say where tiles
+ * go. A renderer that remembers something per tile keeps it until this
+ * moves. */
+static uint32_t g_tilegen_content_gen;
+uint32_t bus_tilegen_content_generation(void) { return g_tilegen_content_gen; }
+#define VRAM_CONTENT(o, n) ((o) < 0x0F6000u || (o) + (n) > 0x100000u)
+#define VRAM_NOTE_N(p, n, changed) do { if (IN_VRAM(p)) { g_tg_vram_writes++;   \
+        if (changed) { uint32_t o_ = (uint32_t)((p) - g_vram);                  \
+            g_tilegen_gen++;                                                    \
+            if (VRAM_CONTENT(o_, (n))) g_tilegen_content_gen++;                 \
+            tg_note(o_, -1); } } } while (0)
 
 /* M3_TG_CHANGES=1: what in tilegen changes, per region of VRAM and per
  * register, in how many fields out of each 100 -- the input for drawing the
@@ -1554,7 +1565,7 @@ void bus_dma_copy(uint32_t dst, uint32_t src, uint32_t len)
         s = direct(src, n, 0);
         d = s ? direct(dst, n, 1) : NULL;
         if (s && d) {
-            VRAM_NOTE(d, memcmp(d, s, n) != 0);
+            VRAM_NOTE_N(d, n, memcmp(d, s, n) != 0);
             memmove(d, s, n);
         } else {
             uint32_t i;

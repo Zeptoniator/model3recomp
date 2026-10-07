@@ -45,7 +45,9 @@ static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len
 {
     uint64_t t = timer_us_gettime64();
     size_t got = scudpack_read(ctx, which, off, dst, len);
-    g_rom_us += timer_us_gettime64() - t;
+    t = timer_us_gettime64() - t;
+    g_rom_us += t;
+    m3_t_disc_us += t;
     return got;
 }
 
@@ -158,6 +160,9 @@ int main(void)
     setenv("M3_SIG_EVERY", SCUD_DC_SIG_EVERY, 1);
 #ifdef SCUD_DC_SIGMAP
     setenv("M3_SIGMAP", SCUD_DC_SIGMAP, 1);
+#endif
+#ifdef SCUD_DC_TIMING
+    setenv("M3_PROFILE", "1", 1);
 #endif
 #ifdef SCUD_DC_FNSIG
     setenv("M3_FNSIG", SCUD_DC_FNSIG, 1);
