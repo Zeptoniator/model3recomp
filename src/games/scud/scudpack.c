@@ -82,6 +82,26 @@ size_t scudpack_read(void *ctx, int which, uint32_t off, void *dst, size_t len)
         size_t take;
         if (pg >= p->pages[which]) break;
         s = p->slot[which][pg];
+        if (which == 2 || s >= p->hot) {
+            /* Outside the hot pages -- the ones the game touched first, in
+             * the order it touched them, laid out first -- reads are not in
+             * file order: the VROM is read by the renderer a 4 KB piece at a
+             * time, anywhere, and so is the banked CROM in a race. A
+             * read-ahead window there is 256 KB of disc per miss for pages
+             * nobody asked for (1214 s of a 2983 s race). Exactly the bytes,
+             * straight into the caller's aligned slot. */
+            long at = (long)p->first + (long)s * (long)p->page + (long)in;
+            size_t got;
+            take = p->page - in;
+            if (take > len - done) take = len - done;
+            if (p->pos != at && fseek(p->f, at, SEEK_SET)) break;
+            got = fread(out + done, 1, take, p->f);
+            p->reads++;
+            p->pos = at + (long)got;
+            done += got;
+            if (got != take) break;
+            continue;
+        }
         if (!(p->ra_n && s >= p->ra_first && s < p->ra_first + p->ra_n)) {
             long at = (long)p->first + (long)s * (long)p->page;
             n = p->count - s < p->ra_cap ? p->count - s : p->ra_cap;

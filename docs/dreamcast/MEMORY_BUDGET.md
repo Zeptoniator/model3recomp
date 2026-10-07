@@ -81,7 +81,8 @@ them:
 | Tilegen VRAM + battery RAM | 1 280 KB | unchanged |
 | Culling + polygon RAM | paged, 64 KB on first write | ~1.5 MB in attract (above) |
 | Real3D FIFO | 512 KB, dropped each field while nothing renders | peak 175 KB a field |
-| CROM | not in memory; 16 × 32 KB page cache (512 KB) off the disc | a desktop run with the bank paged gives the same signatures |
+| CROM | not in memory; 1 MB cache of 4 KB pieces off the disc (`M3_CROM_CACHE_KB`) | race working set up to 420 KB a field (`M3_CROM_WS=1`); signatures equal the desktop's to field 6000 |
+| VROM | not in memory; 1 MB cache of 4 KB pieces (`M3_VROM_CACHE_KB`) | race working set up to 580 KB a field (`M3_VROM_WS=1`); frames pixel-identical |
 | Sound board | absent (`sound_null.c`) | its tables were 1.1 MB of BSS |
 | `scudrace.elf` | 3 783 KB text, 125 KB BSS | ROM half of the lift cut to the reset routine |
 

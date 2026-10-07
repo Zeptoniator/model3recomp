@@ -1,5 +1,23 @@
 # Status
 
+## 2026-10-07 (later) — the disc stops being the race's bottleneck
+
+- **The ROM caches hold 4 KB pieces**, 1 MB each for the CROMs and the
+  VROM, with an index from piece to slot. In a race the renderer touches up
+  to 38 different 32 KB pages of VROM a field and the guest 35 of banked
+  CROM -- more than the 32-page caches, which thrashed every field -- but
+  only ~580 KB and ~420 KB of them (`M3_VROM_WS=1`, new `M3_CROM_WS=1`).
+- **The pack reads ahead only in its hot pages** (the boot's first-use
+  order); elsewhere a miss reads exactly its 4 KB, by DMA into an aligned
+  slot. A miss used to read 256 KB of pages nobody asked for.
+- Scripted race to field 6000, Flycast: **1828 s instead of 2983 s**; disc
+  **63 s (2526 reads) instead of 1214 s (9111)**; fields 5500-6000 232 s
+  instead of 895 s. Signatures equal the desktop's at all 30 checkpoints,
+  race screenshots pixel-identical to before. The boot reads a little more
+  (37 s of disc by field 4000, was 22).
+- What is left is the CPU: ~300 ms a field. Next: a profile of the race,
+  aggregated by function.
+
 ## 2026-10-07 — DC-08: the race on the Dreamcast, field for field the desktop's
 
 - **The scripted race runs on the Dreamcast** (Flycast): coin at 1500,
