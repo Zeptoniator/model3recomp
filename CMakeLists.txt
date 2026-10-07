@@ -10,6 +10,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # -ffp-contract=fast), which rounds differently. 575 lifted functions had one,
 # and a scripted race parted from the desktop's at field 4234 (DC-BUG-017).
 add_compile_options(-ffp-contract=off)
+# sqrt as the instruction: no errno to set, so __builtin_sqrt is fsqrt on the
+# SH-4 and sqrtsd on x86, both correctly rounded. With errno, and with KOS's
+# -fno-builtin, every square root was newlib's bit-by-bit software one
+# (5 % of a race field).
+add_compile_options(-fno-math-errno)
 
 # SDL2 is needed for the platform layer and the example, but not for the
 # semantic tests -- so a machine without it can still run the harness.

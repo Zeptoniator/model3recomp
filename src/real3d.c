@@ -1046,9 +1046,9 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
                     addr, rd32le(node), rd32le(node + 1 * 4),
                     rd32le(node + 2 * 4), rd32le(node + 3 * 4),
                     rd32le(node + 9 * 4), mo,
-                    (double)sqrtf(mm.m[0][0]*mm.m[0][0]+mm.m[0][1]*mm.m[0][1]+mm.m[0][2]*mm.m[0][2]),
-                    (double)sqrtf(mm.m[1][0]*mm.m[1][0]+mm.m[1][1]*mm.m[1][1]+mm.m[1][2]*mm.m[1][2]),
-                    (double)sqrtf(mm.m[2][0]*mm.m[2][0]+mm.m[2][1]*mm.m[2][1]+mm.m[2][2]*mm.m[2][2]),
+                    (double)__builtin_sqrtf(mm.m[0][0]*mm.m[0][0]+mm.m[0][1]*mm.m[0][1]+mm.m[0][2]*mm.m[0][2]),
+                    (double)__builtin_sqrtf(mm.m[1][0]*mm.m[1][0]+mm.m[1][1]*mm.m[1][1]+mm.m[1][2]*mm.m[1][2]),
+                    (double)__builtin_sqrtf(mm.m[2][0]*mm.m[2][0]+mm.m[2][1]*mm.m[2][1]+mm.m[2][2]*mm.m[2][2]),
                     (double)mm.m[0][3], (double)mm.m[1][3], (double)mm.m[2][3]); }
         if (mo > g_mat_max) g_mat_max = mo;
         if (big > g_mat_bigt) { g_mat_bigt = big; g_mat_bigi = mo; }
@@ -1068,7 +1068,7 @@ static void descend(uint32_t addr, const mat_t *m, int depth)
                 float cr = r3d_float16(w9) * g_mscale;
                 float br = r3d_float16(w9 >> 16) * g_mscale;
                 float x = cur.m[0][3], y = cur.m[1][3], z = cur.m[2][3];
-                float d = sqrtf(x * x + y * y + z * z);
+                float d = __builtin_sqrtf(x * x + y * y + z * z);
                 unsigned k;
                 for (k = 0; k < 4u; k++) del[k] = f32_of(rd32le(t + k * 8));
                 have_lod = 1;
@@ -1425,7 +1425,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
                                      + l2*tr->vn[2][2]);
                     float nl = nx*nx + ny*ny + nz*nz;
                     if (nl > 1e-6f) {
-                        float il = 1.0f / sqrtf(nl);
+                        float il = 1.0f / __builtin_sqrtf(nl);
                         float d = (nx*L[0] + ny*L[1] + nz*L[2]) * il;
                         float s2;
                         int rr, gg, bb;

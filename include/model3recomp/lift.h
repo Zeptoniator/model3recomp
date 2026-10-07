@@ -126,7 +126,7 @@ static M3_INLINE void m3_st8(uint32_t a, uint32_t v)
 #define F32(d)        ((double)(float)(d))
 
 static M3_INLINE double m3_fabs(double d)  { return fabs(d); }
-static M3_INLINE double m3_sqrt(double d)  { return sqrt(d); }
+static M3_INLINE double m3_sqrt(double d)  { return __builtin_sqrt(d); }  /* fsqrt, see CMakeLists */
 /* fctiw honours FPSCR[RN]; every Model 3 title leaves it at round-to-nearest,
  * which is what nearbyint gives under the default host mode. */
 static M3_INLINE double m3_round(double d) { return nearbyint(d); }
