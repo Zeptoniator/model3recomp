@@ -6,6 +6,7 @@
  * FIELDS stops after that many fields and writes shot.ppm; with it the run
  * is a test harness, without it a game. */
 #include "scud.h"
+#include "model3recomp/tilegen.h"
 #include "model3recomp/bus.h"
 #include "model3recomp/real3d.h"
 #include "model3recomp/lift.h"
@@ -110,6 +111,12 @@ static const m3_r3d_sink k_count_sink = { sink_begin, sink_poly, sink_end, NULL 
 
 static void on_field(void)
 {
+    if (getenv("M3_TG_CHECK")) {
+        /* The Dreamcast's 2D path, both ways, compared (tilegen.c). */
+        static uint16_t buf[512 * 384];
+        tilegen_render_pass_1555(0, buf, 512);
+        tilegen_render_pass_1555(1, buf, 512);
+    }
     if (getenv("M3_TG_COUNT")) {
         extern uint32_t g_tg_vram_writes, g_tg_reg_writes, g_tg_reg_changes;
         {

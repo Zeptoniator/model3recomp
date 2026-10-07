@@ -1,5 +1,26 @@
 # Status
 
+## 2026-10-07 (afternoon) — the HUD stops costing half a field
+
+- **Profile of the race** (fields 4400-5400, `SCUD_DC_PROFILE`, now dumped
+  whole and summed by function with `tools/dreamcast/profile.py`): 50 % in
+  tilegen's `render_pass` -- the 2D layers drawn whole, pixel by pixel,
+  every field, because the HUD changes every field (`M3_TG_CHANGES=1`: the
+  name table of layer 0 every field; late in the race the scroll of layers
+  0 and 1 too, so drawing only changed tiles would not have been enough).
+  Lifted guest code: 13 %. The 3D path (`draw_model`, `polygon`, clipping,
+  `real3d_render`): ~15 %.
+- **The 1555 path draws a tile at a time** (`pair_line_1555`): name entry
+  and pattern row fetched once per tile, empty tiles skipped whole, palette
+  straight to 1555. A colour offset (fades) keeps the per-pixel path.
+  `M3_TG_CHECK=1` draws every pass both ways and compares: 12 000 passes of
+  the desktop race, 0 differences (and it does report a deliberately broken
+  fast path, from field 408).
+- Scripted race to field 6000: **1200 s instead of 1828 s** (2983 s this
+  morning). Signatures equal the desktop's at all 30 checkpoints; race
+  screenshots pixel-identical but one, taken a field late by the harness.
+- Next in the profile: the 3D path and `sqrt` (3 % in `__ieee754_sqrt`).
+
 ## 2026-10-07 (later) — the disc stops being the race's bottleneck
 
 - **The ROM caches hold 4 KB pieces**, 1 MB each for the CROMs and the

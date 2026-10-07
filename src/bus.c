@@ -192,7 +192,45 @@ uint32_t g_tg_vram_writes, g_tg_reg_writes, g_tg_reg_changes;  /* diagnostics */
  * the generation alone. */
 #define IN_VRAM(p) (g_vram && (p) >= g_vram && (p) < g_vram + TILEGEN_VRAM_SIZE)
 #define VRAM_NOTE(p, changed) do { if (IN_VRAM(p)) { g_tg_vram_writes++;   \
-        if (changed) g_tilegen_gen++; } } while (0)
+        if (changed) { g_tilegen_gen++; tg_note((uint32_t)((p) - g_vram), -1); } } } while (0)
+
+/* M3_TG_CHANGES=1: what in tilegen changes, per region of VRAM and per
+ * register, in how many fields out of each 100 -- the input for drawing the
+ * 2D incrementally instead of whole every time anything moves. */
+static void tg_note(uint32_t off, int reg)
+{
+    static int on = -1;
+    static uint64_t field = ~0ull;
+    static unsigned fields_with[16], regs_with[64], seen_r[64], seen[16], n;
+    static const char *const names[8] = { "pattern", "linescroll", "stencil",
+        "name0", "name1", "name2", "name3", "palette" };
+    uint64_t f;
+    int k;
+    if (on < 0) on = getenv("M3_TG_CHANGES") != NULL;
+    if (!on) return;
+    f = model3recomp_frame_count();
+    if (f != field) {
+        for (k = 0; k < 8; k++) { fields_with[k] += seen[k]; seen[k] = 0; }
+        for (k = 0; k < 64; k++) { regs_with[k] += seen_r[k]; seen_r[k] = 0; }
+        if (++n >= 100) {
+            fprintf(stderr, "[tgchg] field %llu, fields of 100 with a change:",
+                    (unsigned long long)f);
+            for (k = 0; k < 8; k++)
+                if (fields_with[k]) fprintf(stderr, " %s %u", names[k], fields_with[k]);
+            for (k = 0; k < 64; k++)
+                if (regs_with[k]) fprintf(stderr, " r%02X %u", k * 4, regs_with[k]);
+            fprintf(stderr, "\n");
+            memset(fields_with, 0, sizeof fields_with);
+            memset(regs_with, 0, sizeof regs_with);
+            n = 0;
+        }
+        field = f;
+    }
+    if (reg >= 0) { seen_r[reg & 63] = 1; return; }
+    k = off < 0x0F6000u ? 0 : off < 0x0F7000u ? 1 : off < 0x0F8000u ? 2
+      : off < 0x100000u ? 3 + (int)((off - 0x0F8000u) / 0x2000u) : 7;
+    seen[k] = 1;
+}
 
 /* The Real3D's upload FIFO at 0x94000000.
  *
@@ -1256,6 +1294,7 @@ static void dev_write_word(uint32_t w, uint32_t v)
         if (g_tilegen_regs[(w >> 2) & 0x3Fu] != v) {
             g_tg_reg_changes++;
             g_tilegen_gen++;
+            tg_note(0, (int)((w >> 2) & 0x3Fu));
         }
         g_tilegen_regs[(w >> 2) & 0x3Fu] = v;
         if ((w & 0xFC) == 0x10) irq_ack(v);

@@ -233,9 +233,99 @@ void tilegen_render_pass(int above)
         render_pass(above, fb, fbw, fbh, NULL, 0);
 }
 
+static int g_tg_slow;      /* render_pass: the per-pixel path even for 1555 */
+
+/* M3_TG_CHECK=1: every pass drawn both ways and compared, the first lines
+ * that differ reported -- the fast path is only an optimisation if it draws
+ * the same picture. */
 unsigned tilegen_render_pass_1555(int above, uint16_t *dst, unsigned stride)
 {
-    return render_pass(above, NULL, 496, 384, dst, stride);
+    static int check = -1;
+    unsigned n;
+    if (check < 0) check = getenv("M3_TG_CHECK") != NULL;
+    n = render_pass(above, NULL, 496, 384, dst, stride);
+    if (check) {
+        static uint16_t *ref;
+        static unsigned bad;
+        unsigned m, y;
+        if (!ref) ref = malloc((size_t)stride * 384u * 2u);
+        if (!ref) return n;
+        g_tg_slow = 1;
+        m = render_pass(above, NULL, 496, 384, ref, stride);
+        g_tg_slow = 0;
+        for (y = 0; y < 384; y++)
+            if (memcmp(ref + (size_t)y * stride, dst + (size_t)y * stride, 496u * 2u)) {
+                if (bad++ < 20)
+                    fprintf(stderr, "[tgcheck] field %llu pass %d line %u differs\n",
+                            (unsigned long long)model3recomp_frame_count(), above, y);
+                break;
+            }
+        if (m != n && bad++ < 20)
+            fprintf(stderr, "[tgcheck] field %llu pass %d: %u pixels, %u slow\n",
+                    (unsigned long long)model3recomp_frame_count(), above, n, m);
+        {
+            static unsigned passes;
+            if (++passes % 2000u == 0)
+                fprintf(stderr, "[tgcheck] %u passes compared, %u differ, "
+                        "%u pixels in the last\n", passes, bad, n);
+        }
+    }
+    return n;
+}
+
+/* One pair of layers on one line, into a 1555 line buffer -- what the
+ * per-pixel loop in render_pass() does, a tile at a time: the name entry
+ * and pattern row are fetched once per tile, an empty tile is skipped
+ * whole, and the palette goes straight to 1555 (the same bits the 8888
+ * round trip gave). Drawing the HUD whole every field was half of a race
+ * field on the Dreamcast. Not for a colour offset (fades): that keeps the
+ * slow path. */
+static unsigned pair_line_1555(const uint8_t *v, int pair, unsigned lmask,
+                               const int want[2], const int four[2],
+                               const int lx[2], const int ly[2], uint16_t *line)
+{
+    unsigned drawn = 0;
+    int x = 0;
+    while (x < 496) {
+        int blk_end = (x | 31) + 1;
+        int k = ((lmask >> (15 - x / 32)) & 1u) ? 0 : 1;
+        uint32_t nt;
+        unsigned sy, row, maprow;
+        if (blk_end > 496) blk_end = 496;
+        if (!want[k]) { x = blk_end; continue; }
+        nt = VRAM_NAME_BASE + (uint32_t)(pair * 2 + k) * LAYER_STRIDE;
+        sy = (unsigned)ly[k] & 511u;
+        row = sy & 7u;
+        maprow = (sy / TILE) * MAP_W;
+        while (x < blk_end) {
+            unsigned sx = (unsigned)(x + lx[k]) & 511u;
+            unsigned col = sx & 7u, e = name_entry(v, nt, maprow + sx / TILE);
+            int run = 8 - (int)col;
+            if (x + run > blk_end) run = blk_end - x;
+            if (!e) { x += run; continue; }
+            for (; run > 0; run--, x++, col++) {
+                unsigned idx, c;
+                uint32_t off;
+                if (four[k]) {
+                    uint32_t pattern = (((uint32_t)(e & 0x3FFFu) << 1) | ((e >> 15) & 1u))
+                                     * TILE_BYTES;
+                    uint8_t byte = v[pattern + row * 4u + (3u - (col >> 1))];
+                    idx = (e & 0x7FF0u) | ((col & 1u) ? (byte & 0x0Fu) : (byte >> 4u));
+                } else {
+                    uint32_t pattern = (uint32_t)(e & 0x3FFFu) * (TILE_BYTES * 2u);
+                    idx = (e & 0x7F00u) | v[pattern + row * 8u + (col ^ 3u)];
+                }
+                off = VRAM_PALETTE + idx * 4u;
+                if (off + 4u > VRAM_END) continue;
+                c = ((unsigned)v[off + 1] << 8) | v[off];
+                if (c & 0x8000u) continue;
+                line[x] = (uint16_t)(0x8000u | ((c & 0x1Fu) << 10) | (c & 0x03E0u)
+                                   | ((c >> 10) & 0x1Fu));
+                drawn++;
+            }
+        }
+    }
+    return drawn;
 }
 
 /* Into a 32-bit framebuffer, or (fb NULL) a 1555 target: each line built in
@@ -357,6 +447,10 @@ static unsigned render_pass(int above, uint32_t *fb, int fbw, int fbh,
             }
             if (!want[0] && !want[1])
                 continue;
+            if (t16 && !coff && !g_tg_slow) {
+                drawn += pair_line_1555(v, pair, lmask, want, four, lx, ly, line);
+                continue;
+            }
             for (x = 0; x < fbw && x < 496; x++) {
                 int k = ((lmask >> (15 - x / 32)) & 1u) ? 0 : 1;
                 int idx, transparent;

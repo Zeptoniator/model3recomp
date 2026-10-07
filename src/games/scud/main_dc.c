@@ -52,9 +52,9 @@ static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len
 #ifdef SCUD_DC_PROFILE
 /* A sampling profiler: a second thread wakes every few milliseconds and
  * reads the program counter the main thread was preempted at (its saved
- * context). Counts per 16-byte bucket; the end of the run prints the top
- * ones, to be named with sh-elf-addr2line against scudrace.elf. Samples are
- * taken from SCUD_DC_PROFILE_FROM on. */
+ * context). Counts per 16-byte bucket; the end of the run prints them all,
+ * for tools/dreamcast/profile.py to sum by function against scudrace.elf.
+ * Samples are taken from SCUD_DC_PROFILE_FROM on. */
 #ifndef SCUD_DC_PROFILE_FROM
 #define SCUD_DC_PROFILE_FROM 450
 #endif
@@ -84,18 +84,19 @@ static void *profiler(void *arg)
 
 static void profile_report(void)
 {
-    int top, i, best;
+    /* Every bucket, eight to a line: a top-N of buckets is not a profile
+     * (lifted code is thousands of small functions; their total hides in
+     * the tail). tools/dreamcast/profile.py sums them by function. */
+    int i, k = 0;
     g_prof_on = 0;
     printf("[prof] %lu samples\n", (unsigned long)g_prof_total);
-    for (top = 0; top < 80; top++) {
-        best = -1;
-        for (i = 0; i < PROF_SLOTS; i++)
-            if (g_prof_n[i] && (best < 0 || g_prof_n[i] > g_prof_n[best])) best = i;
-        if (best < 0) break;
-        printf("[prof] %08lX %lu\n", (unsigned long)g_prof_pc[best],
-               (unsigned long)g_prof_n[best]);
-        g_prof_n[best] = 0;
+    for (i = 0; i < PROF_SLOTS; i++) {
+        if (!g_prof_n[i]) continue;
+        if (k == 0) printf("[prof]");
+        printf(" %08lX:%lu", (unsigned long)g_prof_pc[i], (unsigned long)g_prof_n[i]);
+        if (++k == 8) { printf("\n"); k = 0; }
     }
+    if (k) printf("\n");
 }
 #endif
 
