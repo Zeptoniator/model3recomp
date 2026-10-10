@@ -39,6 +39,7 @@
 
 static scudpack_t g_pack;
 static uint64_t g_t0, g_rom_us;   /* time spent reading the disc */
+static uint64_t g_hold_us;        /* frames held for the harness (SCUD_DC_SHOT_HOLD_MS) */
 
 /* SCUD.DAT through the bus's page cache; see scudpack.c. */
 static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len)
@@ -109,7 +110,7 @@ static void report(const char *when)
            "ROM pages missed %llu (VROM %llu), disc reads %llu (%llu ms)\n",
            when,
            (unsigned long long)model3recomp_frame_count(),
-           (unsigned long long)((timer_us_gettime64() - g_t0) / 1000),
+           (unsigned long long)((timer_us_gettime64() - g_t0 - g_hold_us) / 1000),
            (unsigned long)mi.uordblks >> 10,
            (unsigned)(bus_real3d_bytes() >> 10),
            (unsigned long long)bus_rom_cache_misses(),
@@ -136,7 +137,20 @@ static void on_field(void)
         || (f >= SCUD_DC_SHOT_FROM && f % SCUD_DC_SHOT_EVERY == 0)
 #endif
         )
+    {
         printf("SCUD SHOT field %llu\n", (unsigned long long)f);
+#ifdef SCUD_DC_SHOT_HOLD_MS
+        /* Hold the frame on screen while the harness photographs it: the
+         * game runs fast enough now that the capture, taken when the line
+         * above shows up, could land a few fields late. Not counted in the
+         * times reported. */
+        {
+            uint64_t t = timer_us_gettime64();
+            thd_sleep(SCUD_DC_SHOT_HOLD_MS);
+            g_hold_us += timer_us_gettime64() - t;
+        }
+#endif
+    }
     if (f > SCUD_DC_FIELDS) {          /* after field N's signature */
         report("end");
 #ifdef SCUD_DC_PROFILE
@@ -160,6 +174,9 @@ int main(void)
     setenv("M3_SIG_EVERY", SCUD_DC_SIG_EVERY, 1);
 #ifdef SCUD_DC_SIGMAP
     setenv("M3_SIGMAP", SCUD_DC_SIGMAP, 1);
+#endif
+#ifdef SCUD_DC_OLD2D
+    setenv("M3_MAP2D", "0", 1);     /* the screen-space 2D passes, for an A/B */
 #endif
 #ifdef SCUD_DC_TIMING
     setenv("M3_PROFILE", "1", 1);
@@ -192,6 +209,11 @@ int main(void)
     scud_board_config(&cfg);
     if (!scudpack_open(&g_pack, "/cd/SCUD.DAT", 8)) {
         printf("no /cd/SCUD.DAT (tools/scud/pack.py)\nSCUD DC FAILED\n");
+        return 1;
+    }
+    if (!g_pack.vrom_bytes) {
+        printf("/cd/SCUD.DAT has no VROM (version 1); rebuild it with the "
+               "current tools/scud/pack.py\nSCUD DC FAILED\n");
         return 1;
     }
     printf("SCUD.DAT: %lu pages, %lu hot first, read 8 at a time\n",

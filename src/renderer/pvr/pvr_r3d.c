@@ -19,12 +19,11 @@
  * Uploads are rare (the boot, a change of course); any upload empties the
  * cache.
  *
- * The tilemap layers. tilegen.c draws each priority pass (behind the 3D,
- * in front of it) into a 512x512 ARGB1555 texture, alpha clear where no
- * layer drew; here they are two screen-sized quads, the one behind at the
- * far end of the depth range in the opaque list, the one in front at the
- * near end in the punch-through list. They are drawn after pvr_wait_ready(),
- * so never into a texture the PVR is still reading.
+ * The tilemap layers. Each of the four 512x512 maps is an ARGB1555 texture;
+ * only changed tiles are redrawn. The PVR applies scroll and stencil while
+ * drawing rectangles behind or in front of the 3D. A colour offset uses the
+ * older two screen-space textures because it changes every visible pixel.
+ * Updates happen after pvr_wait_ready(), never while the PVR reads them.
  *
  * Not yet: per-viewport depth ranges (one depth buffer for all
  * viewports). */
@@ -45,7 +44,7 @@
 #define SHEET_W 1024u                  /* the half-size sheet */
 #define SHEET_H 1024u
 #define TEX_SLOTS 256
-#define TEX_BUDGET (1536u * 1024u)     /* PVR memory for converted textures */
+#define TEX_BUDGET (1024u * 1024u)     /* PVR memory for converted textures; a race uses ~770 KB */
 #define LAYER_W 512u                   /* a 496x384 tilemap pass */
 
 typedef struct {
@@ -77,8 +76,15 @@ static size_t g_tex_bytes;
 static uint32_t g_frame;
 static unsigned g_tex_made, g_tex_failed;
 static int g_cur_tex = -2, g_cur_flip = -1;   /* last header sent */
-static uint16_t *g_layer[2];                   /* behind, in front of the 3D */
-static pvr_poly_hdr_t g_layer_hdr[2];
+/* The four tilemap layers, each a 512x512 picture of its whole map; the
+ * PVR applies the scroll and the stencil (draw_layers). Far headers are for
+ * layers behind the 3D, near ones for those in front. */
+static uint16_t *g_map[4];
+static pvr_poly_hdr_t g_map_far[4], g_map_near[4];
+static int g_map_force[4];
+/* The screen-space passes (a colour offset, or M3_MAP2D=0) borrow the maps
+ * of layers 2 and 0: behind, in front of the 3D. */
+static int g_fallback;
 static unsigned g_layer_px[2];
 static unsigned g_layer_redraws;
 
@@ -246,7 +252,8 @@ static void layer_quad(int which, float z)
     static const float xs[4] = { 0, 640, 0, 640 }, ys[4] = { 0, 0, 480, 480 };
     const float um = 496.0f / LAYER_W, vm = 384.0f / LAYER_W;
     int k;
-    pvr_prim(&g_layer_hdr[which], sizeof g_layer_hdr[which]);
+    if (which) pvr_prim(&g_map_near[0], sizeof g_map_near[0]);
+    else       pvr_prim(&g_map_far[2], sizeof g_map_far[2]);
     for (k = 0; k < 4; k++) {
         pvr_vertex_t pv;
         pv.flags = k == 3 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
@@ -255,6 +262,75 @@ static void layer_quad(int which, float z)
         pv.v = (k & 2) ? vm : 0.0f;
         pv.argb = 0xFFFFFFFFu; pv.oargb = 0;
         pvr_prim(&pv, sizeof pv);
+    }
+    g_cur_tex = -2;
+}
+
+/* One rectangle of a layer's map on screen: screen pixels [x0,x1) x
+ * [y0,y1) of the 496x384 display, showing the map from (mx, my), wrapping
+ * at 512 (the texture repeats). */
+static void map_rect(int x0, int x1, int y0, int y1, int mx, int my, float z)
+{
+    const float sx = 640.0f / 496.0f, sy = 480.0f / 384.0f;
+    float u0 = (float)mx / 512.0f, v0 = (float)my / 512.0f;
+    float u1 = u0 + (float)(x1 - x0) / 512.0f, v1 = v0 + (float)(y1 - y0) / 512.0f;
+    pvr_vertex_t pv;
+    int k;
+    for (k = 0; k < 4; k++) {
+        pv.flags = k == 3 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+        pv.x = (float)((k & 1) ? x1 : x0) * sx;
+        pv.y = (float)((k & 2) ? y1 : y0) * sy;
+        pv.z = z;
+        pv.u = (k & 1) ? u1 : u0;
+        pv.v = (k & 2) ? v1 : v0;
+        pv.argb = 0xFFFFFFFFu; pv.oargb = 0;
+        pvr_prim(&pv, sizeof pv);
+    }
+}
+
+/* The layers of one priority pass, as rectangles of their maps: per pair
+ * (B under A), runs of lines whose stencil half and scroll do not change,
+ * cut into the 32-pixel columns the stencil gives to each layer of the
+ * pair. Most of a race is one run of 384 lines and one rectangle a layer;
+ * line scroll is a run a line. */
+static void draw_layers(int above)
+{
+    int pair;
+    for (pair = 1; pair >= 0; pair--) {
+        int want[2], k, y = 0;
+        float z = above ? 1e6f : (pair ? 1e-6f : 2e-6f);   /* B under A */
+        for (k = 0; k < 2; k++) want[k] = tilegen_layer_drawn(pair * 2 + k, above);
+        if (!want[0] && !want[1]) continue;
+        while (y < 384) {
+            uint32_t sw = tilegen_stencil(y);
+            unsigned half = pair ? (sw & 0xFFFFu) : (sw >> 16);
+            int lx[2] = { 0, 0 }, ly[2] = { 0, 0 }, y1 = y + 1, c;
+            for (k = 0; k < 2; k++)
+                if (want[k]) tilegen_line_scroll(pair * 2 + k, y, &lx[k], &ly[k]);
+            for (; y1 < 384; y1++) {
+                uint32_t sw1 = tilegen_stencil(y1);
+                int same = (pair ? (sw1 & 0xFFFFu) : (sw1 >> 16)) == half;
+                for (k = 0; same && k < 2; k++)
+                    if (want[k]) {
+                        int x2, y2;
+                        tilegen_line_scroll(pair * 2 + k, y1, &x2, &y2);
+                        same = x2 == lx[k] && y2 == ((ly[k] + (y1 - y)) & 511);
+                    }
+                if (!same) break;
+            }
+            for (c = 0; c < 16;) {
+                int kk = ((half >> (15 - c)) & 1u) ? 0 : 1, c1 = c + 1;
+                while (c1 < 16 && ((((half >> (15 - c1)) & 1u) ? 0 : 1) == kk)) c1++;
+                if (want[kk]) {
+                    int L = pair * 2 + kk, x0 = c * 32, x1 = c1 * 32 > 496 ? 496 : c1 * 32;
+                    pvr_poly_hdr_t *h = above ? &g_map_near[L] : &g_map_far[L];
+                    pvr_prim(h, sizeof *h);
+                    map_rect(x0, x1, y, y1, (lx[kk] + x0) & 511, ly[kk], z);
+                }
+                c = c1;
+            }
+            y = y1;
+        }
     }
     g_cur_tex = -2;
 }
@@ -272,19 +348,38 @@ static void begin_frame(void)
     /* Only when the guest has written tilegen VRAM or a register since:
      * through most of attract the 2D does not move, and drawing it costs
      * more than the rest of the field. */
-    if (!ever || gen != drawn_gen) {
-        uint64_t t = m3_now_us();
-        g_layer_px[0] = tilegen_render_pass_1555(0, g_layer[0], LAYER_W);
-        g_layer_px[1] = tilegen_render_pass_1555(1, g_layer[1], LAYER_W);
-        m3_t_2d_us += m3_now_us() - t;
-        drawn_gen = gen;
-        ever = 1;
-        g_layer_redraws++;
+    {
+        static int old2d = -1;
+        int fallback;
+        if (old2d < 0) { const char *e = getenv("M3_MAP2D"); old2d = e && *e == '0'; }
+        /* Filtering separately is not associative with alpha composition.
+         * Keep the exact screen-space path for multi-pair priority planes
+         * and line scroll; both are short transition effects in Scud. */
+        fallback = old2d || tilegen_colour_offset() || !tilegen_map_filter_safe();
+        if (fallback != g_fallback) { ever = 0; g_fallback = fallback; }
+        if (!ever || gen != drawn_gen) {
+            uint64_t t = m3_now_us();
+            if (fallback) {
+                g_layer_px[0] = tilegen_render_pass_1555(0, g_map[2], LAYER_W);
+                g_layer_px[1] = tilegen_render_pass_1555(1, g_map[0], LAYER_W);
+                g_map_force[0] = g_map_force[2] = 1;
+            } else {
+                int L;
+                for (L = 0; L < 4; L++)
+                    if (tilegen_layer_drawn(L, 0) || tilegen_layer_drawn(L, 1)) {
+                        tilegen_update_map_1555(L, g_map[L], g_map_force[L]);
+                        g_map_force[L] = 0;
+                    }
+            }
+            m3_t_2d_us += m3_now_us() - t;
+            drawn_gen = gen;
+            ever = 1;
+            g_layer_redraws++;
+        }
     }
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
     g_cur_tex = -2; g_cur_flip = -1;
-    if (g_layer_px[0]) layer_quad(0, 1e-6f);
     g_npt = g_ntr = g_op = 0;
     g_frame++;
     g_open = 1;
@@ -336,12 +431,21 @@ static void flush_kept(pvr_list_t list, const kept_t *k, unsigned n)
     unsigned i;
     pvr_list_begin(list);
     g_cur_tex = -2; g_cur_flip = -1;
+    /* Behind the 3D: far, so the depth test puts every 3D polygon over
+     * them; punch-through, so an empty texel shows what is under it. */
+    if (list == PVR_LIST_PT_POLY) {
+        if (!g_fallback) draw_layers(0);
+        else if (g_layer_px[0]) layer_quad(0, 1e-6f);
+        g_cur_tex = -2; g_cur_flip = -1;
+    }
     for (i = 0; i < n; i++) {
         send_header(list, k[i].tex, k[i].flip);
         strip(k[i].v, k[i].n, k[i].argb, 1.0f, 1.0f);
     }
-    if (list == PVR_LIST_PT_POLY && g_layer_px[1])
-        layer_quad(1, 1e6f);
+    if (list == PVR_LIST_PT_POLY) {
+        if (!g_fallback) draw_layers(1);
+        else if (g_layer_px[1]) layer_quad(1, 1e6f);
+    }
     pvr_list_finish();
 }
 
@@ -401,25 +505,28 @@ int pvr_r3d_install(void)
     for (p = (uint32_t *)g_sheet, i = 0; i < SHEET_W * SHEET_H / 2u; i++) p[i] = 0;
     real3d_set_sheet(g_sheet, 1);
 
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < 4; i++) {
         unsigned k;
-        g_layer[i] = (uint16_t *)pvr_mem_malloc(LAYER_W * LAYER_W * 2u);
-        if (!g_layer[i]) return 0;
-        for (p = (uint32_t *)g_layer[i], k = 0; k < LAYER_W * LAYER_W / 2u; k++) p[k] = 0;
-        pvr_poly_cxt_txr(&cx, i ? PVR_LIST_PT_POLY : PVR_LIST_OP_POLY,
+        g_map[i] = (uint16_t *)pvr_mem_malloc(LAYER_W * LAYER_W * 2u);
+        if (!g_map[i]) return 0;
+        for (p = (uint32_t *)g_map[i], k = 0; k < LAYER_W * LAYER_W / 2u; k++) p[k] = 0;
+        g_map_force[i] = 1;
+        pvr_poly_cxt_txr(&cx, PVR_LIST_PT_POLY,
                          PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED,
-                         LAYER_W, LAYER_W, g_layer[i], PVR_FILTER_BILINEAR);
+                         LAYER_W, LAYER_W, g_map[i], PVR_FILTER_BILINEAR);
         cx.gen.culling = PVR_CULLING_NONE;
-        /* In front of everything, whatever the 3D wrote to the depth
-         * buffer; behind everything for the other one. */
-        cx.depth.comparison = i ? PVR_DEPTHCMP_ALWAYS : PVR_DEPTHCMP_GREATER;
-        pvr_poly_compile(&g_layer_hdr[i], &cx);
+        /* Behind everything the 3D draws, or in front of everything,
+         * whatever the 3D wrote to the depth buffer. */
+        cx.depth.comparison = PVR_DEPTHCMP_GREATER;
+        pvr_poly_compile(&g_map_far[i], &cx);
+        cx.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+        pvr_poly_compile(&g_map_near[i], &cx);
     }
 
     g_pt = malloc(sizeof(kept_t) * PT_MAX);
     g_tr = malloc(sizeof(kept_t) * TR_MAX);
     if (!g_pt || !g_tr) return 0;
-    printf("[pvr] sheet 2048 KB and tilemap 1024 KB in PVR memory, %u KB left for textures"
+    printf("[pvr] sheet 2048 KB and tilemaps 2048 KB in PVR memory, %u KB left for textures"
            " (budget %u KB)\n", (unsigned)(pvr_mem_available() >> 10),
            TEX_BUDGET >> 10);
     real3d_set_sink(&k_sink);

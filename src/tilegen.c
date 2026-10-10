@@ -434,14 +434,15 @@ static unsigned render_pass(int above, uint32_t *fb, int fbw, int fbh,
             last = rg[0x20/4];
             fprintf(stderr, "[tilegen] field %llu r20=%08X (swapped %08X)\n",
                     (unsigned long long)model3recomp_frame_count(),
-                    rg[0x20/4],
-                    ((rg[0x20/4] & 0xFFu) << 24) | ((rg[0x20/4] & 0xFF00u) << 8) |
-                    ((rg[0x20/4] >> 8) & 0xFF00u) | ((rg[0x20/4] >> 24) & 0xFFu));
+                    (unsigned)rg[0x20/4],
+                    (unsigned)(((rg[0x20/4] & 0xFFu) << 24) |
+                    ((rg[0x20/4] & 0xFF00u) << 8) |
+                    ((rg[0x20/4] >> 8) & 0xFF00u) | ((rg[0x20/4] >> 24) & 0xFFu)));
             { int L;
               for (L = 0; L < LAYERS; L++)
                   fprintf(stderr, "          L%d scroll %08X  enabled %d"
                                   "  4bpp %d  above3d %d\n",
-                          L, reg(0x60u + (unsigned)L * 4u),
+                          L, (unsigned)reg(0x60u + (unsigned)L * 4u),
                           layer_enabled(L), layer_4bpp(L),
                           layer_above_3d(L)); }
             fflush(stderr);
@@ -463,8 +464,8 @@ static unsigned render_pass(int above, uint32_t *fb, int fbw, int fbh,
         }
         fprintf(stderr, "[tgusage] field %llu stencil %u word(s):",
                 (unsigned long long)model3recomp_frame_count(), nw);
-        for (yy = 0; yy < nw; yy++) fprintf(stderr, " %08X", words[yy]);
-        fprintf(stderr, " coff %08X %08X |", reg(0x40), reg(0x44));
+        for (yy = 0; yy < nw; yy++) fprintf(stderr, " %08X", (unsigned)words[yy]);
+        fprintf(stderr, " coff %08X %08X |", (unsigned)reg(0x40), (unsigned)reg(0x44));
         for (L = 0; L < LAYERS; L++) {
             uint32_t sr = reg(0x60u + L * 4u), b = VRAM_NAME_BASE + L * LAYER_STRIDE;
             unsigned nz = 0, i;
@@ -474,7 +475,7 @@ static unsigned render_pass(int above, uint32_t *fb, int fbw, int fbh,
                     layer_above_3d((int)L) ? " front" : " back",
                     layer_4bpp((int)L) ? " 4bpp" : " 8bpp",
                     (sr & 0x8000u) ? " LINESCROLL" : "",
-                    sr & 0x3FFu, (sr >> 16) & 0x1FFu, nz);
+                    (unsigned)(sr & 0x3FFu), (unsigned)((sr >> 16) & 0x1FFu), nz);
         }
         fprintf(stderr, "\n");
     }
@@ -556,4 +557,128 @@ static unsigned render_pass(int above, uint32_t *fb, int fbw, int fbh,
         }
     }
     return drawn;
+}
+
+/* ---- Layers as textures of their maps -----------------------------------
+ * For a back end that keeps each layer as a 512x512 picture of its whole
+ * map and lets the GPU apply the scroll and the stencil (the Dreamcast's
+ * PVR). Drawing the screen-space passes cost 37 ms a race field and 95 in
+ * the menus; a map changes a few tiles a field (the HUD's digits). */
+
+/* One 8x8 tile of a layer's map at its place in a 512x512 1555 picture,
+ * written a 32-bit word at a time (video memory takes no byte writes). */
+static void map_tile_1555(const uint8_t *v, int layer, int four_bit,
+                          unsigned i, uint16_t *dst)
+{
+    unsigned e = name_entry(v, VRAM_NAME_BASE + (uint32_t)layer * LAYER_STRIDE, i);
+    unsigned tx = i % MAP_W, ty = i / MAP_W, row, col;
+    uint32_t *d32 = (uint32_t *)(dst + (size_t)ty * TILE * 512u + tx * TILE);
+    int clear = !e || tile_clear(v, e, four_bit);
+    for (row = 0; row < 8u; row++, d32 += 512u / 2u) {
+        uint16_t px[8];
+        if (clear) { d32[0] = d32[1] = d32[2] = d32[3] = 0; continue; }
+        for (col = 0; col < 8u; col++) {
+            unsigned idx, c;
+            uint32_t off;
+            px[col] = 0;
+            if (four_bit) {
+                uint32_t pattern = (((uint32_t)(e & 0x3FFFu) << 1) | ((e >> 15) & 1u))
+                                 * TILE_BYTES;
+                uint8_t byte = v[pattern + row * 4u + (3u - (col >> 1))];
+                idx = (e & 0x7FF0u) | ((col & 1u) ? (byte & 0x0Fu) : (byte >> 4u));
+            } else {
+                uint32_t pattern = (uint32_t)(e & 0x3FFFu) * (TILE_BYTES * 2u);
+                idx = (e & 0x7F00u) | v[pattern + row * 8u + (col ^ 3u)];
+            }
+            off = VRAM_PALETTE + idx * 4u;
+            if (off + 4u > VRAM_END) continue;
+            c = ((unsigned)v[off + 1] << 8) | v[off];
+            if (c & 0x8000u) continue;
+            px[col] = (uint16_t)(0x8000u | ((c & 0x1Fu) << 10) | (c & 0x03E0u)
+                               | ((c >> 10) & 0x1Fu));
+        }
+        d32[0] = (uint32_t)px[0] | ((uint32_t)px[1] << 16);
+        d32[1] = (uint32_t)px[2] | ((uint32_t)px[3] << 16);
+        d32[2] = (uint32_t)px[4] | ((uint32_t)px[5] << 16);
+        d32[3] = (uint32_t)px[6] | ((uint32_t)px[7] << 16);
+    }
+}
+
+unsigned tilegen_update_map_1555(int layer, uint16_t *dst, int force)
+{
+    static uint16_t last[LAYERS][MAP_W * MAP_W];
+    static int valid[LAYERS], depth[LAYERS];
+    static uint32_t gen = 0xFFFFFFFFu;
+    const uint8_t *v = bus_vram(NULL);
+    uint32_t nt = VRAM_NAME_BASE + (uint32_t)layer * LAYER_STRIDE;
+    int four = layer_4bpp(layer);
+    unsigned i, n = 0;
+    if (!v || layer < 0 || layer >= LAYERS || !dst) return 0;
+    if (bus_tilegen_content_generation() != gen) {
+        gen = bus_tilegen_content_generation();
+        memset(valid, 0, sizeof valid);
+        if (g_tile_gen != gen) {
+            g_tile_gen = gen;
+            memset(g_tile_known, 0, sizeof g_tile_known);
+            memset(g_tile_clear, 0, sizeof g_tile_clear);
+        }
+    }
+    if (depth[layer] != four) valid[layer] = 0;
+    if (force) valid[layer] = 0;
+    for (i = 0; i < MAP_W * MAP_W; i++) {
+        unsigned e = name_entry(v, nt, i);
+        if (valid[layer] && last[layer][i] == e) continue;
+        last[layer][i] = (uint16_t)e;
+        map_tile_1555(v, layer, four, i, dst);
+        n++;
+    }
+    valid[layer] = 1;
+    depth[layer] = four;
+    return n;
+}
+
+int tilegen_layer_drawn(int layer, int above)
+{
+    return g_enable_layer[layer] && layer_enabled(layer) &&
+           ((g_layer_mask >> layer) & 1u) && layer_above_3d(layer) == (above != 0);
+}
+
+void tilegen_line_scroll(int layer, int y, int *x, int *ly)
+{
+    const uint8_t *v = bus_vram(NULL);
+    uint32_t sr = reg(0x60u + (unsigned)layer * 4u);
+    *ly = (int)((((sr >> 16) & 0x1FFu) + (unsigned)y) & 511u);
+    if ((sr & 0x8000u) && v) {
+        uint32_t w = le32(v, VRAM_LINESCROLL + (uint32_t)layer * 0x400u
+                             + (uint32_t)(y / 2) * 4u);
+        *x = (int)(((y & 1) ? (w & 0xFFFFu) : (w >> 16)) & 511u);
+    } else {
+        *x = (int)(sr & 0x1FFu);
+    }
+}
+
+uint32_t tilegen_stencil(int y)
+{
+    const uint8_t *v = bus_vram(NULL);
+    return v ? le32(v, VRAM_STENCIL + (uint32_t)y * 4u) : 0xFFFFFFFFu;
+}
+
+int tilegen_colour_offset(void)
+{
+    return reg(0x40) != 0 || reg(0x44) != 0;
+}
+
+int tilegen_map_filter_safe(void)
+{
+    int above, layer;
+    for (layer = 0; layer < LAYERS; layer++)
+        if ((tilegen_layer_drawn(layer, 0) || tilegen_layer_drawn(layer, 1)) &&
+            (reg(0x60u + (unsigned)layer * 4u) & 0x8000u))
+            return 0;
+    for (above = 0; above < 2; above++) {
+        int pair_a = tilegen_layer_drawn(0, above) || tilegen_layer_drawn(1, above);
+        int pair_b = tilegen_layer_drawn(2, above) || tilegen_layer_drawn(3, above);
+        if (pair_a && pair_b) return 0;
+    }
+    return 1;
 }

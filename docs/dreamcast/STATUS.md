@@ -1,5 +1,28 @@
 # Status
 
+## 2026-10-10 — four persistent tilemaps, exact picture at 1.35x speed
+
+- The PVR now keeps the four 512x512 tile layers as separate ARGB1555 map
+  textures. `tilegen_update_map_1555()` redraws only changed name entries;
+  PVR rectangles apply scroll, stencil and the behind/in-front priority.
+- Filtering separate alpha layers is not always pixel-equivalent to filtering
+  the composed pass. Colour offsets, two layer pairs on the same priority
+  plane, and active line scroll therefore use the established screen-space
+  path. This keeps transitions and the early race exact while retaining the
+  incremental path for the expensive live HUD.
+- Full scripted Flycast race through field 6000: **783.299 s instead of
+  1057.818 s** (screenshot holds excluded), 25.9 % less time / 1.35x as fast.
+  All 30 RAM signatures match the desktop reference; all 22 A/B screenshots
+  are pixel-identical to the old Dreamcast path. The texture cache peaks at
+  697 KB with no refused texture inside its new 1 MB budget.
+- `M3_TG_MAP_CHECK=1` composes the persistent maps on the desktop and compares
+  every eligible pass with the screen-space renderer. A 6000-field scripted
+  race completed with no difference, including stencil, scroll, line-scroll
+  and layer-depth changes.
+- The Dreamcast executable now rejects a version-1 `SCUD.DAT`: it has no VROM
+  and can only produce 2D over a black scene. Rebuild the pack with the current
+  `tools/scud/pack.py` (version 2).
+
 ## 2026-10-07 (afternoon) — the HUD stops costing half a field
 
 - **Profile of the race** (fields 4400-5400, `SCUD_DC_PROFILE`, now dumped

@@ -109,8 +109,85 @@ static void sink_end(void)
 }
 static const m3_r3d_sink k_count_sink = { sink_begin, sink_poly, sink_end, NULL };
 
+/* M3_TG_MAP_CHECK=1: build the four persistent 512x512 layer pictures used
+ * by the PVR back end, compose them in map space on the host, and compare
+ * every active field with the established screen-space renderer. This checks
+ * incremental name-table updates as well as scroll, line scroll, stencil,
+ * depth and priority changes over a complete scripted race. Colour offsets
+ * are skipped because the Dreamcast deliberately falls back to screen-space
+ * rendering for those fields. */
+static void check_tilegen_maps(void)
+{
+    enum { MAP_W = 512, OUT_W = 512, OUT_H = 384 };
+    static uint16_t *maps[4], *got, *ref;
+    static int enabled = -1, ready;
+    static unsigned passes, bad;
+    int above, layer;
+
+    if (enabled < 0) enabled = getenv("M3_TG_MAP_CHECK") != NULL;
+    if (!enabled || tilegen_colour_offset()) return;
+    if (!ready) {
+        for (layer = 0; layer < 4; layer++)
+            maps[layer] = (uint16_t *)calloc(MAP_W * MAP_W, sizeof(uint16_t));
+        got = (uint16_t *)calloc(OUT_W * OUT_H, sizeof(uint16_t));
+        ref = (uint16_t *)calloc(OUT_W * OUT_H, sizeof(uint16_t));
+        for (layer = 0; layer < 4; layer++)
+            if (!maps[layer]) break;
+        if (layer != 4 || !got || !ref) {
+            fprintf(stderr, "[tgmapcheck] allocation failed\n");
+            model3recomp_quit(1);
+            enabled = 0;
+            return;
+        }
+        ready = 1;
+    }
+
+    for (layer = 0; layer < 4; layer++)
+        tilegen_update_map_1555(layer, maps[layer], passes == 0);
+
+    for (above = 0; above < 2; above++) {
+        int y;
+        memset(got, 0, OUT_W * OUT_H * sizeof(uint16_t));
+        for (y = 0; y < OUT_H; y++) {
+            uint32_t stencil = tilegen_stencil(y);
+            int pair;
+            for (pair = 1; pair >= 0; pair--) {
+                unsigned half = pair ? (stencil & 0xFFFFu) : (stencil >> 16);
+                int want[2], sx[2] = {0, 0}, sy[2] = {0, 0}, k, x;
+                for (k = 0; k < 2; k++) {
+                    layer = pair * 2 + k;
+                    want[k] = tilegen_layer_drawn(layer, above);
+                    if (want[k]) tilegen_line_scroll(layer, y, &sx[k], &sy[k]);
+                }
+                for (x = 0; x < 496; x++) {
+                    uint16_t px;
+                    k = ((half >> (15 - x / 32)) & 1u) ? 0 : 1;
+                    if (!want[k]) continue;
+                    layer = pair * 2 + k;
+                    px = maps[layer][(size_t)sy[k] * MAP_W + ((x + sx[k]) & 511)];
+                    if (px) got[(size_t)y * OUT_W + x] = px;
+                }
+            }
+        }
+        tilegen_render_pass_1555(above, ref, OUT_W);
+        for (y = 0; y < OUT_H; y++) {
+            if (memcmp(got + (size_t)y * OUT_W, ref + (size_t)y * OUT_W,
+                       496u * sizeof(uint16_t))) {
+                if (bad++ < 20)
+                    fprintf(stderr, "[tgmapcheck] field %llu pass %d line %d differs\n",
+                            (unsigned long long)model3recomp_frame_count(), above, y);
+                break;
+            }
+        }
+        passes++;
+        if (passes % 2000u == 0)
+            fprintf(stderr, "[tgmapcheck] %u passes compared, %u differ\n", passes, bad);
+    }
+}
+
 static void on_field(void)
 {
+    check_tilegen_maps();
     if (getenv("M3_TG_CHECK")) {
         /* The Dreamcast's 2D path, both ways, compared (tilegen.c). */
         static uint16_t buf[512 * 384];
