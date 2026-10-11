@@ -96,18 +96,51 @@ static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len
  * it is handed, the path the Dreamcast's PVR back end takes. */
 static unsigned g_sink_polys[2], g_sink_last[2];
 static void sink_begin(void) { g_sink_polys[0] = g_sink_polys[1] = 0; }
+/* M3_SINK_DUMP=field,path: with M3_SINK_COUNT, every polygon of that field
+ * as the PVR receives it, one per line: "n argb translucent textured
+ * punch-through"
+ * then x y w u v per vertex, and "V wmin wmax" where a viewport starts (tools/dreamcast/sink_render.py draws it). */
+static FILE *sink_dump_file(void)
+{
+    static FILE *f;
+    static unsigned long long at = ~0ull;
+    static int parsed;
+    if (!parsed) {
+        const char *e = getenv("M3_SINK_DUMP");
+        const char *c = e ? strchr(e, ',') : NULL;
+        parsed = 1;
+        if (c) { at = strtoull(e, NULL, 0); f = fopen(c + 1, "w"); }
+    }
+    return f && model3recomp_frame_count() == at ? f : NULL;
+}
 static void sink_poly(const m3_r3d_vertex *v, int n, uint32_t argb, int tr,
                       const m3_r3d_texture *tex)
 {
-    (void)v; (void)n; (void)argb; (void)tex;
+    FILE *f = sink_dump_file();
     g_sink_polys[tr ? 1 : 0]++;
+    if (f) {
+        int k;
+        fprintf(f, "%d %08X %d %d %d", n, (unsigned)argb, tr, tex != NULL,
+                tex && (tex->alpha_test || tex->tex_alpha));
+        for (k = 0; k < n; k++)
+            fprintf(f, "  %.3f %.3f %.6g %.2f %.2f",
+                    v[k].x, v[k].y, v[k].w, v[k].u, v[k].v);
+        fputc('\n', f);
+    }
+}
+static void sink_viewport(float wmin, float wmax, float x0, float y0,
+                          float x1, float y1)
+{
+    FILE *f = sink_dump_file();
+    if (f) fprintf(f, "V %.6g %.6g %g %g %g %g\n", wmin, wmax, x0, y0, x1, y1);
 }
 static void sink_end(void)
 {
     g_sink_last[0] = g_sink_polys[0];
     g_sink_last[1] = g_sink_polys[1];
 }
-static const m3_r3d_sink k_count_sink = { sink_begin, sink_poly, sink_end, NULL };
+static const m3_r3d_sink k_count_sink = { sink_begin, sink_poly, sink_end, NULL,
+                                            sink_viewport };
 
 /* M3_TG_MAP_CHECK=1: build the four persistent 512x512 layer pictures used
  * by the PVR back end, compose them in map space on the host, and compare

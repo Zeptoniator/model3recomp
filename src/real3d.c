@@ -1135,21 +1135,27 @@ static int g_zw, g_zh;
 
 #define ZNEAR 0.05f
 
-/* Sutherland-Hodgman against z >= ZNEAR. Three input vertices give at most
+/* The sink's near plane. No pixel of a race lies nearer than z ~0.9 (fields
+ * 5000 and 6000, tools/dreamcast/sink_render.py --near), and a hardware
+ * depth range is short (see pvr_r3d.c): vertices cut at 0.05 have w = 20,
+ * at 0.25 only 4, which is two bits fewer per viewport. */
+#define ZNEAR_SINK 0.25f
+
+/* Sutherland-Hodgman against z >= znear. Three input vertices give at most
  * four out, so the caller's buffer is [4][3]. */
-static int clip_near(const float v[3][5], float out[4][5])
+static int clip_near(const float v[3][5], float out[4][5], float znear)
 {
     int n = 0, i, k;
     for (i = 0; i < 3; i++) {
         const float *a = v[i];
         const float *b = v[(i + 1) % 3];
-        int ain = a[2] >= ZNEAR, bin = b[2] >= ZNEAR;
+        int ain = a[2] >= znear, bin = b[2] >= znear;
         if (ain && n < 4) {
             for (k = 0; k < 5; k++) out[n][k] = a[k];
             n++;
         }
         if (ain != bin && n < 4) {
-            float t = (ZNEAR - a[2]) / (b[2] - a[2]);
+            float t = (znear - a[2]) / (b[2] - a[2]);
             for (k = 0; k < 5; k++) out[n][k] = a[k] + t * (b[k] - a[k]);
             n++;
         }
@@ -1283,7 +1289,7 @@ static void raster(uint32_t *fb, int fw, int fh, float sx, float sy,
             src[k][2] = tr->v[k][2];
             src[k][3] = tr->uv[k][0]; src[k][4] = tr->uv[k][1];
         }
-        nclip = clip_near(src, clipped);
+        nclip = clip_near(src, clipped, ZNEAR);
         if (nclip < 3) { g_cull_near++; continue; }
 
         for (fan = 1; fan + 1 < nclip; fan++) {
@@ -1639,40 +1645,109 @@ void real3d_set_sheet(uint16_t *texels, unsigned shift)
     g_sheet_shift = shift;
 }
 
-/* The same culling, near-plane cut, projection and flat shade as raster(),
- * handed to the sink polygon by polygon instead of rasterised. */
+/* The same culling, near-plane cut (at ZNEAR_SINK) and projection as
+ * raster(): the polygon the sink is handed for one triangle, or fewer than
+ * three vertices when there is none. */
+static int sink_project(const tri_t *tr, m3_r3d_vertex out[4])
+{
+    float clipped[4][5], src[3][5];
+    int nclip, k;
+    {
+        float cx = (tr->v[0][0] + tr->v[1][0] + tr->v[2][0]) / 3.0f;
+        float cy = (tr->v[0][1] + tr->v[1][1] + tr->v[2][1]) / 3.0f;
+        float cz = (tr->v[0][2] + tr->v[1][2] + tr->v[2][2]) / 3.0f;
+        if (!tr->two_sided && tr->n[0]*cx + tr->n[1]*cy + tr->n[2]*cz > 0.0f)
+            return 0;
+    }
+    for (k = 0; k < 3; k++) {
+        src[k][0] = tr->v[k][0]; src[k][1] = tr->v[k][1];
+        src[k][2] = tr->v[k][2];
+        src[k][3] = tr->uv[k][0]; src[k][4] = tr->uv[k][1];
+    }
+    nclip = clip_near(src, clipped, ZNEAR_SINK);
+    for (k = 0; k < nclip; k++) {
+        double iz = 1.0 / clipped[k][2];
+        out[k].x = (float)(g_proj.ax * (double)clipped[k][0] * iz + g_proj.bx);
+        out[k].y = (float)(g_proj.ay * (double)clipped[k][1] * iz + g_proj.by);
+        out[k].w = (float)iz;
+        out[k].u = clipped[k][3];
+        out[k].v = clipped[k][4];
+    }
+    return nclip;
+}
+
+/* One side of the viewport's rectangle, for sink_bounds: x (axis 0) or y
+ * (axis 1) kept >= lim (ge) or <= lim. w is linear on the screen, so the
+ * cut interpolates it as it does x and y. */
+static int cut_xyw(const float in[][3], int n, float out[][3], int axis,
+                   float lim, int ge)
+{
+    int i, m = 0;
+    for (i = 0; i < n; i++) {
+        const float *a = in[i], *b = in[(i + 1) % n];
+        int ia = ge ? a[axis] >= lim : a[axis] <= lim;
+        int ib = ge ? b[axis] >= lim : b[axis] <= lim;
+        if (ia) { out[m][0] = a[0]; out[m][1] = a[1]; out[m][2] = a[2]; m++; }
+        if (ia != ib) {
+            float t = (lim - a[axis]) / (b[axis] - a[axis]);
+            out[m][0] = a[0] + t * (b[0] - a[0]);
+            out[m][1] = a[1] + t * (b[1] - a[1]);
+            out[m][2] = a[2] + t * (b[2] - a[2]);
+            m++;
+        }
+    }
+    return m;
+}
+
+/* The range of w the viewport shows: over the part of each polygon inside
+ * its rectangle, not over its triangles. A road's near end runs far off the
+ * screen to w = 1/ZNEAR_SINK and a backdrop's dome far round behind, and
+ * counting those gave three viewports ~42 bits of w between them, more than
+ * a depth buffer holds (pvr_r3d.c); what is on the screen is ~15. Returns
+ * wmin > wmax when nothing is. */
+static void sink_bounds(float *wmin, float *wmax, float x0, float y0,
+                        float x1, float y1)
+{
+    float lo = 1e30f, hi = 0.0f;
+    unsigned t;
+    for (t = 0; t < g_ntris; t++) {
+        m3_r3d_vertex out[4];
+        float a[12][3], b[12][3];
+        int n = sink_project(&g_tris[t], out), k, inside = 1;
+        for (k = 0; k < n; k++) {
+            a[k][0] = out[k].x; a[k][1] = out[k].y; a[k][2] = out[k].w;
+            if (out[k].x < x0 || out[k].x > x1 ||
+                out[k].y < y0 || out[k].y > y1) inside = 0;
+        }
+        if (n >= 3 && !inside) {
+            n = cut_xyw(a, n, b, 0, x0, 1);
+            n = cut_xyw(b, n, a, 0, x1, 0);
+            n = cut_xyw(a, n, b, 1, y0, 1);
+            n = cut_xyw(b, n, a, 1, y1, 0);
+        }
+        if (n < 3) continue;
+        for (k = 0; k < n; k++) {
+            if (a[k][2] < lo) lo = a[k][2];
+            if (a[k][2] > hi) hi = a[k][2];
+        }
+    }
+    *wmin = lo; *wmax = hi;
+}
+
+/* sink_project's polygons, flat shaded, handed to the sink one by one
+ * instead of rasterised: the opaque ones first, then the translucent. */
 static void sink_submit(const float L[3], float intensity)
 {
     unsigned t;
     for (t = 0; t < 2u * g_ntris; t++) {
         const tri_t *tr = &g_tris[t % g_ntris];
-        float clipped[4][5], src[3][5], lit, sh;
+        float lit, sh;
         m3_r3d_vertex out[4];
         m3_r3d_texture tex;
-        int nclip, k, r, g, b;
+        int nclip, r, g, b;
         if ((tr->alpha < 255) != (t >= g_ntris)) continue;
-        {
-            float cx = (tr->v[0][0] + tr->v[1][0] + tr->v[2][0]) / 3.0f;
-            float cy = (tr->v[0][1] + tr->v[1][1] + tr->v[2][1]) / 3.0f;
-            float cz = (tr->v[0][2] + tr->v[1][2] + tr->v[2][2]) / 3.0f;
-            if (!tr->two_sided && tr->n[0]*cx + tr->n[1]*cy + tr->n[2]*cz > 0.0f)
-                continue;
-        }
-        for (k = 0; k < 3; k++) {
-            src[k][0] = tr->v[k][0]; src[k][1] = tr->v[k][1];
-            src[k][2] = tr->v[k][2];
-            src[k][3] = tr->uv[k][0]; src[k][4] = tr->uv[k][1];
-        }
-        nclip = clip_near(src, clipped);
+        nclip = sink_project(tr, out);
         if (nclip < 3) continue;
-        for (k = 0; k < nclip; k++) {
-            double iz = 1.0 / clipped[k][2];
-            out[k].x = (float)(g_proj.ax * (double)clipped[k][0] * iz + g_proj.bx);
-            out[k].y = (float)(g_proj.ay * (double)clipped[k][1] * iz + g_proj.by);
-            out[k].w = (float)iz;
-            out[k].u = clipped[k][3];
-            out[k].v = clipped[k][4];
-        }
         lit = tr->n[0]*L[0] + tr->n[1]*L[1] + tr->n[2]*L[2];
         if (lit < 0) lit = 0;
         if (lit > 1.0f) lit = 1.0f;
@@ -1977,7 +2052,16 @@ void real3d_render(void)
                            g_pick = (long)py * fw + px; } }
                 if (g_texstats) tex_stats_note();
                 if (fb) raster_bands(fb, fw, fh, sx, sy, light, intensity);
-                else    sink_submit(light, intensity);
+                else {
+                    if (g_sink->begin_viewport) {
+                        float wmin, wmax;
+                        float x0 = (float)g_proj.x0, x1 = (float)(g_proj.x1 + 1);
+                        float y0 = (float)g_proj.y0, y1 = (float)(g_proj.y1 + 1);
+                        sink_bounds(&wmin, &wmax, x0, y0, x1, y1);
+                        g_sink->begin_viewport(wmin, wmax, x0, y0, x1, y1);
+                    }
+                    sink_submit(light, intensity);
+                }
                 if (g_pick_tri >= 0) {
                     const tri_t *p = &g_tris[g_pick_tri];
                     fprintf(stderr, "[pick] vp%u tri %ld tex %d at %u,%u page %u"

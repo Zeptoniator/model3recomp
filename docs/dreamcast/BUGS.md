@@ -296,3 +296,50 @@ the Dreamcast) is still open.
 - **Lesson**: on the desktop the option changes nothing (signatures to
   field 6000 identical): the divergence was only ever the Dreamcast's
   compiler, invisible to every host test.
+
+## DC-BUG-018 — field 6000: the overpass missing, a dark triangle, palms and sails that should be hidden (fixed)
+
+- **Symptom**: at field 6000 of the scripted race the Dreamcast draws a
+  large dark triangle over the left of the screen where the desktop draws
+  an overpass, and shows palms and sails the desktop does not. RAM
+  signatures equal: the renderers differ, not the game.
+- **Narrowed** on the desktop, no Dreamcast run needed: `M3_SINK_DUMP=
+  field,path` (with `M3_SINK_COUNT=1`) writes every polygon as the PVR
+  receives it, and `tools/dreamcast/sink_render.py` draws that list with an
+  exact rasteriser. Drawn with one depth buffer it shows the palms and the
+  sails and no overpass, so the PVR was not alone at fault; drawn with a
+  fresh depth buffer per viewport, as `raster()` does, it shows the
+  desktop's picture.
+- **Two causes**:
+  1. *Viewports are layers.* The software path clears its depth buffer
+     for each viewport (lowest priority first), so the overpass, in the
+     last one, covers the sails and palms of an earlier one although they
+     are nearer. The sink had no notion of viewports, and the PVR sorted
+     them all on one depth buffer.
+  2. *Far off-screen vertices.* Walls entirely off the right of the
+     screen, cut at the near plane, project to x ~ 330 000; the PVR
+     (Flycast at least) draws them as a dark triangle across the left.
+- **Fix**: the sink gets `begin_viewport(wmin, wmax, x0, y0, x1, y1)`,
+  where the range is that of w over the part of each polygon inside the
+  viewport's rectangle (`sink_bounds` in real3d.c). The PVR back end cuts
+  every polygon to that rectangle, as `raster()` draws only inside it, and
+  scales each viewport's w by the power of two that stacks its range just
+  above the previous one (exact, and harmless to perspective-correct
+  texturing), from 2^-10 to 2^16.
+- **On the way**: Flycast writes `gl_FragDepth = log2(1 + 100000 w) / 34`
+  (core/rend/gles/gles.cpp) into a 24-bit fixed depth buffer: every w above
+  ~2^17 is one depth, and w under ~2^-10 has few steps left. That leaves
+  ~27 bits of w. Bounding each viewport by its triangles' z wanted ~11 bits
+  apiece (a road's near end runs off the screen to w = 4, a backdrop's dome
+  round behind the camera), 33 for the three viewports of field 5000, and
+  every way of fitting that failed somewhere: a fixed 2^24 per viewport
+  lost field 5000's road, a stack to 2^33 saturated (the strict GREATER
+  compare then lets the sky drawn first win), a stack from 2^-24 blacked
+  out field 1300's sky. What the screen shows is 0 to 10 bits a viewport,
+  ~15 a frame. Clamping a vertex to the on-screen range would bend the
+  depth across its polygon, hence the cut to the rectangle, which also
+  replaces a 256-pixel guard band.
+- **Tool**: `sink_render.py --pvr` draws a dump as Flycast would (lists in
+  order, strict compare, its depth formula and the stack); it gave 0
+  differing pixels against the per-viewport picture at fields 1300, 5000,
+  5400 and 6000 before the Dreamcast run.

@@ -1,5 +1,21 @@
 # Status
 
+## 2026-10-11 — viewports as layers: field 6000 drawn as on the desktop
+
+- DC-BUG-018 (BUGS.md): the PVR sorted every viewport on one depth buffer,
+  where the software path gives each its own, and drew polygons projected
+  hundreds of thousands of pixels off the screen wrongly. The sink now
+  starts each viewport with its rectangle and the range of w it shows on
+  the screen; the PVR back end cuts polygons to the rectangle and stacks
+  the viewports' w ranges by powers of two, inside the ~27 bits Flycast's
+  depth buffer resolves.
+- Flycast race to field 6000: the overpass is back and the dark triangle,
+  palms and sails gone; fields 1300, 5000, 5400 and 6000 checked by eye
+  against the desktop, all 30 RAM signatures unchanged. 817 s instead of
+  791 s for the same build without the bounds pass (+3 %).
+- `M3_SINK_DUMP=field,path` and `tools/dreamcast/sink_render.py` (`--pvr`
+  simulates Flycast's depth) reproduce a frame's PVR picture on the desktop.
+
 ## 2026-10-10 — four persistent tilemaps, exact picture at 1.35x speed
 
 - The PVR now keeps the four 512x512 tile layers as separate ARGB1555 map

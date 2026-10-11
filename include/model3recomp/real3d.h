@@ -54,6 +54,15 @@ typedef struct {
     void (*end_frame)(void);
     /* An upload has written the sheet: anything made from it is stale. */
     void (*sheet_changed)(void);
+    /* A viewport starts; the polygons that follow, up to the next call,
+     * belong to it. It draws only inside x0 <= x <= x1, y0 <= y <= y1, and
+     * there their w lies within [wmin, wmax] (wmin > wmax: nothing does);
+     * outside it a polygon's w can be anything. Viewports come lowest
+     * priority first and each is its own layer: the software path clears
+     * its depth buffer here, so a later viewport covers an earlier one
+     * whatever their depths. */
+    void (*begin_viewport)(float wmin, float wmax,
+                           float x0, float y0, float x1, float y1);
 } m3_r3d_sink;
 void real3d_set_sink(const m3_r3d_sink *sink);
 

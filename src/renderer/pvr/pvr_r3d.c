@@ -25,8 +25,27 @@
  * older two screen-space textures because it changes every visible pixel.
  * Updates happen after pvr_wait_ready(), never while the PVR reads them.
  *
- * Not yet: per-viewport depth ranges (one depth buffer for all
- * viewports). */
+ * Viewports. The software path draws each viewport on a fresh depth
+ * buffer, so a later one (the overpass, the car) covers an earlier one
+ * whatever their depths. A PVR scene has one depth buffer, so each
+ * viewport's w is scaled by a power of two that puts its whole range just
+ * above the one before (begin_viewport): a scale common to a polygon's
+ * vertices leaves perspective-correct texturing as it was, and a power of
+ * two changes only the exponent. Flycast's depth is
+ * log2(1 + 100000 w) / 34 in 24 bits, which saturates above w ~ 2^17 and
+ * has few steps left below w ~ 2^-10 (core/rend/gles/gles.cpp), so the
+ * stack runs from W_FLOOR = 2^-10 to W_TOP = 2^16. The range real3d.c
+ * gives is what the viewport shows on the screen -- 0 to 10 bits each in
+ * a race, ~15 for a frame -- and is cut to 2^14 (W_SPAN); should the
+ * stack run out, the last viewports share its top.
+ *
+ * Clipping. polygon() cuts every polygon to its viewport's rectangle, for
+ * two reasons. Outside it a polygon's w can be anything (a road's near end
+ * runs to w = 4 well off the screen), and clamping such a vertex to the
+ * range would bend the depth of what is on the screen. And a polygon cut at
+ * the near plane can project to hundreds of thousands of pixels, which the
+ * PVR draws wrongly (field 6000 of the race: a dark triangle over the left
+ * of the screen from walls entirely off its right). */
 #include "pvr_r3d.h"
 #include "model3recomp/real3d.h"
 #include "model3recomp/tilegen.h"
@@ -36,6 +55,7 @@
 #include <kos.h>
 #include <dc/pvr/pvr_regs.h>
 #include <string.h>
+#include <math.h>
 
 #define SX (640.0f / 496.0f)
 #define SY (480.0f / 384.0f)
@@ -56,8 +76,16 @@ typedef struct {
     size_t bytes;
 } tex_t;
 
+#define POLY_MAX 8                     /* a quad cut by four rectangle edges */
+#define W_FLOOR (1.0f / 1024.0f)       /* the lowest viewport starts here (2^-10) */
+#define W_TOP 65536.0f                 /* and the highest ends under 2^16 */
+#define W_SPAN 16384.0f                /* a viewport's own range, at most 2^14 */
+#define Z_BACK_A 2e-8f                 /* 2D behind: under W_FLOOR, B under A */
+#define Z_BACK_B 1e-8f
+#define Z_FRONT 1e5f                   /* 2D in front: above W_TOP */
+
 typedef struct {
-    m3_r3d_vertex v[4];
+    m3_r3d_vertex v[POLY_MAX];
     int n;
     uint32_t argb;
     int16_t tex;                       /* slot, -1 untextured */
@@ -69,6 +97,11 @@ static kept_t *g_pt, *g_tr;
 static unsigned g_npt, g_ntr;
 static unsigned g_op, g_last_op, g_last_pt, g_last_tr;
 static int g_open;
+/* The viewport being drawn: its rectangle, its w clamped to [g_vp_lo,
+ * g_vp_hi] and scaled by g_vp_scale; the next one starts above g_vp_next. */
+static float g_vp_lo = 1e-30f, g_vp_hi = 1e30f, g_vp_scale = 1.0f;
+static float g_vp_next = W_FLOOR;
+static float g_vp_x0, g_vp_y0, g_vp_x1 = 496.0f, g_vp_y1 = 384.0f;
 
 static uint16_t *g_sheet;
 static tex_t g_tex[TEX_SLOTS];
@@ -218,13 +251,13 @@ static void send_header(pvr_list_t list, int slot, int flip)
 static void strip(const m3_r3d_vertex *v, int n, uint32_t argb,
                   float su, float sv)
 {
-    /* A convex polygon of 3 or 4 vertices as a strip: 0 1 2, or 0 1 3 2. */
-    static const int order3[3] = { 0, 1, 2 }, order4[4] = { 0, 1, 3, 2 };
-    const int *o = n == 4 ? order4 : order3;
-    int k;
+    /* A convex polygon as a strip zigzagging from both ends:
+     * 0 1 n-1 2 n-2 ... (0 1 2; 0 1 3 2 for a quad). */
+    int k, lo = 1, hi = n - 1;
     for (k = 0; k < n; k++) {
         pvr_vertex_t pv;
-        const m3_r3d_vertex *s = &v[o[k]];
+        int i = k == 0 ? 0 : (k & 1) ? lo++ : hi--;
+        const m3_r3d_vertex *s = &v[i];
         pv.flags = k == n - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
         pv.x = s->x * SX;
         pv.y = s->y * SY;
@@ -298,7 +331,7 @@ static void draw_layers(int above)
     int pair;
     for (pair = 1; pair >= 0; pair--) {
         int want[2], k, y = 0;
-        float z = above ? 1e6f : (pair ? 1e-6f : 2e-6f);   /* B under A */
+        float z = above ? Z_FRONT : (pair ? Z_BACK_B : Z_BACK_A);
         for (k = 0; k < 2; k++) want[k] = tilegen_layer_drawn(pair * 2 + k, above);
         if (!want[0] && !want[1]) continue;
         while (y < 384) {
@@ -381,6 +414,8 @@ static void begin_frame(void)
     pvr_list_begin(PVR_LIST_OP_POLY);
     g_cur_tex = -2; g_cur_flip = -1;
     g_npt = g_ntr = g_op = 0;
+    g_vp_lo = 1e-30f; g_vp_hi = 1e30f; g_vp_scale = 1.0f; g_vp_next = W_FLOOR;
+    g_vp_x0 = 0.0f; g_vp_y0 = 0.0f; g_vp_x1 = 496.0f; g_vp_y1 = 384.0f;
     g_frame++;
     g_open = 1;
 }
@@ -402,11 +437,76 @@ static void keep(kept_t *k, const m3_r3d_vertex *v, int n, uint32_t argb,
     k->flip = (uint8_t)flip;
 }
 
-static void polygon(const m3_r3d_vertex *v, int n, uint32_t argb,
+/* A new viewport, whose w lies in [wmin, wmax]: the smallest power of two
+ * that lifts wmin to the top of the last viewport. Only the farthest part
+ * of a range deeper than W_SPAN is merged. */
+static void begin_viewport(float wmin, float wmax, float x0, float y0,
+                           float x1, float y1)
+{
+    int e;
+    g_vp_x0 = x0; g_vp_y0 = y0; g_vp_x1 = x1; g_vp_y1 = y1;
+    if (!(wmin <= wmax) || wmax <= 0.0f) return;     /* draws nothing */
+    if (wmin < wmax / W_SPAN) wmin = wmax / W_SPAN;
+    frexpf(g_vp_next / wmin, &e);                    /* 2^e > next / wmin */
+    g_vp_scale = ldexpf(1.0f, e);
+    if (wmax * g_vp_scale > W_TOP) {                 /* out of room: share */
+        frexpf(W_TOP / wmax, &e);
+        g_vp_scale = ldexpf(1.0f, e - 1);
+    }
+    g_vp_lo = wmin; g_vp_hi = wmax;
+    g_vp_next = wmax * g_vp_scale;
+}
+
+static float vp_w(float w)
+{
+    if (w < g_vp_lo) w = g_vp_lo;
+    if (w > g_vp_hi) w = g_vp_hi;
+    return w * g_vp_scale;
+}
+
+/* Sutherland-Hodgman against one edge: keep where s*(coord - lim) <= 0.
+ * x, y and w are affine in screen space, and u and v through u*w and v*w. */
+static int cut(const m3_r3d_vertex *in, int n, m3_r3d_vertex *out,
+               int axis, float lim, float sgn)
+{
+    int i, m = 0;
+    for (i = 0; i < n; i++) {
+        const m3_r3d_vertex *a = &in[i], *b = &in[(i + 1) % n];
+        float da = sgn * ((axis ? a->y : a->x) - lim);
+        float db = sgn * ((axis ? b->y : b->x) - lim);
+        if (da <= 0.0f) out[m++] = *a;
+        if ((da <= 0.0f) != (db <= 0.0f)) {
+            float t = da / (da - db), w = a->w + t * (b->w - a->w);
+            m3_r3d_vertex *o = &out[m++];
+            o->x = a->x + t * (b->x - a->x);
+            o->y = a->y + t * (b->y - a->y);
+            o->w = w;
+            o->u = (a->u * a->w + t * (b->u * b->w - a->u * a->w)) / w;
+            o->v = (a->v * a->w + t * (b->v * b->w - a->v * a->w)) / w;
+        }
+    }
+    return m;
+}
+
+static void polygon(const m3_r3d_vertex *in, int n, uint32_t argb,
                     int translucent, const m3_r3d_texture *t)
 {
-    int slot = -1, flip = 0;
+    int slot = -1, flip = 0, k, out = 0;
+    m3_r3d_vertex a[POLY_MAX], b[POLY_MAX];
+    const m3_r3d_vertex *v = a;
     if (!g_open || n < 3 || n > 4) return;
+    for (k = 0; k < n; k++)
+        if (in[k].x < g_vp_x0 || in[k].x > g_vp_x1 ||
+            in[k].y < g_vp_y0 || in[k].y > g_vp_y1) out = 1;
+    memcpy(a, in, sizeof *in * (size_t)n);
+    if (out) {
+        n = cut(a, n, b, 0, g_vp_x0, -1.0f);
+        if (n >= 3) n = cut(b, n, a, 0, g_vp_x1, 1.0f);
+        if (n >= 3) n = cut(a, n, b, 1, g_vp_y0, -1.0f);
+        if (n >= 3) n = cut(b, n, a, 1, g_vp_y1, 1.0f);
+        if (n < 3) return;
+    }
+    for (k = 0; k < n; k++) a[k].w = vp_w(a[k].w);
     if (t) {
         slot = tex_get(t);
         if (slot >= 0) {
@@ -435,7 +535,7 @@ static void flush_kept(pvr_list_t list, const kept_t *k, unsigned n)
      * them; punch-through, so an empty texel shows what is under it. */
     if (list == PVR_LIST_PT_POLY) {
         if (!g_fallback) draw_layers(0);
-        else if (g_layer_px[0]) layer_quad(0, 1e-6f);
+        else if (g_layer_px[0]) layer_quad(0, Z_BACK_B);
         g_cur_tex = -2; g_cur_flip = -1;
     }
     for (i = 0; i < n; i++) {
@@ -444,7 +544,7 @@ static void flush_kept(pvr_list_t list, const kept_t *k, unsigned n)
     }
     if (list == PVR_LIST_PT_POLY) {
         if (!g_fallback) draw_layers(1);
-        else if (g_layer_px[1]) layer_quad(1, 1e6f);
+        else if (g_layer_px[1]) layer_quad(1, Z_FRONT);
     }
     pvr_list_finish();
 }
@@ -462,7 +562,8 @@ static void end_frame(void)
     g_open = 0;
 }
 
-static const m3_r3d_sink k_sink = { begin_frame, polygon, end_frame, sheet_changed };
+static const m3_r3d_sink k_sink = { begin_frame, polygon, end_frame, sheet_changed,
+                                    begin_viewport };
 
 unsigned pvr_r3d_last_opaque(void) { return g_last_op; }
 unsigned pvr_r3d_last_punch(void) { return g_last_pt; }
