@@ -129,6 +129,10 @@ uint8_t *bus_poly(size_t *size);
  * so the renderer gets at it through here. */
 const uint8_t *bus_vrom(size_t *size);
 size_t   bus_r3d_read(int region, size_t off, void *dst, size_t len);
+/* The same bytes in place, when they lie in one page of that memory (on a
+ * Dreamcast: a 64 KB page of polygon RAM, a 4 KB piece of VROM), else NULL
+ * -- then bus_r3d_read copies them. Valid until the next bus call. */
+const uint8_t *bus_r3d_span(int region, size_t off, size_t len);
 
 /* What the guest streamed into the Real3D's FIFO at 0x94000000. It is one
  * port rather than a window, so this is the order the bytes arrived in, not

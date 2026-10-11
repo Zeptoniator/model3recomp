@@ -123,6 +123,18 @@ static void dec_dispatch(void)
     m3_ctx.msr = saved_msr;
 }
 
+static uint32_t dec_rate(void)
+{
+    static int probed;
+    static uint32_t rate;
+    if (!probed) {
+        const char *e = getenv("M3_DEC_RATE");
+        probed = 1;
+        rate = e ? (uint32_t)strtoul(e, NULL, 0) : DEC_PER_WORK;
+    }
+    return rate;
+}
+
 static void dec_tick(void)
 {
     uint64_t now = m3_work;
@@ -131,16 +143,7 @@ static void dec_tick(void)
 
     if (now <= g_dec_work)
         return;
-    {
-        static int probed;
-        static uint32_t rate;
-        if (!probed) {
-            const char *e = getenv("M3_DEC_RATE");
-            probed = 1;
-            rate = e ? (uint32_t)strtoul(e, NULL, 0) : DEC_PER_WORK;
-        }
-        elapsed = (now - g_dec_work) * (uint64_t)rate;
-    }
+    elapsed = (now - g_dec_work) * (uint64_t)dec_rate();
     g_dec_work = now;
 
     before = m3_ctx.spr[M3_SPR_DEC];
@@ -151,6 +154,23 @@ static void dec_tick(void)
      * until the handler reloads it, which is what the hardware does too. */
     if (!(before & 0x80000000u) && (after & 0x80000000u))
         dec_dispatch();
+}
+
+uint64_t irq_work_to_event(void)
+{
+    uint64_t now = m3_work, at = model3recomp_next_field_work();
+    uint32_t dec = m3_ctx.spr[M3_SPR_DEC];
+    if (g_in_dispatch || g_scsi_pending || (g_level & g_enable))
+        return 0;
+    /* dec_tick() dispatches when (m3_work - g_dec_work) * rate first
+     * exceeds a non-negative DEC; counted down in steps or in one, it is
+     * the same subtraction. */
+    if (!(dec & 0x80000000u) && dec_rate()) {
+        uint64_t d = g_dec_work + dec / dec_rate() + 1u;
+        if (d < at) at = d;
+    }
+    if (at == UINT64_MAX) return 0;
+    return at > now ? at - now : 0;
 }
 
 void irq_tick(void)

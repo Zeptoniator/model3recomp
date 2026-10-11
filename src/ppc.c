@@ -136,9 +136,32 @@ void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size)
  * lets the field clock run, so a wait on an interrupt-set RAM word ends. */
 uint32_t m3_loop_n;
 
-void m3_loop_tick(void)
+#define IDLE_MAX 8
+static uint32_t g_idle[IDLE_MAX];
+static unsigned g_nidle;
+
+void m3_idle_loop(uint32_t pc)
 {
+    if (g_nidle < IDLE_MAX) g_idle[g_nidle++] = pc;
+}
+
+void m3_loop_tick(uint32_t pc)
+{
+    unsigned k;
     m3_work += M3_LOOP_CREDIT;
+    for (k = 0; k < g_nidle; k++)
+        if (g_idle[k] == pc) {
+            /* Every tick until the next event only counts the decrementer
+             * down (irq_work_to_event): take them all at once -- all but
+             * the last. The event then comes at the tick it would have,
+             * after one more slice of the loop: a loop that reads the
+             * decrementer holds the value of the tick before, and the
+             * handler saves it on the stack. */
+            uint64_t d = irq_work_to_event();
+            if (d > M3_LOOP_CREDIT)
+                m3_work += (d - 1u) / M3_LOOP_CREDIT * M3_LOOP_CREDIT;
+            break;
+        }
     irq_tick();
 }
 

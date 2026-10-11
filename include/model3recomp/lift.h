@@ -217,8 +217,8 @@ void m3_fn_trace(uint32_t addr);
 #define M3_LOOP_PERIOD 1024u
 #define M3_LOOP_CREDIT (M3_LOOP_PERIOD / 16u)
 extern uint32_t m3_loop_n;
-void m3_loop_tick(void);
-#define M3_LOOPED(a)                                                       do {                                                                       M3_LOOP_NOTE(a); M3_SAFEPOINT(a);                                                       if (!(++m3_loop_n & (M3_LOOP_PERIOD - 1u))) m3_loop_tick();        } while (0)
+void m3_loop_tick(uint32_t pc);
+#define M3_LOOPED(a)                                                       do {                                                                       M3_LOOP_NOTE(a); M3_SAFEPOINT(a);                                                       if (!(++m3_loop_n & (M3_LOOP_PERIOD - 1u))) m3_loop_tick((uint32_t)(a));        } while (0)
 
 /* Returns that do not go back to the caller.
  *

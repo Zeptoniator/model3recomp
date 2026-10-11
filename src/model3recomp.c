@@ -129,6 +129,11 @@ void model3recomp_shutdown(void)
     g_running = 0;
 }
 
+uint64_t model3recomp_next_field_work(void)
+{
+    return g_running ? g_last_field_us + FIELD_US : UINT64_MAX;
+}
+
 int model3recomp_field_due(void)
 {
     uint64_t now;

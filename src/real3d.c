@@ -108,6 +108,7 @@ static unsigned g_max_tris = MAX_TRIS;
 #define VERTEX_SCALE_DEFAULT 2048.0f
 
 static float g_vertex_scale = VERTEX_SCALE_DEFAULT;
+static float g_vertex_inv = 1.0f / VERTEX_SCALE_DEFAULT;
 static int g_tex_size_mode;
 static int g_tex_all;
 
@@ -615,18 +616,19 @@ static void emit(const float a[3], const float b[3], const float c[3],
                  const texdesc_t *td)
 {
     tri_t *t;
+    int k;
     if (g_ntris >= g_max_tris) return;
     t = &g_tris[g_ntris++];
-    memcpy(t->v[0], a, sizeof t->v[0]);
-    memcpy(t->v[1], b, sizeof t->v[1]);
-    memcpy(t->v[2], c, sizeof t->v[2]);
-    memcpy(t->n, n, sizeof t->n);
-    memcpy(t->vn[0], na, sizeof t->vn[0]);
-    memcpy(t->vn[1], nb, sizeof t->vn[1]);
-    memcpy(t->vn[2], nc, sizeof t->vn[2]);
-    memcpy(t->uv[0], ua, sizeof t->uv[0]);
-    memcpy(t->uv[1], ub, sizeof t->uv[1]);
-    memcpy(t->uv[2], uc, sizeof t->uv[2]);
+    /* Element by element: SH-4 GCC calls memcpy for these, and a call per
+     * 12 bytes was most of a race's time in memcpy. */
+    for (k = 0; k < 3; k++) {
+        t->v[0][k] = a[k]; t->v[1][k] = b[k]; t->v[2][k] = c[k];
+        t->n[k] = n[k];
+        t->vn[0][k] = na[k]; t->vn[1][k] = nb[k]; t->vn[2][k] = nc[k];
+    }
+    for (k = 0; k < 2; k++) {
+        t->uv[0][k] = ua[k]; t->uv[1][k] = ub[k]; t->uv[2][k] = uc[k];
+    }
     t->textured = (uint8_t)(td->on ? 1 : 0);
     t->luminous = (uint8_t)(td->lum ? 1 : 0);
     t->two_sided = (uint8_t)(td->two_sided ? 1 : 0);
@@ -650,10 +652,34 @@ static void emit(const float a[3], const float b[3], const float c[3],
 static unsigned g_texoff_x, g_texoff_y, g_texoff_page;
 static uint32_t g_ctab;     /* colour table, a word index into polygon RAM */
 
+/* A word of a polygon, at a 4-byte aligned address (every model is, and so
+ * are the pages and the copy buffers): one load, swapped for VROM, where
+ * draw_model's loop used to call rd32be or rd32le through a pointer for
+ * four byte loads. Both hosts are little-endian. */
+typedef uint32_t __attribute__((may_alias)) u32_alias;
+static inline uint32_t poly_word(const uint8_t *p, int be)
+{
+    uint32_t w = *(const u32_alias *)(const void *)p;
+    return be ? __builtin_bswap32(w) : w;
+}
+
+/* len bytes of a Real3D memory: in place when they lie in one page, else
+ * copied into buf. NULL when the range runs off the end. */
+static const uint8_t *r3d_get(int region, size_t off, uint32_t *buf,
+                              size_t len)
+{
+    const uint8_t *p = bus_r3d_span(region, off, len);
+    if (p) return p;
+    return bus_r3d_read(region, off, buf, len) == len
+         ? (const uint8_t *)buf : NULL;
+}
+
 static void draw_model(uint32_t addr, const mat_t *m)
 {
     int region;
-    uint8_t pb[(7u + 16u) * 4u];        /* one polygon: header + 4 vertices */
+    uint8_t pb[(7u + 16u) * 4u];        /* M3_MODEL_DUMP's reads */
+    uint32_t hbuf[7], vbuf[16];         /* a header, four vertices: copied
+                                         * only across a page boundary */
     uint32_t (*rd)(const uint8_t *);
     size_t i;
     float prev[4][3], prevn[4][3], prevuv[4][2];
@@ -742,9 +768,12 @@ static void draw_model(uint32_t addr, const mat_t *m)
         unsigned nv, nnew, k, j, slot;
         uint32_t rgb;
         float len;
+        const uint8_t *hp, *vp = NULL;
 
-        if (bus_r3d_read(region, i, pb, 28u) != 28u) return;
-        for (k = 0; k < 7; k++) ph[k] = rd(pb + k * 4);
+        /* The header is decoded before the vertices are fetched: fetching
+         * them can evict the VROM piece it points into. */
+        if (!(hp = r3d_get(region, i, hbuf, 28u))) return;
+        for (k = 0; k < 7; k++) ph[k] = poly_word(hp + k * 4, region == 3);
 
         /* Header words 1..3 are the polygon normal, 24-bit fixed over 2^22.
          * A real header's normal is a unit vector; this is the check that
@@ -759,23 +788,28 @@ static void draw_model(uint32_t addr, const mat_t *m)
         slot = 0;
         for (k = 0; k < 4; k++)             /* bits 0..3: reuse from previous */
             if (((ph[0] >> k) & 1u) && k < nprev && slot < 4) {
-                memcpy(vs[slot], prev[k], sizeof vs[slot]);
-                memcpy(vn[slot], prevn[k], sizeof vn[slot]);
-                memcpy(uv[slot], prevuv[k], sizeof uv[slot]);
+                for (j = 0; j < 3; j++) {
+                    vs[slot][j] = prev[k][j];
+                    vn[slot][j] = prevn[k][j];
+                }
+                uv[slot][0] = prevuv[k][0]; uv[slot][1] = prevuv[k][1];
                 slot++;
             }
         if (slot > nv) return;
         nnew = nv - slot;
-        if (nnew && bus_r3d_read(region, i + 28u, pb + 28u, nnew * 16u)
-                    != nnew * 16u)
+        if (nnew && !(vp = r3d_get(region, i + 28u, vbuf, nnew * 16u)))
             return;
 
         for (k = 0; k < nnew && slot < 4; k++, slot++) {
-            const uint8_t *o = pb + (7u + 4u * k) * 4u;
-            uint32_t wx = rd(o), wy = rd(o + 4), wz = rd(o + 8);
-            vs[slot][0] = (float)sx24(wx) / g_vertex_scale;
-            vs[slot][1] = (float)sx24(wy) / g_vertex_scale;
-            vs[slot][2] = (float)sx24(wz) / g_vertex_scale;
+            const uint8_t *o = vp + 16u * k;
+            uint32_t wx = poly_word(o, region == 3);
+            uint32_t wy = poly_word(o + 4, region == 3);
+            uint32_t wz = poly_word(o + 8, region == 3);
+            /* Times the reciprocal: the same float as the division while
+             * the scale is a power of two, as the default 2048 is. */
+            vs[slot][0] = (float)sx24(wx) * g_vertex_inv;
+            vs[slot][1] = (float)sx24(wy) * g_vertex_inv;
+            vs[slot][2] = (float)sx24(wz) * g_vertex_inv;
             /* The low byte of each coordinate word is that vertex's own
              * normal, as a signed byte. They are not unit length -- the
              * lengths run from 0 to 127 -- but they do sit a median 25
@@ -788,7 +822,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
                 /* Word 3 of a vertex is u in the high half and v in the low,
                  * in eighths of a texel -- or whole texels when bit 6 of
                  * header word 1 is set (Supermodel's UVScale). */
-                uint32_t wt = rd(o + 12);
+                uint32_t wt = poly_word(o + 12, region == 3);
                 float us = (ph[1] & 0x40u) ? 1.0f : 0.125f;
                 uv[slot][0] = (float)((wt >> 16) & 0xFFFFu) * us;
                 uv[slot][1] = (float)(wt & 0xFFFFu) * us;
@@ -859,21 +893,27 @@ static void draw_model(uint32_t addr, const mat_t *m)
          * Its vertices still count for the next polygon's reuse. */
         if (slot >= 3 && (ph[0] & 0x300u) != 0x300u) {
             float wv[4][3], wn[3], wvn[4][3];
+            /* Vertex normals are for raster()'s Gouraud; the sink shades
+             * flat and is handed the face normal in their place. */
+            int gouraud = g_sink == NULL;
             for (j = 0; j < slot; j++) {
                 mat_point(m, vs[j], wv[j]);
-                mat_dir(m, vn[j], wvn[j]);
+                if (gouraud) mat_dir(m, vn[j], wvn[j]);
             }
             mat_dir(m, nrm, wn);
             for (j = 1; j + 1 < slot; j++)
                 emit(wv[0], wv[j], wv[j+1], wn, rgb,
-                     wvn[0], wvn[j], wvn[j+1],
+                     gouraud ? wvn[0] : wn, gouraud ? wvn[j] : wn,
+                     gouraud ? wvn[j+1] : wn,
                      uv[0], uv[j], uv[j+1], &td);
         }
 
         for (j = 0; j < slot; j++) {
-            memcpy(prev[j], vs[j], sizeof prev[j]);
-            memcpy(prevn[j], vn[j], sizeof prevn[j]);
-            memcpy(prevuv[j], uv[j], sizeof prevuv[j]);
+            for (k = 0; k < 3; k++) {
+                prev[j][k] = vs[j][k];
+                prevn[j][k] = vn[j][k];
+            }
+            prevuv[j][0] = uv[j][0]; prevuv[j][1] = uv[j][1];
         }
         nprev = slot;
 
@@ -1659,6 +1699,20 @@ static int sink_project(const tri_t *tr, m3_r3d_vertex out[4])
         if (!tr->two_sided && tr->n[0]*cx + tr->n[1]*cy + tr->n[2]*cz > 0.0f)
             return 0;
     }
+    if (tr->v[0][2] >= ZNEAR_SINK && tr->v[1][2] >= ZNEAR_SINK &&
+        tr->v[2][2] >= ZNEAR_SINK) {
+        /* Nothing to cut, the usual case: clip_near would hand back the
+         * same three vertices in the same order. */
+        for (k = 0; k < 3; k++) {
+            double iz = 1.0 / tr->v[k][2];
+            out[k].x = (float)(g_proj.ax * (double)tr->v[k][0] * iz + g_proj.bx);
+            out[k].y = (float)(g_proj.ay * (double)tr->v[k][1] * iz + g_proj.by);
+            out[k].w = (float)iz;
+            out[k].u = tr->uv[k][0];
+            out[k].v = tr->uv[k][1];
+        }
+        return 3;
+    }
     for (k = 0; k < 3; k++) {
         src[k][0] = tr->v[k][0]; src[k][1] = tr->v[k][1];
         src[k][2] = tr->v[k][2];
@@ -1825,6 +1879,7 @@ void real3d_render(void)
     if (!inited) {
         const char *e = getenv("M3_VERTEX_SCALE");
         if (e && atof(e) > 0.0) g_vertex_scale = (float)atof(e);
+        g_vertex_inv = 1.0f / g_vertex_scale;
         e = getenv("M3_TEX_SIZE");
         if (e) g_tex_size_mode = atoi(e);
         g_tex_all = getenv("M3_TEX_ALL") != NULL;

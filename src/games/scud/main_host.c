@@ -364,6 +364,12 @@ int main(int argc, char **argv)
     if (getenv("M3_SINK_COUNT"))
         real3d_set_sink(&k_count_sink);
     model3recomp_set_frame_hook(on_field);
+    /* The game's two waits at 0x30704: for the decrementer handler, then
+     * for the VBlank handler's counter. M3_NO_IDLE_SKIP=1 spins them. */
+    if (!getenv("M3_NO_IDLE_SKIP")) {
+        m3_idle_loop(0x0003072Cu);
+        m3_idle_loop(0x0003074Cu);
+    }
     scud_register_lifted();
     model3recomp_run();
     model3recomp_shutdown();

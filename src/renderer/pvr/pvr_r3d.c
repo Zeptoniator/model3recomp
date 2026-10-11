@@ -166,15 +166,28 @@ static int fmt_4444(unsigned fmt)
 
 static int tex_get(const m3_r3d_texture *t)
 {
+    /* Where a key was last found: checked against the slot before it is
+     * believed, so a slot reused for another texture costs only a miss.
+     * Saves walking all TEX_SLOTS for every polygon. */
+    static uint8_t seen[64];
     uint32_t key = tex_key(t);
     unsigned i, free_slot = TEX_SLOTS, w, h, x0, y0, row, col;
+    unsigned hs = (key ^ (key >> 6) ^ (key >> 13)) & 63u;
     tex_t *e;
     size_t bytes;
     int four = fmt_4444(t->fmt);
     uint16_t *dst;
 
+    if (g_tex[seen[hs]].key == key) {
+        g_tex[seen[hs]].used = g_frame;
+        return (int)seen[hs];
+    }
     for (i = 0; i < TEX_SLOTS; i++) {
-        if (g_tex[i].key == key) { g_tex[i].used = g_frame; return (int)i; }
+        if (g_tex[i].key == key) {
+            g_tex[i].used = g_frame;
+            seen[hs] = (uint8_t)i;
+            return (int)i;
+        }
         if (!g_tex[i].key && free_slot == TEX_SLOTS) free_slot = i;
     }
     if (!g_sheet || t->w > 1024u || t->h > 1024u) return -1;
@@ -498,7 +511,7 @@ static void polygon(const m3_r3d_vertex *in, int n, uint32_t argb,
     for (k = 0; k < n; k++)
         if (in[k].x < g_vp_x0 || in[k].x > g_vp_x1 ||
             in[k].y < g_vp_y0 || in[k].y > g_vp_y1) out = 1;
-    memcpy(a, in, sizeof *in * (size_t)n);
+    for (k = 0; k < n; k++) a[k] = in[k];
     if (out) {
         n = cut(a, n, b, 0, g_vp_x0, -1.0f);
         if (n >= 3) n = cut(b, n, a, 0, g_vp_x1, 1.0f);

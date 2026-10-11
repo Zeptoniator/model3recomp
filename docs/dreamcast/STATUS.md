@@ -1,5 +1,35 @@
 # Status
 
+## 2026-10-12 — the race 35 % faster: no idle spin, no per-polygon copies
+
+Profiling build, Flycast, fields 0-5400: **429 s instead of 660 s**, RAM
+signatures unchanged at every check. In order:
+- `draw_model` read every polygon through `bus_r3d_read`, a `memcpy` into
+  an unaligned byte buffer: 14 % of the samples were in `memcpy`, most in
+  its byte loop. `bus_r3d_span` hands back the bytes in place when they lie
+  in one page (nearly always); `emit` copies its 12-byte arrays element by
+  element (SH-4 GCC called `memcpy` for each). 660 -> 617 s.
+- **Idle skip.** The game waits for its interrupts by spinning at 0x30704,
+  and the field clock advanced 64 units per 1024 iterations: 12 % of the
+  samples. `m3_idle_loop()` names such a loop; at its tick the runtime
+  moves `m3_work` straight to the tick before the next event
+  (`irq_work_to_event`: decrementer crossing or field). Landing on the
+  event itself was not exact: the loop holds the decrementer it last read
+  in r4, the handler saves r4 on the stack, and the stack word differed --
+  so the loop gets one more slice and reads it. Signatures equal with and
+  without (`M3_NO_IDLE_SKIP=1`) over the desktop race. 617 -> 458 s.
+- `tex_get` walked all 256 texture slots per polygon: a 64-entry cache of
+  where each key was last seen. Polygon words are read as one load (byte
+  swapped for VROM), not four byte loads through a function pointer, and
+  the vertex scale (2048) is a multiplication. `sink_project` skips the
+  near-plane cut when no vertex needs it. 458 -> 429 s.
+- Vertex normals are transformed only for the software rasteriser's
+  Gouraud; the sink shades flat (not yet in a timed run).
+
+Left in a race field (~110-150 ms): `draw_model` 15 %, guest 23 %,
+`sink_project` + `real3d_render` (projection twice: bounds, then submit)
+~12 %, disc waits ~8 %.
+
 ## 2026-10-11 — viewports as layers: field 6000 drawn as on the desktop
 
 - DC-BUG-018 (BUGS.md): the PVR sorted every viewport on one depth buffer,

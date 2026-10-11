@@ -705,6 +705,27 @@ size_t bus_r3d_read(int which, size_t off, void *dst, size_t len)
 #endif
 }
 
+const uint8_t *bus_r3d_span(int which, size_t off, size_t len)
+{
+    static const size_t sizes[3] = { CULL_LO_SIZE, CULL_HI_SIZE, POLY_SIZE };
+    if (which == 3) {
+        if (off >= g_roms.vrom_size || len > g_roms.vrom_size - off) return NULL;
+        if (g_ws_on[1] < 0) g_ws_on[1] = getenv("M3_VROM_WS") != NULL;
+        if (g_ws_on[1]) ws_note(2, off, len);
+        if (g_roms.vrom) return g_roms.vrom + off;
+        if (off % M3_PIECE + len > M3_PIECE) return NULL;
+        return rom_at(2, (uint32_t)off);
+    }
+    if (which < 0 || which > 2) return NULL;
+    if (off >= sizes[which] || len > sizes[which] - off) return NULL;
+#ifdef M3_DREAMCAST
+    if (off % SPARSE_PAGE + len > SPARSE_PAGE) return NULL;
+    return sparse_at((unsigned)which, (uint32_t)off, (uint32_t)len, 0);
+#else
+    return (which == 0 ? CULL_LO() : which == 1 ? CULL_HI() : POLY()) + off;
+#endif
+}
+
 /* ---- region resolution --------------------------------------------------
  * Returns a host pointer for the plain-memory regions, or NULL when the
  * address belongs to a device and has to go through the switch below.

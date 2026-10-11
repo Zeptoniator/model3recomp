@@ -84,6 +84,16 @@ void model3recomp_save_nvram(void);
  * they are called BY irq_status_read(), not by your main(). Keep a loop over
  * them in main() only as a fallback for a guest whose init returns early. */
 int  model3recomp_field_due(void);
+/* m3_work at which model3recomp_field_due() next says yes (UINT64_MAX:
+ * never, the board is not running). */
+uint64_t model3recomp_next_field_work(void);
+/* A guest loop that only waits -- reads, compares, branches back, writes
+ * nothing -- for an interrupt to change what it reads. Given its back-edge
+ * address (the one in M3_LOOPED), the runtime moves the field clock
+ * straight to the next interrupt instead of spinning it there 64 units at
+ * a time. The clock lands on the same value either way, so the guest sees
+ * nothing different. */
+void m3_idle_loop(uint32_t pc);
 void model3recomp_begin_frame(void);
 void model3recomp_end_frame(void);
 

@@ -55,6 +55,9 @@ void     irq_ack(uint32_t bits);
 
 uint32_t irq_pending(void);          /* raw pending, before enable mask */
 int      irq_in_dispatch(void);      /* inside the guest's handler? */
+/* Work units from m3_work until irq_tick() next does more than count the
+ * decrementer down; 0 when it would now, or cannot tell. */
+uint64_t irq_work_to_event(void);
 uint32_t irq_enable_read(void);
 void     irq_enable_write(uint32_t v);
 

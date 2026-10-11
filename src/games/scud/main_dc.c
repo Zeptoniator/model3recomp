@@ -235,6 +235,9 @@ int main(void)
     else
         printf("PVR: Real3D sink installed\n");
     model3recomp_set_frame_hook(on_field);
+    /* The game's two waits at 0x30704 (see main_host.c). */
+    m3_idle_loop(0x0003072Cu);
+    m3_idle_loop(0x0003074Cu);
     scud_register_lifted();
 #ifdef SCUD_DC_PROFILE
     g_main = thd_get_current();
