@@ -5,6 +5,8 @@
 #
 # DC_SHOT=<token>:<file.png> takes a screenshot when <token> is printed.
 # DC_SHOTS=<dir> photographs every "SCUD SHOT field N" line as <dir>/fN.png.
+# DC_RUN_VISIBLE=1 opens the window on the current $DISPLAY instead of a
+# private Xvfb, to watch a run (keep it uncovered: see below).
 # Exits 0 when the done-token appears on the console, 1 on timeout, 2 when
 # Flycast cannot be found. FLYCAST=<binary> picks the emulator.
 #
@@ -33,11 +35,16 @@ mkdir -p "$HOME_DIR/flycast" "$HOME_DIR/data/flycast"
 # section is read as nothing, and the serial console stays off -- a run that
 # boots fine and prints not one line.
 
-DISP=${DC_RUN_DISPLAY:-110}
-while [ -e "/tmp/.X${DISP}-lock" ]; do DISP=$((DISP + 1)); done
-Xvfb ":$DISP" -screen 0 640x480x24 >/dev/null 2>&1 &
-XVFB=$!
-sleep 1
+XVFB=""
+if [ -n "${DC_RUN_VISIBLE:-}" ]; then
+    DISP=${DISPLAY#:}
+else
+    DISP=${DC_RUN_DISPLAY:-110}
+    while [ -e "/tmp/.X${DISP}-lock" ]; do DISP=$((DISP + 1)); done
+    Xvfb ":$DISP" -screen 0 640x480x24 >/dev/null 2>&1 &
+    XVFB=$!
+    sleep 1
+fi
 
 LOG=$(mktemp)
 FLY=""
@@ -45,7 +52,7 @@ cleanup() {
     [ -n "$FLY" ] && kill -TERM "$FLY" 2>/dev/null
     sleep 0.5
     [ -n "$FLY" ] && kill -KILL "$FLY" 2>/dev/null
-    kill -TERM "$XVFB" 2>/dev/null
+    [ -n "$XVFB" ] && kill -TERM "$XVFB" 2>/dev/null
     rm -rf "$HOME_DIR" "$LOG"
 }
 trap cleanup EXIT
