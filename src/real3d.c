@@ -543,10 +543,20 @@ static int64_t sample(const tri_t *tr, double u, double v);
 
 /* ---- the triangle queue ------------------------------------------------ */
 struct tri_s {
-    float v[3][3];          /* view space */
+    union {
+        struct {
+            float v[3][3];  /* view space */
+            float vn[3][3]; /* per-vertex normals, for Gouraud */
+            float uv[3][2]; /* texel coordinates */
+        };
+        /* The sink path, once sink_bounds has run: the polygon as the sink
+         * is handed it (nproj vertices, 0 when culled or cut away), in the
+         * place of the three above, which it no longer reads. Projecting
+         * once and keeping it here costs no memory; a table of its own
+         * would be ~300 KB. */
+        m3_r3d_vertex proj[4];
+    };
     float n[3];             /* the polygon's own normal, from the header */
-    float vn[3][3];         /* per-vertex normals, for Gouraud */
-    float uv[3][2];         /* texel coordinates */
     uint16_t tx, ty;        /* texture origin in the sheet */
     uint16_t tw, th;        /* its size, for wrapping */
     uint8_t page;
@@ -559,6 +569,7 @@ struct tri_s {
     uint8_t tex_alpha;      /* texel alpha makes it see-through */
     uint8_t mirror;         /* bit 0 mirror v, bit 1 mirror u (header word 2) */
     uint8_t r, g, b;
+    uint8_t nproj;
 };
 
 static tri_t *g_tris;
@@ -624,8 +635,11 @@ static void emit(const float a[3], const float b[3], const float c[3],
     for (k = 0; k < 3; k++) {
         t->v[0][k] = a[k]; t->v[1][k] = b[k]; t->v[2][k] = c[k];
         t->n[k] = n[k];
-        t->vn[0][k] = na[k]; t->vn[1][k] = nb[k]; t->vn[2][k] = nc[k];
     }
+    if (!g_sink)                        /* Gouraud's; the sink shades flat */
+        for (k = 0; k < 3; k++) {
+            t->vn[0][k] = na[k]; t->vn[1][k] = nb[k]; t->vn[2][k] = nc[k];
+        }
     for (k = 0; k < 2; k++) {
         t->uv[0][k] = ua[k]; t->uv[1][k] = ub[k]; t->uv[2][k] = uc[k];
     }
@@ -1759,6 +1773,10 @@ static int cut_xyw(const float in[][3], int n, float out[][3], int axis,
  * counting those gave three viewports ~42 bits of w between them, more than
  * a depth buffer holds (pvr_r3d.c); what is on the screen is ~15. Returns
  * wmin > wmax when nothing is. */
+/* Set by sink_bounds once every triangle's proj holds its polygon; read
+ * and cleared by sink_submit. */
+static int g_projected;
+
 static void sink_bounds(float *wmin, float *wmax, float x0, float y0,
                         float x1, float y1)
 {
@@ -1768,6 +1786,8 @@ static void sink_bounds(float *wmin, float *wmax, float x0, float y0,
         m3_r3d_vertex out[4];
         float a[12][3], b[12][3];
         int n = sink_project(&g_tris[t], out), k, inside = 1;
+        g_tris[t].nproj = (uint8_t)(n >= 3 ? n : 0);
+        for (k = 0; k < n; k++) g_tris[t].proj[k] = out[k];
         for (k = 0; k < n; k++) {
             a[k][0] = out[k].x; a[k][1] = out[k].y; a[k][2] = out[k].w;
             if (out[k].x < x0 || out[k].x > x1 ||
@@ -1786,6 +1806,7 @@ static void sink_bounds(float *wmin, float *wmax, float x0, float y0,
         }
     }
     *wmin = lo; *wmax = hi;
+    g_projected = 1;
 }
 
 /* sink_project's polygons, flat shaded, handed to the sink one by one
@@ -1797,10 +1818,17 @@ static void sink_submit(const float L[3], float intensity)
         const tri_t *tr = &g_tris[t % g_ntris];
         float lit, sh;
         m3_r3d_vertex out[4];
+        const m3_r3d_vertex *pv;
         m3_r3d_texture tex;
         int nclip, r, g, b;
         if ((tr->alpha < 255) != (t >= g_ntris)) continue;
-        nclip = sink_project(tr, out);
+        if (g_projected) {
+            nclip = tr->nproj;
+            pv = tr->proj;
+        } else {
+            nclip = sink_project(tr, out);
+            pv = out;
+        }
         if (nclip < 3) continue;
         lit = tr->n[0]*L[0] + tr->n[1]*L[1] + tr->n[2]*L[2];
         if (lit < 0) lit = 0;
@@ -1821,12 +1849,13 @@ static void sink_submit(const float L[3], float intensity)
             tex.alpha_test = tr->alpha_test;
             tex.tex_alpha = tr->tex_alpha;
         }
-        g_sink->polygon(out, nclip,
+        g_sink->polygon(pv, nclip,
                         ((uint32_t)tr->alpha << 24) | ((uint32_t)r << 16) |
                         ((uint32_t)g << 8) | (uint32_t)b,
                         tr->alpha < 255,
                         tr->textured && g_textures ? &tex : NULL);
     }
+    g_projected = 0;
 }
 
 static void raster_bands(uint32_t *fb, int fw, int fh, float sx, float sy,

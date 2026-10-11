@@ -2,7 +2,7 @@
 
 ## 2026-10-12 — the race 35 % faster: no idle spin, no per-polygon copies
 
-Profiling build, Flycast, fields 0-5400: **429 s instead of 660 s**, RAM
+Profiling build, Flycast, fields 0-5400: **423 s instead of 660 s**, RAM
 signatures unchanged at every check. In order:
 - `draw_model` read every polygon through `bus_r3d_read`, a `memcpy` into
   an unaligned byte buffer: 14 % of the samples were in `memcpy`, most in
@@ -23,12 +23,15 @@ signatures unchanged at every check. In order:
   swapped for VROM), not four byte loads through a function pointer, and
   the vertex scale (2048) is a multiplication. `sink_project` skips the
   near-plane cut when no vertex needs it. 458 -> 429 s.
-- Vertex normals are transformed only for the software rasteriser's
-  Gouraud; the sink shades flat (not yet in a timed run).
+- Vertex normals are transformed and stored only for the software
+  rasteriser's Gouraud; the sink shades flat. Each triangle is projected
+  once: `sink_bounds` keeps the polygon in the triangle's own `proj`,
+  over the view-space fields it no longer reads. 429 -> 423 s.
 
 Left in a race field (~110-150 ms): `draw_model` 15 %, guest 23 %,
-`sink_project` + `real3d_render` (projection twice: bounds, then submit)
-~12 %, disc waits ~8 %.
+`real3d_render` + `sink_project` ~10 %, disc waits ~8 %. What is left of
+`draw_model` is mostly the stores of 132-byte triangles into a 768 KB
+table, not arithmetic.
 
 ## 2026-10-11 — viewports as layers: field 6000 drawn as on the desktop
 
