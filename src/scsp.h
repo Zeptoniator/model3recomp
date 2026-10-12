@@ -45,7 +45,7 @@ typedef struct {
     void   (*slot_write)(void *ctx, int slot, int word, uint16_t v);
     void   (*common_write)(void *ctx, int reg, uint16_t v);     /* 0x400 + reg */
     void   (*dsp_write)(void *ctx, uint32_t addr, uint16_t v);  /* 0x700-0xBFF */
-    void   (*ram_write)(void *ctx, uint32_t addr, uint32_t len); /* by DMA */
+    void   (*ram_write)(void *ctx, uint32_t addr, uint16_t v); /* a word, by DMA */
     uint16_t (*monitor)(void *ctx, int slot);   /* CA << 7 | SGC << 5 | EG */
 } scsp_voices_t;
 void     scsp_set_voices(scsp_t *s, const scsp_voices_t *v, int only);

@@ -106,6 +106,7 @@ static scsp_voices_t g_far_ops1, g_far_ops2;
  * run, the addresses most run, sample ROM bytes read, and what the voices
  * keyed on use (scsp.c). Run with M3_SOUND_THREAD=0. */
 static uint64_t g_st_insns, g_st_rom;
+static void stat_ram_report(void);
 static uint32_t *g_st_hist;         /* per 68000 word address, 512 KB program */
 void snd_stat_pc(unsigned pc)
 {
@@ -141,20 +142,47 @@ static void stat_report(void)
                 t->lfo, t->dsp_send, t->noise, t->looped, t->max_end >> 10, pages * 4,
                 scsp_dsp_steps(c ? g_scsp2 : g_scsp1));
     }
+    stat_ram_report();
     g_st_insns = g_st_rom = 0;
     if (g_st_hist) memset(g_st_hist, 0, 0x100000 * sizeof *g_st_hist);
 }
 #define STAT_ROM() (g_st_rom++)
+/* The 68000's own reads and writes of the two RAMs, per 4 KB page, since
+ * boot: which of them it only fills (samples) and which it works in. */
+static uint32_t g_st_rd[2][128], g_st_wr[2][128];
+static uint8_t g_st_prog[128], *g_st_srom;   /* 4 KB pages touched, since boot */
+#define STAT_RAM(chip, a, w) ((w) ? g_st_wr[chip][(a) >> 12]++ : g_st_rd[chip][(a) >> 12]++)
+static void stat_ram_report(void)
+{
+    unsigned c, i;
+    for (c = 0; c < 2; c++) {
+        unsigned rd = 0, wr = 0;
+        fprintf(stderr, "[sndstat]   ram%u pages read by the 68000:", c + 1);
+        for (i = 0; i < 128; i++) {
+            if (g_st_rd[c][i]) { rd++; fprintf(stderr, " %02X", i); }
+            if (g_st_wr[c][i]) wr++;
+        }
+        fprintf(stderr, " (%u read, %u written)\n", rd, wr);
+    }
+    {
+        unsigned np = 0, ns = 0;
+        for (i = 0; i < 128; i++) np += g_st_prog[i];
+        for (i = 0; g_st_srom && i < 4096; i++) ns += g_st_srom[i];
+        fprintf(stderr, "[sndstat]   program pages read %u of 128; sample ROM pages read %u (%u KB)\n",
+                np, ns, ns * 4);
+    }
+}
 #else
 #define STAT_ROM() ((void)0)
+#define STAT_RAM(chip, a, w) ((void)0)
 #endif
 
 /* ---- 68000 memory ----------------------------------------------------- */
 static unsigned rd8(unsigned a)
 {
     a &= 0xFFFFFF;
-    if (a < 0x080000) return g_ram1[a];
-    if (a >= 0x200000 && a < 0x280000) return g_ram2[a - 0x200000];
+    if (a < 0x080000) { STAT_RAM(0, a, 0); return g_ram1[a]; }
+    if (a >= 0x200000 && a < 0x280000) { STAT_RAM(1, a - 0x200000, 0); return g_ram2[a - 0x200000]; }
     if ((a & 0xFFF000) == 0x100000) {
         uint16_t w = scsp_read16(g_scsp1, a & 0xFFF);
         return (a & 1) ? (w & 0xFF) : (w >> 8);
@@ -165,12 +193,19 @@ static unsigned rd8(unsigned a)
     }
     if (a >= 0x600000 && a < 0x680000) {
         a -= 0x600000;
+#ifdef M3_SND_STATS
+        g_st_prog[(a >> 12) & 127] = 1;
+#endif
         return a < g_prog_size ? g_prog[a] : 0xFF;
     }
     if (a >= 0x800000 && g_samples) {
         size_t o;
         STAT_ROM();
         o = (g_s.bank + (a - 0x800000)) % g_samples_size;
+#ifdef M3_SND_STATS
+        if (!g_st_srom) g_st_srom = (uint8_t *)calloc(4096, 1);
+        if (g_st_srom) g_st_srom[(o >> 12) & 4095] = 1;
+#endif
         return g_samples[o];
     }
     return 0xFF;
@@ -187,8 +222,8 @@ static unsigned rd16(unsigned a)
 static void wr8(unsigned a, unsigned v)
 {
     a &= 0xFFFFFF;
-    if (a < 0x080000) { g_ram1[a] = (uint8_t)v; return; }
-    if (a >= 0x200000 && a < 0x280000) { g_ram2[a - 0x200000] = (uint8_t)v; return; }
+    if (a < 0x080000) { STAT_RAM(0, a, 1); g_ram1[a] = (uint8_t)v; return; }
+    if (a >= 0x200000 && a < 0x280000) { STAT_RAM(1, a - 0x200000, 1); g_ram2[a - 0x200000] = (uint8_t)v; return; }
     if ((a & 0xFFF000) == 0x100000 || (a & 0xFFF000) == 0x300000) {
         scsp_t *c = (a & 0xFFF000) == 0x100000 ? g_scsp1 : g_scsp2;
         if (a & 1) scsp_write16(c, a & 0xFFE, (uint16_t)(v & 0xFF), 0x00FF);

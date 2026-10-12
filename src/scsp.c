@@ -164,6 +164,10 @@ struct scsp {
 #define SCITMA  6
 #define SCITMB  7
 
+/* SCSP_NO_SYNTH: a chip that only keeps time, for a host whose voices are
+ * played by other hardware (scsp_set_voices, `only`): no tables (550 KB),
+ * no synthesis, no DSP. scsp_sample() must then be in voices-only mode. */
+#ifndef SCSP_NO_SYNTH
 /* ---- shared tables ---------------------------------------------------- */
 static const double ARTimes[64] = {100000,100000,8100.0,6900.0,6000.0,4800.0,4000.0,3400.0,3000.0,2400.0,2000.0,1700.0,1500.0,
     1200.0,1000.0,860.0,760.0,600.0,500.0,430.0,380.0,300.0,250.0,220.0,190.0,150.0,130.0,110.0,95.0,
@@ -260,12 +264,18 @@ static void build_tables(void)
     }
 }
 
+#else
+static void build_tables(void) { }
+#endif
+
 /* ---- memory ----------------------------------------------------------- */
+#ifndef SCSP_NO_SYNTH
 static uint8_t ram_r8(scsp_t *c, uint32_t a)
 {
     a &= 0xFFFFF;
     return a < c->ram_size ? c->ram[a] : 0;
 }
+#endif
 static uint16_t ram_r16(scsp_t *c, uint32_t a)
 {
     a &= 0xFFFFE;
@@ -275,7 +285,7 @@ static void ram_w16(scsp_t *c, uint32_t a, uint16_t v)
 {
     a &= 0xFFFFE;
     if (a + 1 < c->ram_size) { c->ram[a] = (uint8_t)(v >> 8); c->ram[a + 1] = (uint8_t)v; }
-    if (c->voices && c->voices->ram_write) c->voices->ram_write(c->voices->ctx, a, 2);
+    if (c->voices && c->voices->ram_write) c->voices->ram_write(c->voices->ctx, a, v);
 }
 
 /* ---- interrupts ------------------------------------------------------- */
@@ -333,6 +343,7 @@ static void timer_fire(scsp_t *c, int t)
     if (t == 0) MainCheckPendingIRQ(c, 0x40);
 }
 
+#ifndef SCSP_NO_SYNTH
 /* ---- envelope, pitch, LFO --------------------------------------------- */
 static int clamp63(int v) { return v < 0 ? 0 : v > 63 ? 63 : v; }
 static int Get_AR(int base, int R) { return ARTABLE[clamp63(base + (R << 1))]; }
@@ -581,6 +592,10 @@ static void dsp_step(scsp_t *c)
     memset(d->MIXS, 0, sizeof d->MIXS);
 }
 
+#else
+static void dsp_start(dsp_t *d) { (void)d; }
+#endif
+
 /* ---- registers -------------------------------------------------------- */
 #ifdef M3_SND_STATS
 /* What the driver asks of the chips, for planning a port onto another
@@ -613,6 +628,15 @@ unsigned scsp_dsp_steps(scsp_t *c)
 #define STAT_KEYON(c, s) ((void)0)
 #endif
 
+#ifdef SCSP_NO_SYNTH
+/* The voices are elsewhere: only what the driver reads back is kept. */
+static void UpdateSlotReg(scsp_t *c, int s, int r)
+{
+    slot_t *slot = c->Slots + s;
+    if ((r & 0x3f) <= 1 && KEYONEX(slot))
+        slot->data[0] &= ~0x1000;
+}
+#else
 static void UpdateSlotReg(scsp_t *c, int s, int r)
 {
     slot_t *slot = c->Slots + s;
@@ -640,6 +664,8 @@ static void UpdateSlotReg(scsp_t *c, int s, int r)
         break;
     }
 }
+
+#endif
 
 static void exec_dma(scsp_t *c);
 
@@ -844,6 +870,7 @@ static void exec_dma(scsp_t *c)
 }
 
 /* ---- one sample ------------------------------------------------------- */
+#ifndef SCSP_NO_SYNTH
 static int32_t UpdateSlot(scsp_t *c, slot_t *slot)
 {
     int32_t sample = 0;
@@ -961,6 +988,8 @@ static int32_t UpdateSlot(scsp_t *c, slot_t *slot)
     return sample;
 }
 
+#endif
+
 void scsp_sample(scsp_t *c, int32_t *outl, int32_t *outr)
 {
     int32_t smpl = 0, smpr = 0;
@@ -972,7 +1001,7 @@ void scsp_sample(scsp_t *c, int32_t *outl, int32_t *outr)
                 timer_fire(c, t);
         return;
     }
-
+#ifndef SCSP_NO_SYNTH
     for (sl = 0; sl < 32; ++sl) {
         c->RBUFDST = c->RINGBUF + c->BUFPTR;
         if (c->Slots[sl].active) {
@@ -1015,6 +1044,9 @@ void scsp_sample(scsp_t *c, int32_t *outl, int32_t *outr)
     for (t = 0; t < 3; t++)
         if (c->timer_left[t] && --c->timer_left[t] == 0)
             timer_fire(c, t);
+#else
+    (void)smpl; (void)smpr; (void)sl; (void)i; (void)outl; (void)outr;
+#endif
 }
 
 /* ---- the outside ------------------------------------------------------ */
@@ -1100,6 +1132,10 @@ void scsp_state_load(scsp_t *c, const void *buf)
 {
     int i;
     memcpy(c, buf, offsetof(scsp_t, tail));
+#ifndef SCSP_NO_SYNTH
     /* The LFO tables are pointers into this build's statics. */
     for (i = 0; i < 32; ++i) Compute_LFO(&c->Slots[i]);
+#else
+    (void)i;
+#endif
 }
