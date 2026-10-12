@@ -76,15 +76,23 @@ typedef struct {
 } rom_cache_t;
 static size_t (*g_rom_read)(void *, uint32_t, void *, size_t);
 static void *g_rom_ctx;
-static rom_cache_t g_rc_prog = { 0x1000u, 12u, 24u, ~0u }, g_rc_smp = { 0x4000u, 14u, 16u, ~0u };
+static rom_cache_t g_rc_prog = { .page = 0x1000u, .shift = 12u, .slots = 24u, .last = ~0u };
+static rom_cache_t g_rc_smp = { .page = 0x4000u, .shift = 14u, .slots = 16u, .last = ~0u };
 uint64_t g_snd_rom_misses;
 
-/* The byte at off, in its page (a page never splits an aligned word). */
-static const uint8_t *cache_at(rom_cache_t *c, uint32_t off)
+#if defined(__GNUC__) || defined(__clang__)
+#define SND_NOINLINE __attribute__((noinline))
+#else
+#define SND_NOINLINE
+#endif
+
+/* Fill or select the page at off. Kept out of the hit path: the 68000 asks
+ * for an instruction word every few host instructions, and almost every one
+ * is in the page it just used. Entering the out-of-line cache routine for
+ * that case was a measurable part of the interpreter's cost on the SH-4. */
+static SND_NOINLINE const uint8_t *cache_miss(rom_cache_t *c, uint32_t off)
 {
     uint32_t page = off >> c->shift, k, old = 0;
-    if (c->last < c->slots && c->tag[c->last] == page)
-        return c->buf + (c->last << c->shift) + (off & (c->page - 1u));
     for (k = 0; k < c->slots; k++) {
         if (c->tag[k] == page) break;
         if (c->age[k] < c->age[old]) old = k;
@@ -102,6 +110,14 @@ static const uint8_t *cache_at(rom_cache_t *c, uint32_t off)
     return c->buf + (k << c->shift) + (off & (c->page - 1u));
 }
 
+static inline const uint8_t *cache_at(rom_cache_t *c, uint32_t off)
+{
+    uint32_t k = c->last;
+    if (k < c->slots && c->tag[k] == off >> c->shift)
+        return c->buf + (k << c->shift) + (off & (c->page - 1u));
+    return cache_miss(c, off);
+}
+
 static unsigned rom8(uint32_t off)          /* program at 0, samples after */
 {
     if (!g_rom_read)
@@ -114,6 +130,18 @@ static unsigned prog16(uint32_t off)
 {
     const uint8_t *p = g_rom_read ? cache_at(&g_rc_prog, off) : g_prog + off;
     return ((unsigned)p[0] << 8) | p[1];
+}
+
+static unsigned prog32(uint32_t off)
+{
+    const uint8_t *p;
+    if (!g_rom_read) p = g_prog + off;
+    else if ((off & (g_rc_prog.page - 1u)) <= g_rc_prog.page - 4u)
+        p = cache_at(&g_rc_prog, off);
+    else
+        return (prog16(off) << 16) | prog16(off + 2u);
+    return ((unsigned)p[0] << 24) | ((unsigned)p[1] << 16)
+         | ((unsigned)p[2] << 8) | p[3];
 }
 static scsp_t *g_scsp1, *g_scsp2;
 
@@ -355,25 +383,106 @@ static void wr16(unsigned a, unsigned v)
     wr8(a + 1, v & 0xFF);
 }
 
-/* Musashi's callbacks. */
-unsigned int m68k_read_memory_8(unsigned int a)  { return rd8(a); }
-/* The common cases first: the driver's own RAM and its program. */
+/* Musashi's callbacks. The interpreter calls these for every operand and
+ * instruction fetch. Keep its RAM and program -- overwhelmingly the common
+ * cases -- out of the complete board decoder above. M3_SND_STATS deliberately
+ * takes the slow path because it counts every access. */
+unsigned int m68k_read_memory_8(unsigned int a)
+{
+#ifndef M3_SND_STATS
+    a &= 0xFFFFFFu;
+    if (a < g_ram_local) return g_ram1[a];
+    if (a - 0x200000u < g_ram_local) return g_ram2[a - 0x200000u];
+    if (a - 0x600000u < g_prog_size) return rom8(a - 0x600000u);
+#endif
+    return rd8(a);
+}
+
 unsigned int m68k_read_memory_16(unsigned int a)
 {
     a &= 0xFFFFFE;
 #ifndef M3_SND_STATS                        /* which counts every access */
     if (a + 1u < g_ram_local) return ((unsigned)g_ram1[a] << 8) | g_ram1[a + 1];
+    {
+        uint32_t o = a - 0x200000u;
+        if (o < g_ram_local && g_ram_local - o >= 2u)
+            return ((unsigned)g_ram2[o] << 8) | g_ram2[o + 1];
+    }
     if (a - 0x600000u < g_prog_size) return prog16(a - 0x600000u);
 #endif
     return rd16(a);
 }
 unsigned int m68k_read_memory_32(unsigned int a)
 {
+#ifndef M3_SND_STATS
+    uint32_t o;
+    a &= 0xFFFFFEu;
+    if (a + 3u < g_ram_local)
+        return ((unsigned)g_ram1[a] << 24) | ((unsigned)g_ram1[a + 1] << 16)
+             | ((unsigned)g_ram1[a + 2] << 8) | g_ram1[a + 3];
+    o = a - 0x200000u;
+    if (o < g_ram_local && g_ram_local - o >= 4u)
+        return ((unsigned)g_ram2[o] << 24) | ((unsigned)g_ram2[o + 1] << 16)
+             | ((unsigned)g_ram2[o + 2] << 8) | g_ram2[o + 3];
+    o = a - 0x600000u;
+    if (o < g_prog_size && g_prog_size - o >= 4u) return prog32(o);
+#endif
     return (m68k_read_memory_16(a) << 16) | m68k_read_memory_16(a + 2);
 }
-void m68k_write_memory_8(unsigned int a, unsigned int v)  { wr8(a, v); }
-void m68k_write_memory_16(unsigned int a, unsigned int v) { wr16(a, v); }
-void m68k_write_memory_32(unsigned int a, unsigned int v) { wr16(a, v >> 16); wr16(a + 2, v & 0xFFFF); }
+void m68k_write_memory_8(unsigned int a, unsigned int v)
+{
+#ifndef M3_SND_STATS
+    a &= 0xFFFFFFu;
+    if (a < g_ram_local && (!g_voices || a < g_mirror_from)) {
+        g_ram1[a] = (uint8_t)v;
+        return;
+    }
+    if (a - 0x200000u < g_ram_local
+        && (!g_voices || a - 0x200000u < g_mirror_from)) {
+        g_ram2[a - 0x200000u] = (uint8_t)v;
+        return;
+    }
+#endif
+    wr8(a, v);
+}
+void m68k_write_memory_16(unsigned int a, unsigned int v)
+{
+#ifndef M3_SND_STATS
+    uint32_t o;
+    a &= 0xFFFFFEu;
+    if (a + 1u < g_ram_local && (!g_voices || a + 1u < g_mirror_from)) {
+        g_ram1[a] = (uint8_t)(v >> 8); g_ram1[a + 1] = (uint8_t)v;
+        return;
+    }
+    o = a - 0x200000u;
+    if (o < g_ram_local && g_ram_local - o >= 2u
+        && (!g_voices || (o < g_mirror_from && g_mirror_from - o >= 2u))) {
+        g_ram2[o] = (uint8_t)(v >> 8); g_ram2[o + 1] = (uint8_t)v;
+        return;
+    }
+#endif
+    wr16(a, v);
+}
+void m68k_write_memory_32(unsigned int a, unsigned int v)
+{
+#ifndef M3_SND_STATS
+    uint32_t o;
+    a &= 0xFFFFFEu;
+    if (a + 3u < g_ram_local && (!g_voices || a + 3u < g_mirror_from)) {
+        g_ram1[a] = (uint8_t)(v >> 24); g_ram1[a + 1] = (uint8_t)(v >> 16);
+        g_ram1[a + 2] = (uint8_t)(v >> 8); g_ram1[a + 3] = (uint8_t)v;
+        return;
+    }
+    o = a - 0x200000u;
+    if (o < g_ram_local && g_ram_local - o >= 4u
+        && (!g_voices || (o < g_mirror_from && g_mirror_from - o >= 4u))) {
+        g_ram2[o] = (uint8_t)(v >> 24); g_ram2[o + 1] = (uint8_t)(v >> 16);
+        g_ram2[o + 2] = (uint8_t)(v >> 8); g_ram2[o + 3] = (uint8_t)v;
+        return;
+    }
+#endif
+    wr16(a, v >> 16); wr16(a + 2, v & 0xFFFF);
+}
 unsigned int m68k_read_disassembler_8(unsigned int a)  { return rd8(a); }
 unsigned int m68k_read_disassembler_16(unsigned int a) { return rd16(a); }
 unsigned int m68k_read_disassembler_32(unsigned int a) { return m68k_read_memory_32(a); }

@@ -59,6 +59,14 @@ the whole arrangement bit for bit (`M3_SND_PAGED=1`). Guest RAM is now a
   (`DC_AUDIO_WAV`), the spectrogram has the desktop's shape -- attract
   music, silences, the engine's harmonics climbing through the gears --
   3.5 dB quieter, no clipping.
+- The 68000's hot memory callbacks now read its local RAM and program
+  directly, including 32-bit operands, and a program-page hit stays inline
+  while only a miss enters the LRU routine. The same profiled race is
+  376.080 s instead of 382.284 s; all 27 RAM signatures still match. On the
+  desktop, a complete
+  5400-field run through the paged/AICA-shaped path produces the exact same
+  16,557,232-byte WAV as the resident board and the pre-optimisation build
+  (SHA-256: `73063d1a7727e4a4e55c30bc808e83111dcdbc4f9ddd59dbe83929ddf01dbb92`).
 - The board is stepped by the game's fields, so with the game ~5x slow the
   music's tempo is too (pitch is right). Decoupled, it could follow the
   wall clock instead -- at ~5x the 68000's cost.
