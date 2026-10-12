@@ -11,6 +11,8 @@ int  pvr_r3d_install(void);
 unsigned pvr_r3d_last_opaque(void);
 unsigned pvr_r3d_last_punch(void);
 unsigned pvr_r3d_last_translucent(void);
+/* Punch-through and translucent polygons left out for want of room. */
+unsigned pvr_r3d_last_dropped(void);
 
 /* Texture cache: converted so far, refused for want of room, KB in use. */
 unsigned pvr_r3d_textures_made(void);

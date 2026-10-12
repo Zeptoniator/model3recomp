@@ -1,5 +1,74 @@
 # Status
 
+## 2026-10-13 — the cars: the 3D seen the right way round
+
+- No car had ever been drawn, on the desktop or the Dreamcast. The game
+  was not at fault: in the attract demo its own visibility test (0x30270,
+  read with Ghidra headless) marks the cars near the camera visible, and
+  its draw loop (0x2F1B4) emits them; in culling RAM our car hangs off the
+  scene through a pointer list (0x8058A8) like any object.
+- The renderer drew what lies *behind* the eye, mirrored, like a rear-view
+  mirror. Scud's matrix 0 with Supermodel's fixed permutation is the
+  identity: the node matrices carry geometry into an OpenGL view space
+  (eye down -z), and real3d.c looks down +z with no root transform. The
+  scenery all round looked plausible; everything in front of the camera
+  -- our car 8.6 units ahead of the chase camera, the cars in view -- was
+  cut at the near plane. The root is now Supermodel's (permutation times
+  matrix 0) with z turned for +z forward; the sun vector is Supermodel's
+  (w5, -w6, w4 here) instead of (w4, w5, w6), which had been tuned on the
+  mirrored picture.
+- Depth is shared by the viewports of one priority, as Supermodel clears
+  it (cars and road are different viewports of priority 0): the software
+  path clears its buffer per priority, and the PVR stacks one layer per
+  priority instead of one per viewport. A layer is the fixed range w
+  2^-11 .. 2^5 (z 2048 .. near plane); `sink_bounds` and its pass over the
+  triangles are gone; the stack runs 2^-16 .. 2^16 (Flycast still has
+  ~300,000 depth steps an octave at the bottom). Over the race a priority
+  shows w >= 0.00062 on the screen. KOS puts the background plane at
+  w = 0.0001 (`pvr_set_zclip`) and whatever is farther fails the depth
+  test against it: the old floor of 2^-10 stepped round it unknowingly,
+  the new one lost the sky, and the 2D drawn behind the 3D (w 1e-8) never
+  showed at all. The plane is now under the 2D. `begin_viewport` now takes the
+  priority instead of a w range; sink dumps write `V layer x0 y0 x1 y1`.
+- The sink's near plane is the software path's 0.05 again: 0.25 rested on
+  a measure taken on the mirrored picture, and cut a black wedge out of the
+  sky at field 1400.
+- The PVR's punch-through and translucent lists held 1,024 and 512
+  polygons; with the cars a race needs up to 1,161 and 998 in a field
+  (desktop sink, `M3_SINK_COUNT` now counts the three lists and their
+  peaks), and the rest were dropped. They hold 1,536 each now, their
+  vertices in one pool (12 bytes a polygon instead of 176: less memory
+  than before); `[pvr] last frame` reports drops.
+- Checked: desktop pictures every 100 fields to 6000 (McLarens in the
+  attract demo, our 911 and the field in the race, logos the right way
+  round); `sink_render.py --pvr` against the exact layered render: 0 px at
+  fields 1100, 1300, 1400; 35-62 px in a race, a translucent highlight of
+  the speedometer coplanar with the gauge (a tie the PVR's strict compare
+  loses). `sink_render.py`'s exact render now draws a priority's opaque
+  polygons before its translucent ones, as Supermodel does (a car's shadow
+  is in one viewport, the road it lies on in a later one).
+- On the Dreamcast (Flycast, a shot every 100 fields to 6000): the
+  McLarens of the attract demo, the 911 turning on the car selection
+  globe, our car and the field in the race, sparks off the walls. Profiled
+  race 0-5400: **348.8 s instead of 302.9 s** -- the cars and the scene in
+  front of the camera are new work: 1,035 disc reads instead of 768 (VROM
+  pages missed 2,609 instead of 1,533) -- all 27 RAM signatures equal,
+  heap 10,062 KB instead of 10,104; peaks of 7,679 opaque, 1,125
+  punch-through and 988 translucent polygons a frame, none dropped.
+- Not changed: in Scud the viewports' scroll fog (word 0x20) and fog
+  density (0x23) are 0, so the black gaps between distant scenery (the
+  horizon of field 1000, a wedge at field 1400's right edge) would be black
+  under Supermodel too. Fog is not implemented (fog start 0.25 and a
+  colour on some race viewports).
+- Known: the desktop software path still draws translucent polygons per
+  viewport, so on the desktop a car's shadow on the road is lost. A
+  desktop run with `M3_SINK_COUNT` and one rendering into a framebuffer
+  are not in step (the scene of field 1400 in one is field 1384's in the
+  other): compare sink dumps with sink dumps. The
+  PVR's parameter buffer (768 KB) is probably too small for the busiest
+  race fields now (~9,700 polygons at ~90 bytes); Flycast does not
+  enforce it, real hardware would.
+
 ## 2026-10-12 (night) — a ROM miss reads the rest of its 32 KB page
 
 - A miss in the ROM piece caches read one 4 KB piece: 2,195 disc reads

@@ -169,9 +169,11 @@ static void on_field(void)
     if (f % 100 == 0) {
         report("progress");
         printf("[pvr] last frame: %u opaque, %u punch-through, %u translucent"
-               " polygons; textures %u made, %u refused, %u KB; 2D redrawn %u\n",
+               " polygons, %u dropped; textures %u made, %u refused, %u KB;"
+               " 2D redrawn %u\n",
                pvr_r3d_last_opaque(), pvr_r3d_last_punch(),
-               pvr_r3d_last_translucent(), pvr_r3d_textures_made(),
+               pvr_r3d_last_translucent(), pvr_r3d_last_dropped(),
+               pvr_r3d_textures_made(),
                pvr_r3d_textures_failed(), pvr_r3d_texture_kb(),
                pvr_r3d_layer_redraws());
     }

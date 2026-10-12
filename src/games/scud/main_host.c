@@ -93,13 +93,16 @@ static size_t read_rom(void *ctx, int which, uint32_t off, void *dst, size_t len
 }
 
 /* M3_SINK_COUNT=1: the Real3D scene goes to a sink that only counts what
- * it is handed, the path the Dreamcast's PVR back end takes. */
-static unsigned g_sink_polys[2], g_sink_last[2];
-static void sink_begin(void) { g_sink_polys[0] = g_sink_polys[1] = 0; }
+ * it is handed, the path the Dreamcast's PVR back end takes -- opaque,
+ * translucent and punch-through (texel alpha cuts it out) polygons, the
+ * PVR's three lists, and the most of each in one field so far. */
+static unsigned g_sink_polys[3], g_sink_last[3], g_sink_max[3];
+static void sink_begin(void) { g_sink_polys[0] = g_sink_polys[1] = g_sink_polys[2] = 0; }
 /* M3_SINK_DUMP=field,path: with M3_SINK_COUNT, every polygon of that field
  * as the PVR receives it, one per line: "n argb translucent textured
  * punch-through"
- * then x y w u v per vertex, and "V wmin wmax" where a viewport starts (tools/dreamcast/sink_render.py draws it). */
+ * then x y w u v per vertex, and "V layer x0 y0 x1 y1" where a viewport
+ * starts, layer being its priority (tools/dreamcast/sink_render.py draws it). */
 static FILE *sink_dump_file(void)
 {
     static FILE *f;
@@ -117,7 +120,7 @@ static void sink_poly(const m3_r3d_vertex *v, int n, uint32_t argb, int tr,
                       const m3_r3d_texture *tex)
 {
     FILE *f = sink_dump_file();
-    g_sink_polys[tr ? 1 : 0]++;
+    g_sink_polys[tr ? 1 : tex && (tex->alpha_test || tex->tex_alpha) ? 2 : 0]++;
     if (f) {
         int k;
         fprintf(f, "%d %08X %d %d %d", n, (unsigned)argb, tr, tex != NULL,
@@ -128,16 +131,19 @@ static void sink_poly(const m3_r3d_vertex *v, int n, uint32_t argb, int tr,
         fputc('\n', f);
     }
 }
-static void sink_viewport(float wmin, float wmax, float x0, float y0,
+static void sink_viewport(unsigned layer, float x0, float y0,
                           float x1, float y1)
 {
     FILE *f = sink_dump_file();
-    if (f) fprintf(f, "V %.6g %.6g %g %g %g %g\n", wmin, wmax, x0, y0, x1, y1);
+    if (f) fprintf(f, "V %u %g %g %g %g\n", layer, x0, y0, x1, y1);
 }
 static void sink_end(void)
 {
-    g_sink_last[0] = g_sink_polys[0];
-    g_sink_last[1] = g_sink_polys[1];
+    unsigned k;
+    for (k = 0; k < 3; k++) {
+        g_sink_last[k] = g_sink_polys[k];
+        if (g_sink_polys[k] > g_sink_max[k]) g_sink_max[k] = g_sink_polys[k];
+    }
 }
 static const m3_r3d_sink k_count_sink = { sink_begin, sink_poly, sink_end, NULL,
                                             sink_viewport };
@@ -248,9 +254,11 @@ static void on_field(void)
         g_tg_vram_writes = g_tg_reg_writes = g_tg_reg_changes = 0;
     }
     if (getenv("M3_SINK_COUNT") && model3recomp_frame_count() % 100 == 0)
-        fprintf(stderr, "[sink] field %llu: %u opaque, %u translucent\n",
+        fprintf(stderr, "[sink] field %llu: %u opaque, %u punch-through, %u translucent"
+                        " (most so far %u, %u, %u)\n",
                 (unsigned long long)model3recomp_frame_count(),
-                g_sink_last[0], g_sink_last[1]);
+                g_sink_last[0], g_sink_last[2], g_sink_last[1],
+                g_sink_max[0], g_sink_max[2], g_sink_max[1]);
     scud_operator_settings();
     if (getenv("M3_ROM_PAGED") && model3recomp_frame_count() % 500 == 0)
         fprintf(stderr, "[rom] field %llu: %llu pages fetched in %llu reads\n",

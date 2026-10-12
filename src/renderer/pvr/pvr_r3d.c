@@ -25,23 +25,26 @@
  * older two screen-space textures because it changes every visible pixel.
  * Updates happen after pvr_wait_ready(), never while the PVR reads them.
  *
- * Viewports. The software path draws each viewport on a fresh depth
- * buffer, so a later one (the overpass, the car) covers an earlier one
- * whatever their depths. A PVR scene has one depth buffer, so each
- * viewport's w is scaled by a power of two that puts its whole range just
- * above the one before (begin_viewport): a scale common to a polygon's
- * vertices leaves perspective-correct texturing as it was, and a power of
- * two changes only the exponent. Flycast's depth is
- * log2(1 + 100000 w) / 34 in 24 bits, which saturates above w ~ 2^17 and
- * has few steps left below w ~ 2^-10 (core/rend/gles/gles.cpp), so the
- * stack runs from W_FLOOR = 2^-10 to W_TOP = 2^16. The range real3d.c
- * gives is what the viewport shows on the screen -- 0 to 10 bits each in
- * a race, ~15 for a frame -- and is cut to 2^14 (W_SPAN); should the
- * stack run out, the last viewports share its top.
+ * Viewports. The viewports of one priority share a depth buffer (the
+ * cars are in one viewport of a race, the road in another), and a higher
+ * priority covers a lower one whatever their depths. A PVR scene has one
+ * depth buffer, so each priority is a layer whose w is scaled by a power
+ * of two that puts it just above the layer before (begin_viewport): a
+ * scale common to a polygon's vertices leaves perspective-correct
+ * texturing as it was, and a power of two changes only the exponent.
+ * Flycast's depth is log2(1 + 100000 w) / 34 in 24 bits (core/rend/gles/
+ * gles.cpp), which saturates above w ~ 2^17 and still has ~300,000 steps
+ * an octave at 2^-16, so the stack runs from W_FLOOR = 2^-16 to W_TOP =
+ * 2^16; the background plane is put under it all (pvr_set_zclip). A
+ * layer is the fixed range [LAYER_LO, LAYER_HI] = [2^-11, 2^5]: no vertex
+ * is nearer than the near plane (z 0.05, w 20), and what a priority shows
+ * on the screen over a whole race lies beyond w 0.00062 (desktop sink,
+ * every 100 fields to 6000). Scud Race draws two priorities, which fill
+ * the stack; a third would share its top.
  *
  * Clipping. polygon() cuts every polygon to its viewport's rectangle, for
  * two reasons. Outside it a polygon's w can be anything (a road's near end
- * runs to w = 4 well off the screen), and clamping such a vertex to the
+ * runs to w = 20 well off the screen), and clamping such a vertex to the
  * range would bend the depth of what is on the screen. And a polygon cut at
  * the near plane can project to hundreds of thousands of pixels, which the
  * PVR draws wrongly (field 6000 of the race: a dark triangle over the left
@@ -59,8 +62,9 @@
 
 #define SX (640.0f / 496.0f)
 #define SY (480.0f / 384.0f)
-#define PT_MAX 1024                    /* punch-through polygons kept a frame */
-#define TR_MAX 512                     /* translucent polygons kept a frame */
+#define PT_MAX 1536                    /* punch-through polygons kept a frame (a race: 1,161 at most) */
+#define TR_MAX 1536                    /* translucent polygons kept a frame (a race: 998 at most) */
+#define KEPT_VERTS 9216                /* their vertices, one pool: 3 to 8 a polygon */
 #define SHEET_W 1024u                  /* the half-size sheet */
 #define SHEET_H 1024u
 #define TEX_SLOTS 256
@@ -77,29 +81,37 @@ typedef struct {
 } tex_t;
 
 #define POLY_MAX 8                     /* a quad cut by four rectangle edges */
-#define W_FLOOR (1.0f / 1024.0f)       /* the lowest viewport starts here (2^-10) */
+#define W_FLOOR (1.0f / 65536.0f)      /* the lowest layer starts here (2^-16) */
 #define W_TOP 65536.0f                 /* and the highest ends under 2^16 */
-#define W_SPAN 16384.0f                /* a viewport's own range, at most 2^14 */
+#define LAYER_LO (1.0f / 2048.0f)      /* a priority's w: from z 2048 (2^-11) */
+#define LAYER_HI 32.0f                 /* to past the near plane, z 0.05 (2^5) */
 #define Z_BACK_A 2e-8f                 /* 2D behind: under W_FLOOR, B under A */
 #define Z_BACK_B 1e-8f
 #define Z_FRONT 1e5f                   /* 2D in front: above W_TOP */
 
+/* A polygon kept for its list: its vertices are n of g_kv from first.
+ * Twelve bytes, where eight vertices in place each were 176: a race with
+ * its cars needs twice the polygons the old 1,024 + 512 held. */
 typedef struct {
-    m3_r3d_vertex v[POLY_MAX];
-    int n;
     uint32_t argb;
-    int16_t tex;                       /* slot, -1 untextured */
+    uint16_t first;
+    uint8_t n;
     uint8_t flip;
+    int16_t tex;                       /* slot, -1 untextured */
 } kept_t;
 
 static pvr_poly_hdr_t g_hdr_col[3];    /* untextured, per list */
 static kept_t *g_pt, *g_tr;
-static unsigned g_npt, g_ntr;
+static m3_r3d_vertex *g_kv;
+static unsigned g_npt, g_ntr, g_nkv;
 static unsigned g_op, g_last_op, g_last_pt, g_last_tr;
+static unsigned g_dropped, g_last_dropped;   /* polygons that found no room */
 static int g_open;
-/* The viewport being drawn: its rectangle, its w clamped to [g_vp_lo,
- * g_vp_hi] and scaled by g_vp_scale; the next one starts above g_vp_next. */
-static float g_vp_lo = 1e-30f, g_vp_hi = 1e30f, g_vp_scale = 1.0f;
+/* The viewport being drawn: its rectangle, and its priority's layer: w
+ * clamped to [LAYER_LO, LAYER_HI] and scaled by g_vp_scale; the next layer
+ * starts at g_vp_next. */
+static int g_vp_layer = -1;
+static float g_vp_scale = 1.0f;
 static float g_vp_next = W_FLOOR;
 static float g_vp_x0, g_vp_y0, g_vp_x1 = 496.0f, g_vp_y1 = 384.0f;
 
@@ -426,54 +438,59 @@ static void begin_frame(void)
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
     g_cur_tex = -2; g_cur_flip = -1;
-    g_npt = g_ntr = g_op = 0;
-    g_vp_lo = 1e-30f; g_vp_hi = 1e30f; g_vp_scale = 1.0f; g_vp_next = W_FLOOR;
+    g_npt = g_ntr = g_op = g_nkv = g_dropped = 0;
+    g_vp_layer = -1; g_vp_scale = 1.0f; g_vp_next = W_FLOOR;
     g_vp_x0 = 0.0f; g_vp_y0 = 0.0f; g_vp_x1 = 496.0f; g_vp_y1 = 384.0f;
     g_frame++;
     g_open = 1;
 }
 
-static void keep(kept_t *k, const m3_r3d_vertex *v, int n, uint32_t argb,
-                 int slot, int flip, const m3_r3d_texture *t)
+/* Keeps a polygon as the next of a list (*count of max); 0 when there is
+ * no room for it or its vertices. */
+static int keep(kept_t *list, unsigned *count, unsigned max,
+                const m3_r3d_vertex *v, int n, uint32_t argb,
+                int slot, int flip, const m3_r3d_texture *t)
 {
+    kept_t *k;
     float su, sv;
     int i;
+    if (*count >= max || g_nkv + (unsigned)n > KEPT_VERTS) return 0;
+    k = &list[(*count)++];
     tex_scale(slot, t, &su, &sv);
     for (i = 0; i < n; i++) {
-        k->v[i] = v[i];
-        k->v[i].u = v[i].u * su;     /* stored already normalised */
-        k->v[i].v = v[i].v * sv;
+        m3_r3d_vertex *o = &g_kv[g_nkv + (unsigned)i];
+        *o = v[i];
+        o->u = v[i].u * su;          /* stored already normalised */
+        o->v = v[i].v * sv;
     }
-    k->n = n;
+    k->first = (uint16_t)g_nkv;
+    k->n = (uint8_t)n;
     k->argb = argb;
     k->tex = (int16_t)slot;
     k->flip = (uint8_t)flip;
+    g_nkv += (unsigned)n;
+    return 1;
 }
 
-/* A new viewport, whose w lies in [wmin, wmax]: the smallest power of two
- * that lifts wmin to the top of the last viewport. Only the farthest part
- * of a range deeper than W_SPAN is merged. */
-static void begin_viewport(float wmin, float wmax, float x0, float y0,
+/* A new viewport. The first of a priority starts a layer: the power of
+ * two that lifts LAYER_LO to the top of the layer before (all three are
+ * powers of two, so the quotient is exact), or, out of room, the one that
+ * puts LAYER_HI at the top of the stack, shared. */
+static void begin_viewport(unsigned layer, float x0, float y0,
                            float x1, float y1)
 {
-    int e;
     g_vp_x0 = x0; g_vp_y0 = y0; g_vp_x1 = x1; g_vp_y1 = y1;
-    if (!(wmin <= wmax) || wmax <= 0.0f) return;     /* draws nothing */
-    if (wmin < wmax / W_SPAN) wmin = wmax / W_SPAN;
-    frexpf(g_vp_next / wmin, &e);                    /* 2^e > next / wmin */
-    g_vp_scale = ldexpf(1.0f, e);
-    if (wmax * g_vp_scale > W_TOP) {                 /* out of room: share */
-        frexpf(W_TOP / wmax, &e);
-        g_vp_scale = ldexpf(1.0f, e - 1);
-    }
-    g_vp_lo = wmin; g_vp_hi = wmax;
-    g_vp_next = wmax * g_vp_scale;
+    if ((int)layer == g_vp_layer) return;
+    g_vp_layer = (int)layer;
+    g_vp_scale = g_vp_next / LAYER_LO;
+    if (LAYER_HI * g_vp_scale > W_TOP) g_vp_scale = W_TOP / LAYER_HI;
+    g_vp_next = LAYER_HI * g_vp_scale;
 }
 
 static float vp_w(float w)
 {
-    if (w < g_vp_lo) w = g_vp_lo;
-    if (w > g_vp_hi) w = g_vp_hi;
+    if (w < LAYER_LO) w = LAYER_LO;
+    if (w > LAYER_HI) w = LAYER_HI;
     return w * g_vp_scale;
 }
 
@@ -527,9 +544,11 @@ static void polygon(const m3_r3d_vertex *in, int n, uint32_t argb,
         }
     }
     if (translucent) {
-        if (g_ntr < TR_MAX) keep(&g_tr[g_ntr++], v, n, argb, slot, flip, slot >= 0 ? t : NULL);
+        if (!keep(g_tr, &g_ntr, TR_MAX, v, n, argb, slot, flip, slot >= 0 ? t : NULL))
+            g_dropped++;
     } else if (slot >= 0 && (t->alpha_test || t->tex_alpha)) {
-        if (g_npt < PT_MAX) keep(&g_pt[g_npt++], v, n, argb | 0xFF000000u, slot, flip, t);
+        if (!keep(g_pt, &g_npt, PT_MAX, v, n, argb | 0xFF000000u, slot, flip, t))
+            g_dropped++;
     } else {
         float su, sv;
         tex_scale(slot, slot >= 0 ? t : NULL, &su, &sv);
@@ -553,7 +572,7 @@ static void flush_kept(pvr_list_t list, const kept_t *k, unsigned n)
     }
     for (i = 0; i < n; i++) {
         send_header(list, k[i].tex, k[i].flip);
-        strip(k[i].v, k[i].n, k[i].argb, 1.0f, 1.0f);
+        strip(&g_kv[k[i].first], k[i].n, k[i].argb, 1.0f, 1.0f);
     }
     if (list == PVR_LIST_PT_POLY) {
         if (!g_fallback) draw_layers(1);
@@ -572,6 +591,7 @@ static void end_frame(void)
     g_last_op = g_op;
     g_last_pt = g_npt;
     g_last_tr = g_ntr;
+    g_last_dropped = g_dropped;
     g_open = 0;
 }
 
@@ -581,6 +601,7 @@ static const m3_r3d_sink k_sink = { begin_frame, polygon, end_frame, sheet_chang
 unsigned pvr_r3d_last_opaque(void) { return g_last_op; }
 unsigned pvr_r3d_last_punch(void) { return g_last_pt; }
 unsigned pvr_r3d_last_translucent(void) { return g_last_tr; }
+unsigned pvr_r3d_last_dropped(void) { return g_last_dropped; }
 unsigned pvr_r3d_textures_made(void) { return g_tex_made; }
 unsigned pvr_r3d_textures_failed(void) { return g_tex_failed; }
 unsigned pvr_r3d_texture_kb(void) { return (unsigned)(g_tex_bytes >> 10); }
@@ -602,6 +623,11 @@ int pvr_r3d_install(void)
 
     if (pvr_init(&params) < 0) return 0;
     pvr_set_bg_color(0.0f, 0.0f, 0.0f);
+    /* The background plane's depth: what is farther fails the depth test
+     * against it. KOS puts it at w = 0.0001, above W_FLOOR, which hid the
+     * sky once the stack went under it, and above the 2D drawn behind the
+     * 3D (Z_BACK_A, Z_BACK_B), which it always hid. */
+    pvr_set_zclip(Z_BACK_B * 0.5f);
     /* Punch-through keeps texels with alpha at or above this: half. */
     PVR_SET(0x011C, 0x80);
 
@@ -639,7 +665,8 @@ int pvr_r3d_install(void)
 
     g_pt = malloc(sizeof(kept_t) * PT_MAX);
     g_tr = malloc(sizeof(kept_t) * TR_MAX);
-    if (!g_pt || !g_tr) return 0;
+    g_kv = malloc(sizeof(m3_r3d_vertex) * KEPT_VERTS);
+    if (!g_pt || !g_tr || !g_kv) return 0;
     printf("[pvr] sheet 2048 KB and tilemaps 2048 KB in PVR memory, %u KB left for textures"
            " (budget %u KB)\n", (unsigned)(pvr_mem_available() >> 10),
            TEX_BUDGET >> 10);

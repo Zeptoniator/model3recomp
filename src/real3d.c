@@ -550,8 +550,8 @@ struct tri_s {
             float vn[3][3]; /* per-vertex normals, for Gouraud */
             float uv[3][2]; /* texel coordinates */
         };
-        /* The sink path, once sink_bounds has run: the polygon as the sink
-         * is handed it (nproj vertices, 0 when culled or cut away), in the
+        /* The sink path: the polygon as the sink is handed it (nproj
+         * vertices, 0 when culled or cut away), in the
          * place of the three above, which it no longer reads. Projecting
          * once and keeping it here costs no memory; a table of its own
          * would be ~300 KB. */
@@ -623,8 +623,7 @@ typedef struct { int on, lum, two_sided, alpha, alpha_test, tex_alpha, mirror; u
 
 /* The hardware sink never needs the software rasteriser's vertex normals or
  * its view-space vertices after projection. Keep a separate compact queue so
- * drawing a model does not stride over 132-byte software triangles, then
- * rewrite most of each one with projected vertices in sink_bounds. */
+ * drawing a model does not stride over 132-byte software triangles. */
 typedef struct {
     m3_r3d_vertex proj[4];
     uint32_t argb;
@@ -1271,11 +1270,13 @@ static int g_zw, g_zh;
 
 #define ZNEAR 0.05f
 
-/* The sink's near plane. No pixel of a race lies nearer than z ~0.9 (fields
- * 5000 and 6000, tools/dreamcast/sink_render.py --near), and a hardware
- * depth range is short (see pvr_r3d.c): vertices cut at 0.05 have w = 20,
- * at 0.25 only 4, which is two bits fewer per viewport. */
-#define ZNEAR_SINK 0.25f
+/* The sink's near plane, the software path's. It was 0.25, for a depth
+ * range two bits shorter, on a measure ("no pixel nearer than z ~0.9")
+ * taken while the scene was drawn from behind the eye; seen the right way
+ * round, a sky polygon of the attract demo's field 1400 has pixels nearer
+ * than that, and cutting at 0.25 left a black wedge at the screen's edge.
+ * pvr_r3d.c's layers run up to w = 32. */
+#define ZNEAR_SINK ZNEAR
 
 /* Sutherland-Hodgman against z >= znear. Three input vertices give at most
  * four out, so the caller's buffer is [4][3]. */
@@ -1830,7 +1831,7 @@ static void sink_polygon(mvert_t *pool, const uint8_t cur[4], unsigned nv,
         if (g_ntris >= g_max_tris) return;
         tr = &g_sink_tris[g_ntris++];
         /* Culled triangles keep their place in the queue, as they did in
-         * the software triangle table. sink_bounds and sink_submit skip
+         * the software triangle table. sink_submit skips
          * nproj == 0 before reading any of the fields left unwritten. */
         tr->nproj = 0;
         tr->textured = (uint8_t)(td->on ? 1 : 0);
@@ -1901,66 +1902,6 @@ static void sink_polygon(mvert_t *pool, const uint8_t cur[4], unsigned nv,
         }
         tr->argb = argb;
     }
-}
-
-/* One side of the viewport's rectangle, for sink_bounds: x (axis 0) or y
- * (axis 1) kept >= lim (ge) or <= lim. w is linear on the screen, so the
- * cut interpolates it as it does x and y. */
-static int cut_xyw(const float in[][3], int n, float out[][3], int axis,
-                   float lim, int ge)
-{
-    int i, m = 0;
-    for (i = 0; i < n; i++) {
-        const float *a = in[i], *b = in[i + 1 < n ? i + 1 : 0];   /* no % */
-        int ia = ge ? a[axis] >= lim : a[axis] <= lim;
-        int ib = ge ? b[axis] >= lim : b[axis] <= lim;
-        if (ia) { out[m][0] = a[0]; out[m][1] = a[1]; out[m][2] = a[2]; m++; }
-        if (ia != ib) {
-            float t = (lim - a[axis]) / (b[axis] - a[axis]);
-            out[m][0] = a[0] + t * (b[0] - a[0]);
-            out[m][1] = a[1] + t * (b[1] - a[1]);
-            out[m][2] = a[2] + t * (b[2] - a[2]);
-            m++;
-        }
-    }
-    return m;
-}
-
-/* The range of w the viewport shows: over the part of each polygon inside
- * its rectangle, not over its triangles. A road's near end runs far off the
- * screen to w = 1/ZNEAR_SINK and a backdrop's dome far round behind, and
- * counting those gave three viewports ~42 bits of w between them, more than
- * a depth buffer holds (pvr_r3d.c); what is on the screen is ~15. Returns
- * wmin > wmax when nothing is. */
-static void sink_bounds(float *wmin, float *wmax, float x0, float y0,
-                        float x1, float y1)
-{
-    float lo = 1e30f, hi = 0.0f;
-    unsigned t;
-    for (t = 0; t < g_ntris; t++) {
-        const sink_tri_t *tr = &g_sink_tris[t];
-        float a[12][3], b[12][3];
-        int n = tr->nproj, k, inside = 1;
-        for (k = 0; k < n; k++) {
-            a[k][0] = tr->proj[k].x;
-            a[k][1] = tr->proj[k].y;
-            a[k][2] = tr->proj[k].w;
-            if (tr->proj[k].x < x0 || tr->proj[k].x > x1 ||
-                tr->proj[k].y < y0 || tr->proj[k].y > y1) inside = 0;
-        }
-        if (n >= 3 && !inside) {
-            n = cut_xyw(a, n, b, 0, x0, 1);
-            n = cut_xyw(b, n, a, 0, x1, 0);
-            n = cut_xyw(a, n, b, 1, y0, 1);
-            n = cut_xyw(b, n, a, 1, y1, 0);
-        }
-        if (n < 3) continue;
-        for (k = 0; k < n; k++) {
-            if (a[k][2] < lo) lo = a[k][2];
-            if (a[k][2] > hi) hi = a[k][2];
-        }
-    }
-    *wmin = lo; *wmax = hi;
 }
 
 /* sink_polygon's triangles, flat shaded, handed to the sink one by one
@@ -2120,6 +2061,7 @@ void real3d_render(void)
     /* Viewports are drawn lowest priority first (word 0 bits 3..4), and a
      * viewport with bit 5 set is switched off. */
     for (prio = 0; prio < 4u; prio++) {
+    int layer_open = 0;                 /* a viewport of this priority drawn */
     vpaddr = 0x800000u;
     for (guard = 0; guard < 16u && vpaddr; guard++) {
         uint8_t vb_[0x30 * 4];
@@ -2194,14 +2136,15 @@ void real3d_render(void)
                         cvv, cww, io, jo, vx, vy, vw, vh);
         }
 
-        /* Words 0x04..0x06 are the sun vector in that order. Supermodel
-         * takes it as (w5, w6, w4), and both readings are unit vectors in
-         * every scene dumped, so only a lit picture tells them apart: on
-         * the jungle floor this order lights the tree trunks and the
-         * signpost, and the other leaves them flat black. */
-        light[0] = f32_of(rd32le(vp + 0x04 * 4));
-        light[1] = f32_of(rd32le(vp + 0x05 * 4));
-        light[2] = f32_of(rd32le(vp + 0x06 * 4));
+        /* Words 0x04..0x06 are the sun vector, toward the sun, in the
+         * Real3D's axes (x forward, y right, z down). Supermodel takes it
+         * into OpenGL's view space as (w5, -w6, -w4); here, looking down
+         * +z, that is (w5, -w6, w4). Reading it as (w4, w5, w6) was tuned
+         * on a picture seen from behind the eye (see the root of the
+         * matrix stack below). */
+        light[0] = f32_of(rd32le(vp + 0x05 * 4));
+        light[1] = -f32_of(rd32le(vp + 0x06 * 4));
+        light[2] = f32_of(rd32le(vp + 0x04 * 4));
         if (g_light_flip) { light[0] = -light[0];
             light[1] = -light[1]; light[2] = -light[2]; }
         g_vp07 = f32_of(rd32le(vp + 0x07 * 4));
@@ -2218,41 +2161,34 @@ void real3d_render(void)
             light[0] = 0.3f; light[1] = 0.5f; light[2] = -0.81f;
         }
 
-        /* A fresh depth buffer per viewport. They are separate layers, not
-         * one scene: sharing a buffer lets whichever viewport is walked
-         * first decide the depth of the whole screen, and the first one
-         * here holds a flat quad that covers it. */
-        if (fb) {
+        /* A fresh depth buffer per priority, as Supermodel clears it: the
+         * viewports of one priority are one scene, and a higher priority
+         * covers a lower one whatever their depths. In a race the cars are
+         * in one viewport and the road in another of the same priority;
+         * a buffer per viewport drew the road over the cars. */
+        if (fb && !layer_open) {
             int i, nn = fw * fh;
             for (i = 0; i < nn; i++) g_zbuf[i] = 1e30f;
         }
+        layer_open = 1;
 
-        /* No camera matrix. Matrix 0 looked like one -- a plain rotation,
-         * sitting where a view transform belongs -- and using it turned the
-         * one scene available at the time from nothing into something, which
-         * was taken for confirmation. On a frame that actually has a scene
-         * in it, applying matrix 0 pushes the whole thing off the left of
-         * the screen, and leaving it out gives rocks and a cliff face. The
-         * node matrices already carry the geometry into view space.
+        /* The root of the matrix stack, as Supermodel builds it: a fixed
+         * permutation from the Real3D's (x forward, y right, z down) into
+         * OpenGL's view space, times matrix 0, the coordinate system the
+         * game sets. Scud Race's matrix 0 makes the product the identity:
+         * its node matrices carry geometry into an OpenGL view space, where
+         * the eye looks down -z. This rasteriser looks down +z (x right, y
+         * up), hence the last row's sign.
          *
-         * M3_CAM0 puts it back for comparison: 1 as stored, 2 transposed.
-         * The scene a round builds is almost entirely off screen, which
-         * is what a missing axis permutation at the root of the matrix
-         * stack looks like. */
-        cam = IDENT;
+         * Leaving the root out drew what lies behind the eye, mirrored left
+         * to right, like a rear-view mirror: scenery all round looked right,
+         * and everything in front of the camera -- our car 8.6 units ahead
+         * of a chase camera, the cars the game decides are in view -- was
+         * cut at the near plane. */
         {
-            static long which = -2;
-            if (which == -2) { const char *e = getenv("M3_CAM0");
-                               which = e ? strtol(e, NULL, 0) : 0; }
-            if (which == 1) mat_load(g_matbase, 0, &cam);
-            else if (which == 2) {
-                mat_t t; int r, c;
-                if (mat_load(g_matbase, 0, &t)) {
-                    for (r = 0; r < 3; r++)
-                        for (c = 0; c < 3; c++) cam.m[r][c] = t.m[c][r];
-                    for (r = 0; r < 3; r++) cam.m[r][3] = t.m[r][3];
-                }
-            }
+            static const mat_t root = {{{0, 1, 0, 0}, {0, 0, -1, 0}, {1, 0, 0, 0}}};
+            mat_t m0;
+            cam = mat_load(g_matbase, 0, &m0) ? mat_mul(&root, &m0) : root;
         }
 
         intensity = f32_of(rd32le(vp + 0x07 * 4));
@@ -2286,13 +2222,11 @@ void real3d_render(void)
                 if (g_texstats) tex_stats_note();
                 if (fb) raster_bands(fb, fw, fh, sx, sy, light, intensity);
                 else {
-                    if (g_sink->begin_viewport) {
-                        float wmin, wmax;
-                        float x0 = (float)g_proj.x0, x1 = (float)(g_proj.x1 + 1);
-                        float y0 = (float)g_proj.y0, y1 = (float)(g_proj.y1 + 1);
-                        sink_bounds(&wmin, &wmax, x0, y0, x1, y1);
-                        g_sink->begin_viewport(wmin, wmax, x0, y0, x1, y1);
-                    }
+                    if (g_sink->begin_viewport)
+                        g_sink->begin_viewport(prio,
+                                               (float)g_proj.x0, (float)g_proj.y0,
+                                               (float)(g_proj.x1 + 1),
+                                               (float)(g_proj.y1 + 1));
                     sink_submit();
                 }
                 if (g_pick_tri >= 0) {

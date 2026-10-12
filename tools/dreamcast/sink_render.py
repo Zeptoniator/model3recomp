@@ -12,47 +12,45 @@ from PIL import Image
 W, H = 496, 384
 SHARED = '--shared-depth' in sys.argv
 # --pvr: one depth buffer, each viewport's polygons cut to its rectangle
-# and their w stacked as pvr_r3d.c does, and depth as Flycast stores it:
-# log2(1 + 100000 w) / 34 in 24 bits.
+# and their w put in its priority's layer as pvr_r3d.c does, and depth as
+# Flycast stores it: log2(1 + 100000 w) / 34 in 24 bits.
 PVR = '--pvr' in sys.argv
-bounds = {}
+layers = {}     # viewport -> its priority ("V layer x0 y0 x1 y1")
 rects = {}
-W_FLOOR, W_TOP, W_SPAN = 2.0 ** -10, 2.0 ** 16, 2.0 ** 14
-if '--stack' in sys.argv:   # log2 of floor, top, span: another stack to try
-    W_FLOOR, W_TOP, W_SPAN = (2.0 ** float(x) for x in
-                              sys.argv[sys.argv.index('--stack') + 1].split(','))
+W_FLOOR, W_TOP = 2.0 ** -16, 2.0 ** 16
+LAYER_LO, LAYER_HI = 2.0 ** -11, 2.0 ** 5
+if '--stack' in sys.argv:   # log2 of floor, top: another stack to try
+    W_FLOOR, W_TOP = (2.0 ** float(x) for x in
+                      sys.argv[sys.argv.index('--stack') + 1].split(','))
 
 
 def stack(polys):
-    import math
-    nxt = W_FLOOR
+    """pvr_r3d.c's begin_viewport: the first viewport of a priority starts
+    a layer above the one before; the others share it."""
+    nxt, sc, cur = W_FLOOR, 1.0, None
     scale = {}
-    for vp in sorted(set(p[4] for p in polys)):
-        lo, hi = bounds.get(vp, (1, 0))
-        if not (lo <= hi) or hi <= 0:
-            continue
-        lo = max(lo, hi / W_SPAN)
-        e = math.frexp(nxt / lo)[1]
-        sc = 2.0 ** e
-        if hi * sc > W_TOP:
-            sc = 2.0 ** (math.frexp(W_TOP / hi)[1] - 1)
-        scale[vp] = (lo, hi, sc)
-        nxt = hi * sc
+    for vp in sorted(set(p[4] for p in polys) | set(layers)):
+        if layers.get(vp) != cur:
+            cur = layers.get(vp)
+            sc = nxt / LAYER_LO
+            if LAYER_HI * sc > W_TOP:
+                sc = W_TOP / LAYER_HI
+            nxt = LAYER_HI * sc
+        scale[vp] = (LAYER_LO, LAYER_HI, sc)
     return scale
 
 
 def load(path):
     polys = []
     vp = 0
-    bounds.clear()
+    layers.clear()
     for line in open(path):
         f = line.split()
         if f[0] == 'V':
             vp += 1
-            if len(f) >= 3:
-                bounds[vp] = (float(f[1]), float(f[2]))
-            if len(f) == 7:
-                rects[vp] = tuple(float(x) for x in f[3:7])
+            layers[vp] = int(f[1])
+            if len(f) == 6:
+                rects[vp] = tuple(float(x) for x in f[2:6])
             continue
         n, argb, tr, tx, pt = (int(f[0]), int(f[1], 16), int(f[2]),
                                int(f[3]), int(f[4]))
@@ -80,8 +78,8 @@ def draw(polys, out, keep=None):
     col = np.zeros((H, W, 3))
     dep = np.full((H, W), -np.inf)
     ys, xs = np.mgrid[0:H, 0:W] + 0.5
-    # Viewport by viewport, each on a fresh depth buffer as the software
-    # path draws them (--shared-depth: one buffer, as the PVR saw them).
+    # Viewport by viewport, a fresh depth buffer per priority as the
+    # software path draws them (--shared-depth: one buffer for all).
     # p[1]: 0 opaque, 1 punch-through, 2 translucent. The PVR takes its
     # three lists in that order over the whole scene.
     order = []
@@ -89,15 +87,22 @@ def draw(polys, out, keep=None):
         for lst in (0, 1, 2):
             order += [i for i, p in enumerate(polys) if p[1] == lst]
     else:
-        for vp in sorted(set(p[4] for p in polys)):
-            order += [i for i, p in enumerate(polys) if p[4] == vp and p[1] < 2]
-            order += [i for i, p in enumerate(polys) if p[4] == vp and p[1] == 2]
+        # Supermodel's order: a priority's opaque polygons, all its
+        # viewports, then its translucent ones. A car's shadow is in one
+        # viewport and the road it lies on in a later one.
+        vps = sorted(set(p[4] for p in polys))
+        for layer in sorted(set(layers.get(vp) for vp in vps), key=lambda x: (x is None, x)):
+            mine = set(vp for vp in vps if layers.get(vp) == layer)
+            for vp in sorted(mine):
+                order += [i for i, p in enumerate(polys) if p[4] == vp and p[1] < 2]
+            for vp in sorted(mine):
+                order += [i for i, p in enumerate(polys) if p[4] == vp and p[1] == 2]
     cur = None
     sc = stack(polys) if PVR else {}
     for i in order:
-        if polys[i][4] != cur and not SHARED and not PVR:
+        if layers.get(polys[i][4]) != cur and not SHARED and not PVR:
             dep[:] = -np.inf
-        cur = polys[i][4]
+        cur = layers.get(polys[i][4])
         if keep is not None and i not in keep:
             continue
         argb, tr, _, v, vp = polys[i]
