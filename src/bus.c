@@ -200,10 +200,29 @@ uint32_t g_tg_vram_writes, g_tg_reg_writes, g_tg_reg_changes;  /* diagnostics */
 static uint32_t g_tilegen_content_gen;
 uint32_t bus_tilegen_content_generation(void) { return g_tilegen_content_gen; }
 #define VRAM_CONTENT(o, n) ((o) < 0x0F6000u || (o) + (n) > 0x100000u)
+/* Each layer's name table (8 KB from 0x0F8000): a renderer that keeps a
+ * layer's map need not look at it until this moves. In a race only the
+ * HUD's layer changes field by field. */
+static uint32_t g_tilegen_name_gen[4];
+uint32_t bus_tilegen_name_generation(int layer)
+{
+    return layer >= 0 && layer < 4 ? g_tilegen_name_gen[layer] : 0;
+}
+static void vram_name_note(uint32_t o, uint32_t n)
+{
+    uint32_t lo = o > 0x0F8000u ? o : 0x0F8000u;
+    uint32_t hi = o + n < 0x100000u ? o + n : 0x100000u;
+    if (lo < hi) {
+        uint32_t L;
+        for (L = (lo - 0x0F8000u) >> 13; L <= (hi - 1u - 0x0F8000u) >> 13; L++)
+            g_tilegen_name_gen[L]++;
+    }
+}
 #define VRAM_NOTE_N(p, n, changed) do { if (IN_VRAM(p)) { g_tg_vram_writes++;   \
         if (changed) { uint32_t o_ = (uint32_t)((p) - g_vram);                  \
             g_tilegen_gen++;                                                    \
             if (VRAM_CONTENT(o_, (n))) g_tilegen_content_gen++;                 \
+            vram_name_note(o_, (uint32_t)(n));                                  \
             tg_note(o_, -1); } } } while (0)
 
 /* M3_TG_CHANGES=1: what in tilegen changes, per region of VRAM and per

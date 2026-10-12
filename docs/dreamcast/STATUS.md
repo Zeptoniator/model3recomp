@@ -22,6 +22,13 @@
   call each time (`__udivsi3`/`__sdivsi3`, 1.8 % of the profile). Two
   passes and a compare instead, same order: **307.5 s**, 27 signatures
   equal, desktop sink dumps byte-identical at fields 1300 and 5000.
+- The PVR's tilemaps were refreshed by walking all 4,096 name entries of
+  every drawn layer whenever anything in tilegen moved -- every field in a
+  race, for the HUD. The bus now counts writes to each layer's name table
+  (`bus_tilegen_name_generation`), and a layer whose names were not
+  written is left as it is: **302.9 s**, 27 signatures equal; on the
+  desktop `M3_TG_MAP_CHECK=1` over the race compares 10,000 passes of the
+  maps against the screen-space path, 0 differ.
 
 ## 2026-10-12 (night) — the sound driver's sample copies, a word at a time
 

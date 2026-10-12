@@ -608,7 +608,7 @@ unsigned tilegen_update_map_1555(int layer, uint16_t *dst, int force)
 {
     static uint16_t last[LAYERS][MAP_W * MAP_W];
     static int valid[LAYERS], depth[LAYERS];
-    static uint32_t gen = 0xFFFFFFFFu;
+    static uint32_t gen = 0xFFFFFFFFu, name_gen[LAYERS];
     const uint8_t *v = bus_vram(NULL);
     uint32_t nt = VRAM_NAME_BASE + (uint32_t)layer * LAYER_STRIDE;
     int four = layer_4bpp(layer);
@@ -625,6 +625,11 @@ unsigned tilegen_update_map_1555(int layer, uint16_t *dst, int force)
     }
     if (depth[layer] != four) valid[layer] = 0;
     if (force) valid[layer] = 0;
+    /* Nothing written to this layer's names since: every entry is as
+     * last time, and the walk below would find no change. */
+    if (valid[layer] && name_gen[layer] == bus_tilegen_name_generation(layer))
+        return 0;
+    name_gen[layer] = bus_tilegen_name_generation(layer);
     for (i = 0; i < MAP_W * MAP_W; i++) {
         unsigned e = name_entry(v, nt, i);
         if (valid[layer] && last[layer][i] == e) continue;
