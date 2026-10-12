@@ -108,6 +108,11 @@ uint64_t model3recomp_frame_count(void);
  * only place a host gets a look in. NULL clears it. */
 void model3recomp_set_frame_hook(void (*hook)(void));
 
+/* Draw one field in n (1, the default, draws them all). The guest runs
+ * every field as before; only the picture is left standing in between.
+ * M3_RENDER_EVERY sets it on a desktop. */
+void model3recomp_set_render_every(unsigned n);
+
 /* Write the current framebuffer to a binary PPM. Returns 0 on failure. */
 int  model3recomp_screenshot(const char *path);
 

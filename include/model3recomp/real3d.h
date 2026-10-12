@@ -18,6 +18,9 @@ extern "C" {
 
 /* Draw the scene into the framebuffer. Clears it; the tilemaps go on top. */
 void real3d_render(void);
+/* A field that is not drawn: the texture uploads the guest made in it are
+ * still taken in, so the next drawn field has them. */
+void real3d_skip(void);
 
 /* The VROM texture port at 0x90000000: three registers, and the write to
  * the last one loads a texture that is already in VROM. */

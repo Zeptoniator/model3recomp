@@ -173,12 +173,27 @@ uint64_t model3recomp_frame_count(void) { return g_frames; }
 
 void model3recomp_set_frame_hook(void (*hook)(void)) { g_frame_hook = hook; }
 
+static unsigned g_render_every;
+void model3recomp_set_render_every(unsigned n) { g_render_every = n ? n : 1u; }
+
 void model3recomp_end_frame(void)
 {
     g_frames++;
     if (getenv("M3_TRACE_FRAMES"))
         fprintf(stderr, "[model3recomp] field %llu\n",
                 (unsigned long long)g_frames);
+    if (!g_render_every) {
+        const char *e = getenv("M3_RENDER_EVERY");
+        model3recomp_set_render_every(e ? (unsigned)atoi(e) : 1u);
+    }
+    if (g_frames % g_render_every) {
+        real3d_skip();
+#ifdef M3_DREAMCAST
+        if (!platform_framebuffer(NULL, NULL))
+            bus_texfifo_reset();
+#endif
+        goto drawn;
+    }
 
     /* Back to front: the tilemap layers the guest has put behind the 3D,
      * then the 3D, then the ones it has put in front. Which is which is a
@@ -252,6 +267,7 @@ void model3recomp_end_frame(void)
             last = t4;
         }
     }
+drawn:
     if (g_frame_hook)
         g_frame_hook();
     {

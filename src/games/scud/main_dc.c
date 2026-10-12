@@ -22,6 +22,12 @@
 #ifndef SCUD_DC_SIG_EVERY
 #define SCUD_DC_SIG_EVERY "100"
 #endif
+/* Draw one field in SCUD_DC_RENDER_EVERY. The game still runs all of them;
+ * the picture is 30 a second instead of 60, for about half the renderer's
+ * cost. A photographed field should be a multiple of it. */
+#ifndef SCUD_DC_RENDER_EVERY
+#define SCUD_DC_RENDER_EVERY 2
+#endif
 #ifndef SCUD_DC_SHOT_AT
 #define SCUD_DC_SHOT_AT 1300     /* prints "SCUD SHOT" for the harness to photograph */
 #endif
@@ -235,6 +241,7 @@ int main(void)
     else
         printf("PVR: Real3D sink installed\n");
     model3recomp_set_frame_hook(on_field);
+    model3recomp_set_render_every(SCUD_DC_RENDER_EVERY);
     /* The game's two waits at 0x30704 (see main_host.c). */
     m3_idle_loop(0x0003072Cu);
     m3_idle_loop(0x0003074Cu);

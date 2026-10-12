@@ -1891,6 +1891,11 @@ static void raster_bands(uint32_t *fb, int fw, int fh, float sx, float sy,
 }
 
 /* ---- entry point ------------------------------------------------------- */
+void real3d_skip(void)
+{
+    flush_texture_fifo();
+}
+
 void real3d_render(void)
 {
     int fw = 0, fh = 0;

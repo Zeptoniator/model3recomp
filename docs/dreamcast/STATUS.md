@@ -2,7 +2,7 @@
 
 ## 2026-10-12 — the race 35 % faster: no idle spin, no per-polygon copies
 
-Profiling build, Flycast, fields 0-5400: **415 s instead of 660 s**, RAM
+Profiling build, Flycast, fields 0-5400: **341 s instead of 660 s**, RAM
 signatures unchanged at every check. In order:
 - `draw_model` read every polygon through `bus_r3d_read`, a `memcpy` into
   an unaligned byte buffer: 14 % of the samples were in `memcpy`, most in
@@ -33,6 +33,13 @@ signatures unchanged at every check. In order:
   the same value and GCC merged both branches into the byte loop. Guest
   code -5.6 % of samples; 423 -> 415 s. (Times are the console's own
   clock, emulated; Flycast's wall clock follows the load on the machine.)
+- **One field drawn in two** (`SCUD_DC_RENDER_EVERY`, default 2;
+  `M3_RENDER_EVERY` on a desktop). The guest runs every field; a field
+  not drawn still takes in the texture uploads (`real3d_skip`), and the
+  2D back end follows the tilegen's generation counters, so nothing is
+  lost in between. RAM signatures equal, and the 22 photographed fields
+  (1300, 2000-6000) are the same pixels as before. Race samples -29 %;
+  415 -> 341 s.
 
 Left in a race field (~110-150 ms): `draw_model` 15 %, guest 23 %,
 `real3d_render` + `sink_project` ~10 %, disc waits ~8 %. What is left of
