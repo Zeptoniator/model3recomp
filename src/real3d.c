@@ -58,7 +58,7 @@
 #include <string.h>
 
 #define MAX_TRIS   40000u
-#define SINK_MAX_TRIS 6144u      /* 768 KB of tri_t; an attract viewport decodes ~4 750 */
+#define SINK_MAX_TRIS 6144u      /* 600 KB of sink_tri_t; an attract viewport decodes ~4 750 */
 static unsigned g_max_tris = MAX_TRIS;
 #define MAX_DEPTH  24
 #define AMBIENT    g_ambient
@@ -620,6 +620,32 @@ static unsigned g_ntris;
 
 typedef struct { int on, lum, two_sided, alpha, alpha_test, tex_alpha, mirror; unsigned x, y, page, w, h, fmt; } texdesc_t;
 
+/* The hardware sink never needs the software rasteriser's vertex normals or
+ * its view-space vertices after projection. Keep a separate compact queue so
+ * drawing a model does not stride over 132-byte software triangles, then
+ * rewrite most of each one with projected vertices in sink_bounds. */
+typedef struct {
+    m3_r3d_vertex proj[4];
+    uint32_t argb;
+    uint16_t tx, ty;
+    uint16_t tw, th;
+    uint8_t page;
+    uint8_t textured;
+    uint8_t fmt;
+    uint8_t alpha_test;
+    uint8_t tex_alpha;
+    uint8_t mirror;
+    uint8_t nproj;
+} sink_tri_t;
+
+static sink_tri_t *g_sink_tris;
+static float g_sink_light[3], g_sink_intensity;
+
+static void sink_emit(const float a[3], const float b[3], const float c[3],
+                      const float n[3], uint32_t rgb,
+                      const float ua[2], const float ub[2], const float uc[2],
+                      const texdesc_t *td);
+
 static void emit(const float a[3], const float b[3], const float c[3],
                  const float n[3], uint32_t rgb,
                  const float na[3], const float nb[3], const float nc[3],
@@ -629,6 +655,10 @@ static void emit(const float a[3], const float b[3], const float c[3],
     tri_t *t;
     int k;
     if (g_ntris >= g_max_tris) return;
+    if (g_sink) {
+        sink_emit(a, b, c, n, rgb, ua, ub, uc, td);
+        return;
+    }
     t = &g_tris[g_ntris++];
     /* Element by element: SH-4 GCC calls memcpy for these, and a call per
      * 12 bytes was most of a race's time in memcpy. */
@@ -636,10 +666,9 @@ static void emit(const float a[3], const float b[3], const float c[3],
         t->v[0][k] = a[k]; t->v[1][k] = b[k]; t->v[2][k] = c[k];
         t->n[k] = n[k];
     }
-    if (!g_sink)                        /* Gouraud's; the sink shades flat */
-        for (k = 0; k < 3; k++) {
-            t->vn[0][k] = na[k]; t->vn[1][k] = nb[k]; t->vn[2][k] = nc[k];
-        }
+    for (k = 0; k < 3; k++) {
+        t->vn[0][k] = na[k]; t->vn[1][k] = nb[k]; t->vn[2][k] = nc[k];
+    }
     for (k = 0; k < 2; k++) {
         t->uv[0][k] = ua[k]; t->uv[1][k] = ub[k]; t->uv[2][k] = uc[k];
     }
@@ -1646,20 +1675,32 @@ static void tex_stats_note(void)
 {
     unsigned i;
     for (i = 0; i < g_ntris; i++) {
-        const tri_t *t = &g_tris[i];
+        unsigned textured, tx, ty, page, fmt, tw, th;
         uint32_t key, h;
-        if (!t->textured) continue;
-        key = ((uint32_t)(t->tx >> 5) | ((uint32_t)(t->ty >> 5) << 6)
-               | ((uint32_t)t->page << 11) | ((uint32_t)t->fmt << 12))
-            ^ ((uint32_t)t->tw << 16) ^ ((uint32_t)t->th << 22);
+        if (g_sink) {
+            const sink_tri_t *t = &g_sink_tris[i];
+            textured = t->textured;
+            if (!textured) continue;
+            tx = t->tx; ty = t->ty;
+            page = t->page; fmt = t->fmt; tw = t->tw; th = t->th;
+        } else {
+            const tri_t *t = &g_tris[i];
+            textured = t->textured;
+            if (!textured) continue;
+            tx = t->tx; ty = t->ty;
+            page = t->page; fmt = t->fmt; tw = t->tw; th = t->th;
+        }
+        key = ((uint32_t)(tx >> 5) | ((uint32_t)(ty >> 5) << 6)
+               | ((uint32_t)page << 11) | ((uint32_t)fmt << 12))
+            ^ ((uint32_t)tw << 16) ^ ((uint32_t)th << 22);
         for (h = (key * 2654435761u) >> 20;; h = (h + 1) & (TS_SLOTS - 1)) {
             if (!g_ts[h].area) {
                 if (g_ts_n >= TS_SLOTS / 2) break;
                 g_ts[h].key = key;
-                g_ts[h].area = (uint32_t)t->tw * t->th;
+                g_ts[h].area = (uint32_t)tw * th;
                 g_ts_n++;
                 g_ts_area += g_ts[h].area;
-                g_ts_fmts[t->fmt < 12 ? t->fmt : 11]++;
+                g_ts_fmts[fmt < 12 ? fmt : 11]++;
                 break;
             }
             if (g_ts[h].key == key) break;
@@ -1702,35 +1743,37 @@ void real3d_set_sheet(uint16_t *texels, unsigned shift)
 /* The same culling, near-plane cut (at ZNEAR_SINK) and projection as
  * raster(): the polygon the sink is handed for one triangle, or fewer than
  * three vertices when there is none. */
-static int sink_project(const tri_t *tr, m3_r3d_vertex out[4])
+static int sink_project(const float *const v[3], const float *const uv[3],
+                        const float n[3], int two_sided,
+                        m3_r3d_vertex out[4])
 {
     float clipped[4][5], src[3][5];
     int nclip, k;
     {
-        float cx = (tr->v[0][0] + tr->v[1][0] + tr->v[2][0]) / 3.0f;
-        float cy = (tr->v[0][1] + tr->v[1][1] + tr->v[2][1]) / 3.0f;
-        float cz = (tr->v[0][2] + tr->v[1][2] + tr->v[2][2]) / 3.0f;
-        if (!tr->two_sided && tr->n[0]*cx + tr->n[1]*cy + tr->n[2]*cz > 0.0f)
+        float cx = (v[0][0] + v[1][0] + v[2][0]) / 3.0f;
+        float cy = (v[0][1] + v[1][1] + v[2][1]) / 3.0f;
+        float cz = (v[0][2] + v[1][2] + v[2][2]) / 3.0f;
+        if (!two_sided && n[0]*cx + n[1]*cy + n[2]*cz > 0.0f)
             return 0;
     }
-    if (tr->v[0][2] >= ZNEAR_SINK && tr->v[1][2] >= ZNEAR_SINK &&
-        tr->v[2][2] >= ZNEAR_SINK) {
+    if (v[0][2] >= ZNEAR_SINK && v[1][2] >= ZNEAR_SINK &&
+        v[2][2] >= ZNEAR_SINK) {
         /* Nothing to cut, the usual case: clip_near would hand back the
          * same three vertices in the same order. */
         for (k = 0; k < 3; k++) {
-            double iz = 1.0 / tr->v[k][2];
-            out[k].x = (float)(g_proj.ax * (double)tr->v[k][0] * iz + g_proj.bx);
-            out[k].y = (float)(g_proj.ay * (double)tr->v[k][1] * iz + g_proj.by);
+            double iz = 1.0 / v[k][2];
+            out[k].x = (float)(g_proj.ax * (double)v[k][0] * iz + g_proj.bx);
+            out[k].y = (float)(g_proj.ay * (double)v[k][1] * iz + g_proj.by);
             out[k].w = (float)iz;
-            out[k].u = tr->uv[k][0];
-            out[k].v = tr->uv[k][1];
+            out[k].u = uv[k][0];
+            out[k].v = uv[k][1];
         }
         return 3;
     }
     for (k = 0; k < 3; k++) {
-        src[k][0] = tr->v[k][0]; src[k][1] = tr->v[k][1];
-        src[k][2] = tr->v[k][2];
-        src[k][3] = tr->uv[k][0]; src[k][4] = tr->uv[k][1];
+        src[k][0] = v[k][0]; src[k][1] = v[k][1];
+        src[k][2] = v[k][2];
+        src[k][3] = uv[k][0]; src[k][4] = uv[k][1];
     }
     nclip = clip_near(src, clipped, ZNEAR_SINK);
     for (k = 0; k < nclip; k++) {
@@ -1742,6 +1785,55 @@ static int sink_project(const tri_t *tr, m3_r3d_vertex out[4])
         out[k].v = clipped[k][4];
     }
     return nclip;
+}
+
+/* Project, cull and shade while the transformed vertices are still hot in
+ * draw_model. The old sink path first stored view-space vertices and
+ * material in tri_t, then sink_bounds projected them and overwrote the same
+ * 132-byte entry. This writes one compact, final 100-byte record instead. */
+static void sink_emit(const float a[3], const float b[3], const float c[3],
+                      const float n[3], uint32_t rgb,
+                      const float ua[2], const float ub[2], const float uc[2],
+                      const texdesc_t *td)
+{
+    const float *v[3] = { a, b, c };
+    const float *uv[3] = { ua, ub, uc };
+    sink_tri_t *tr = &g_sink_tris[g_ntris++];
+    float lit, sh;
+    int r, g, b8, nproj;
+
+    /* Keep the same triangle limit and count as the old queue, including
+     * culled entries. sink_bounds and sink_submit skip nproj == 0 before
+     * reading any of their remaining, deliberately unwritten fields. */
+    tr->nproj = 0;
+    tr->textured = (uint8_t)(td->on ? 1 : 0);
+    if (tr->textured) {
+        tr->tx = (uint16_t)td->x; tr->ty = (uint16_t)td->y;
+        tr->tw = (uint16_t)td->w; tr->th = (uint16_t)td->h;
+        tr->page = (uint8_t)td->page;
+        tr->fmt = (uint8_t)td->fmt;
+        tr->alpha_test = (uint8_t)td->alpha_test;
+        tr->tex_alpha = (uint8_t)td->tex_alpha;
+        tr->mirror = (uint8_t)td->mirror;
+    }
+    nproj = sink_project(v, uv, n, td->two_sided, tr->proj);
+    if (nproj < 3) return;
+    tr->nproj = (uint8_t)nproj;
+
+    lit = n[0]*g_sink_light[0] + n[1]*g_sink_light[1]
+        + n[2]*g_sink_light[2];
+    if (lit < 0) lit = 0;
+    if (lit > 1.0f) lit = 1.0f;
+    sh = td->lum ? g_sink_intensity
+                 : (AMBIENT + (1.0f - AMBIENT) * lit) * g_sink_intensity;
+    r = (int)(((rgb >> 16) & 0xFFu) * sh);
+    g = (int)(((rgb >> 8) & 0xFFu) * sh);
+    b8 = (int)((rgb & 0xFFu) * sh);
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b8 > 255) b8 = 255;
+    tr->argb = ((uint32_t)td->alpha << 24) | ((uint32_t)r << 16)
+             | ((uint32_t)g << 8) | (uint32_t)b8;
 }
 
 /* One side of the viewport's rectangle, for sink_bounds: x (axis 0) or y
@@ -1773,25 +1865,21 @@ static int cut_xyw(const float in[][3], int n, float out[][3], int axis,
  * counting those gave three viewports ~42 bits of w between them, more than
  * a depth buffer holds (pvr_r3d.c); what is on the screen is ~15. Returns
  * wmin > wmax when nothing is. */
-/* Set by sink_bounds once every triangle's proj holds its polygon; read
- * and cleared by sink_submit. */
-static int g_projected;
-
 static void sink_bounds(float *wmin, float *wmax, float x0, float y0,
                         float x1, float y1)
 {
     float lo = 1e30f, hi = 0.0f;
     unsigned t;
     for (t = 0; t < g_ntris; t++) {
-        m3_r3d_vertex out[4];
+        const sink_tri_t *tr = &g_sink_tris[t];
         float a[12][3], b[12][3];
-        int n = sink_project(&g_tris[t], out), k, inside = 1;
-        g_tris[t].nproj = (uint8_t)(n >= 3 ? n : 0);
-        for (k = 0; k < n; k++) g_tris[t].proj[k] = out[k];
+        int n = tr->nproj, k, inside = 1;
         for (k = 0; k < n; k++) {
-            a[k][0] = out[k].x; a[k][1] = out[k].y; a[k][2] = out[k].w;
-            if (out[k].x < x0 || out[k].x > x1 ||
-                out[k].y < y0 || out[k].y > y1) inside = 0;
+            a[k][0] = tr->proj[k].x;
+            a[k][1] = tr->proj[k].y;
+            a[k][2] = tr->proj[k].w;
+            if (tr->proj[k].x < x0 || tr->proj[k].x > x1 ||
+                tr->proj[k].y < y0 || tr->proj[k].y > y1) inside = 0;
         }
         if (n >= 3 && !inside) {
             n = cut_xyw(a, n, b, 0, x0, 1);
@@ -1806,39 +1894,20 @@ static void sink_bounds(float *wmin, float *wmax, float x0, float y0,
         }
     }
     *wmin = lo; *wmax = hi;
-    g_projected = 1;
 }
 
 /* sink_project's polygons, flat shaded, handed to the sink one by one
  * instead of rasterised: the opaque ones first, then the translucent. */
-static void sink_submit(const float L[3], float intensity)
+static void sink_submit(void)
 {
     unsigned t;
     for (t = 0; t < 2u * g_ntris; t++) {
-        const tri_t *tr = &g_tris[t % g_ntris];
-        float lit, sh;
-        m3_r3d_vertex out[4];
-        const m3_r3d_vertex *pv;
+        const sink_tri_t *tr = &g_sink_tris[t % g_ntris];
         m3_r3d_texture tex;
-        int nclip, r, g, b;
-        if ((tr->alpha < 255) != (t >= g_ntris)) continue;
-        if (g_projected) {
-            nclip = tr->nproj;
-            pv = tr->proj;
-        } else {
-            nclip = sink_project(tr, out);
-            pv = out;
-        }
-        if (nclip < 3) continue;
-        lit = tr->n[0]*L[0] + tr->n[1]*L[1] + tr->n[2]*L[2];
-        if (lit < 0) lit = 0;
-        if (lit > 1.0f) lit = 1.0f;
-        sh = tr->luminous ? intensity
-                          : (AMBIENT + (1.0f - AMBIENT) * lit) * intensity;
-        r = (int)(tr->r * sh); g = (int)(tr->g * sh); b = (int)(tr->b * sh);
-        if (r > 255) r = 255;
-        if (g > 255) g = 255;
-        if (b > 255) b = 255;
+        int translucent;
+        if (tr->nproj < 3) continue;
+        translucent = (tr->argb >> 24) < 255u;
+        if (translucent != (t >= g_ntris)) continue;
         g_drawn++;
         if (tr->textured && g_textures) {
             tex.x = tr->tx; tex.y = tr->ty; tex.page = tr->page;
@@ -1849,13 +1918,9 @@ static void sink_submit(const float L[3], float intensity)
             tex.alpha_test = tr->alpha_test;
             tex.tex_alpha = tr->tex_alpha;
         }
-        g_sink->polygon(pv, nclip,
-                        ((uint32_t)tr->alpha << 24) | ((uint32_t)r << 16) |
-                        ((uint32_t)g << 8) | (uint32_t)b,
-                        tr->alpha < 255,
+        g_sink->polygon(tr->proj, tr->nproj, tr->argb, translucent,
                         tr->textured && g_textures ? &tex : NULL);
     }
-    g_projected = 0;
 }
 
 static void raster_bands(uint32_t *fb, int fw, int fh, float sx, float sy,
@@ -1925,7 +1990,10 @@ void real3d_render(void)
         /* A sink gets a smaller queue (one viewport at a time is all it
          * holds) and no texture sheet: 12 MB a Dreamcast does not have. */
         g_max_tris = fb ? MAX_TRIS : SINK_MAX_TRIS;
-        g_tris = (tri_t *)malloc(sizeof(tri_t) * g_max_tris);
+        if (fb)
+            g_tris = (tri_t *)malloc(sizeof(tri_t) * g_max_tris);
+        else
+            g_sink_tris = (sink_tri_t *)malloc(sizeof(sink_tri_t) * g_max_tris);
         if (fb && !g_sheet) {
             const char *sh = getenv("M3_SHEET_SHIFT");
             g_sheet_shift = sh ? (unsigned)atoi(sh) & 3u : 0u;
@@ -1935,7 +2003,7 @@ void real3d_render(void)
         }
         inited = 1;
     }
-    if (!g_tris) return;
+    if ((fb && !g_tris) || (!fb && !g_sink_tris)) return;
 
     flush_texture_fifo();
 
@@ -2120,6 +2188,12 @@ void real3d_render(void)
         intensity = f32_of(rd32le(vp + 0x07 * 4));
         if (!(intensity >= 0.0f)) intensity = 1.0f;   /* NaN guard */
         if (intensity > 2.0f) intensity = 2.0f;
+        if (!fb) {
+            g_sink_light[0] = light[0];
+            g_sink_light[1] = light[1];
+            g_sink_light[2] = light[2];
+            g_sink_intensity = intensity;
+        }
 
         g_ntris = 0;
         {
@@ -2149,7 +2223,7 @@ void real3d_render(void)
                         sink_bounds(&wmin, &wmax, x0, y0, x1, y1);
                         g_sink->begin_viewport(wmin, wmax, x0, y0, x1, y1);
                     }
-                    sink_submit(light, intensity);
+                    sink_submit();
                 }
                 if (g_pick_tri >= 0) {
                     const tri_t *p = &g_tris[g_pick_tri];

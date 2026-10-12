@@ -1,5 +1,20 @@
 # Status
 
+## 2026-10-12 — compact Real3D sink queue
+
+- The PVR path now has its own 100-byte triangle record instead of using the
+  software rasteriser's 132-byte `tri_t`. It projects, culls and shades while
+  the transformed model vertices are still hot, then writes the final record
+  once; `sink_bounds` no longer rereads the view-space triangle and overwrites
+  most of the same entry. The software rasteriser keeps its full Gouraud data
+  and is unchanged.
+- The 6,144-entry queue is 600 KB instead of 792 KB. The profiled Dreamcast
+  race reports 10,072 KB of heap instead of 10,264 KB and finishes field 5401
+  in **373.416 s instead of 376.080 s** (another 2.664 s / 0.7 %); all 27 RAM
+  signatures match. Direct PVR-sink dumps are byte-identical before and after
+  at field 1300 (1,644 lines) and in the scripted race at field 5000 (9,160
+  lines), including projected floats, depth, colour and texture descriptors.
+
 ## 2026-10-12 — sound: what the board does, and a board that only listens
 
 Sound on the Dreamcast is to be the SCSPs' voices played by the AICA (their
@@ -125,10 +140,10 @@ signatures unchanged at every check. In order:
   two hardware additions (20 M values checked against `nearbyint`).
   321 -> 316 s.
 
-Left in a race field (~110-150 ms): `draw_model` 15 %, guest 23 %,
-`real3d_render` + `sink_project` ~10 %, disc waits ~8 %. What is left of
-`draw_model` is mostly the stores of 132-byte triangles into a 768 KB
-table, not arithmetic.
+At this point a race field (~110-150 ms) still spent about 15 % in
+`draw_model`, 23 % in the guest, 10 % in `real3d_render` + `sink_project`
+and 8 % waiting for the disc. The 132-byte / 792 KB triangle table identified
+here is replaced by the compact sink queue described above.
 
 ## 2026-10-11 — viewports as layers: field 6000 drawn as on the desktop
 
