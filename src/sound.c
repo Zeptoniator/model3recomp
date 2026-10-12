@@ -77,6 +77,28 @@ int sound_present(void) { return g_scsp1 != NULL; }
  * M3_SND_DECOUPLED=1 here. */
 static int g_decoupled;
 
+/* M3_SND_LOOPBACK=1: the chips' voices played by a second pair of chips,
+ * through scsp_set_voices() -- the path the Dreamcast's AICA takes, with
+ * this machine's synthesis on the far side of it. The first pair only
+ * counts time. The audio should be the original's. */
+static scsp_t *g_far1, *g_far2;
+static void far_slot(void *ctx, int slot, int word, uint16_t v)
+{
+    scsp_write16((scsp_t *)ctx, (uint32_t)(slot * 0x20 + word * 2), v, 0xFFFF);
+}
+static void far_common(void *ctx, int reg, uint16_t v)
+{
+    /* The voices' side of the common registers: master volume, the DSP's
+     * ring buffer. Timers, interrupts, MIDI and DMA stay with the first. */
+    if (reg < 0x04) scsp_write16((scsp_t *)ctx, 0x400u + (uint32_t)reg, v, 0xFFFF);
+}
+static void far_dsp(void *ctx, uint32_t addr, uint16_t v)
+{
+    scsp_write16((scsp_t *)ctx, addr, v, 0xFFFF);
+}
+static uint16_t far_monitor(void *ctx, int slot) { return scsp_monitor((scsp_t *)ctx, slot); }
+static scsp_voices_t g_far_ops1, g_far_ops2;
+
 #ifdef M3_SND_STATS
 /* A diagnostic build (-DM3_SND_STATS, with Musashi's instruction hook
  * pointed at snd_stat_pc): what the board does in a field, for sizing a
@@ -305,6 +327,15 @@ void sound_init(const uint8_t *prog, size_t prog_size,
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
     m68k_pulse_reset();
     g_decoupled = getenv("M3_SND_DECOUPLED") != NULL;
+    if (getenv("M3_SND_LOOPBACK")) {
+        static const scsp_voices_t ops = { NULL, far_slot, far_common, far_dsp, NULL, far_monitor };
+        g_far1 = scsp_create(g_ram1, SND_RAM, NULL, NULL);
+        g_far2 = scsp_create(g_ram2, SND_RAM, NULL, NULL);
+        g_far_ops1 = ops; g_far_ops1.ctx = g_far1;
+        g_far_ops2 = ops; g_far_ops2.ctx = g_far2;
+        scsp_set_voices(g_scsp1, &g_far_ops1, 1);
+        scsp_set_voices(g_scsp2, &g_far_ops2, 1);
+    }
 }
 
 /* M3_WAV=<file>: also write the audio to a WAV file, for listening to a
@@ -362,6 +393,7 @@ static void board_field(void)
         m68k_execute(CYCLES);
         scsp_sample(g_scsp1, &l, &r);
         scsp_sample(g_scsp2, &l, &r);
+        if (g_far1) { scsp_sample(g_far1, &l, &r); scsp_sample(g_far2, &l, &r); }
         buf[2 * i] = clip16(l);
         buf[2 * i + 1] = clip16(r);
     }

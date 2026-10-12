@@ -24,6 +24,14 @@ the RAM signatures are those of a run without sound -- equal over the race
 -- and the audio is the same to the ear (loudness per second within a few
 per cent of the coupled board's). The Dreamcast will run this way.
 
+`scsp_set_voices()`: a chip's voices played by something else. Every write
+to a slot, to the common registers and to the DSP goes to it too, the slot
+monitor (0x408) reads back from it, and with `only` the chip itself just
+counts time (timers, interrupts, MIDI). `M3_SND_LOOPBACK=1` puts a second
+pair of chips on the far side: the race's audio is bit for bit the
+original's, and silent when the far pair is muted -- the split is whole.
+The AICA goes where that second pair is.
+
 ## 2026-10-12 — the race 35 % faster: no idle spin, no per-polygon copies
 
 Profiling build, Flycast, fields 0-5400: **316 s instead of 660 s**, RAM

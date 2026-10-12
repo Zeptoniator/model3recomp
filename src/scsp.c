@@ -108,6 +108,8 @@ struct scsp {
     void   (*irq)(int level, int state);
     void   (*midi_out)(uint8_t byte);
     int16_t *RBUFDST;
+    const scsp_voices_t *voices;
+    int      voices_only;
 };
 
 /* Slot parameters */
@@ -273,6 +275,7 @@ static void ram_w16(scsp_t *c, uint32_t a, uint16_t v)
 {
     a &= 0xFFFFE;
     if (a + 1 < c->ram_size) { c->ram[a] = (uint8_t)(v >> 8); c->ram[a + 1] = (uint8_t)v; }
+    if (c->voices && c->voices->ram_write) c->voices->ram_write(c->voices->ctx, a, 2);
 }
 
 /* ---- interrupts ------------------------------------------------------- */
@@ -731,7 +734,8 @@ static void UpdateRegR(scsp_t *c, int reg)
         break;
     }
     case 8: case 9:
-        c->data[0x8 / 2] = c->latched_MSLC_data;
+        c->data[0x8 / 2] = c->voices ? c->voices->monitor(c->voices->ctx, c->latched_MSLC)
+                                     : c->latched_MSLC_data;
         break;
     case 0x2a: case 0x2b:
         c->data[0x2a / 2] = c->mcieb;
@@ -749,18 +753,29 @@ static void w16(scsp_t *c, uint32_t addr, uint16_t val)
         int slot = addr / 0x20;
         addr &= 0x1f;
         c->Slots[slot].data[addr / 2] = val;
+        if (c->voices) c->voices->slot_write(c->voices->ctx, slot, (int)(addr / 2), val);
         UpdateSlotReg(c, slot, addr & 0x1f);
-    } else if (addr < 0x600) {
+        return;
+    }
+    if (addr < 0x600) {
         if (addr < 0x430) {
             if (addr == 0x420 || addr == 0x42e)
                 c->data[(addr & 0x3f) / 2] |= val & 0x20;
             else
                 c->data[(addr & 0x3f) / 2] = val;
+            if (c->voices && c->voices->common_write)
+                c->voices->common_write(c->voices->ctx, (int)(addr & 0x3f), val);
             UpdateReg(c, addr & 0x3f);
         }
-    } else if (addr < 0x700) {
+        return;
+    }
+    if (addr < 0x700) {
         c->RINGBUF[(addr - 0x600) / 2] = (int16_t)val;
-    } else if (addr < 0x780) {
+        return;
+    }
+    if (addr < 0xC00 && c->voices && c->voices->dsp_write)
+        c->voices->dsp_write(c->voices->ctx, addr, val);
+    if (addr < 0x780) {
         c->DSP.COEF[(addr - 0x700) / 2] = (int16_t)val;
     } else if (addr < 0x7c0) {
         c->DSP.MADRS[(addr - 0x780) / 2] = val;
@@ -951,6 +966,13 @@ void scsp_sample(scsp_t *c, int32_t *outl, int32_t *outr)
     int32_t smpl = 0, smpr = 0;
     int sl, i, t;
 
+    if (c->voices_only) {
+        for (t = 0; t < 3; t++)
+            if (c->timer_left[t] && --c->timer_left[t] == 0)
+                timer_fire(c, t);
+        return;
+    }
+
     for (sl = 0; sl < 32; ++sl) {
         c->RBUFDST = c->RINGBUF + c->BUFPTR;
         if (c->Slots[sl].active) {
@@ -988,12 +1010,7 @@ void scsp_sample(scsp_t *c, int32_t *outl, int32_t *outr)
     *outr += smpr;
 
     /* The slot monitor, latched every sample. */
-    {
-        slot_t *slot = c->Slots + c->latched_MSLC;
-        uint32_t SGC = slot->EG.state & 3, CA = (slot->cur_addr >> (SHIFT + 12)) & 0xf;
-        uint32_t EG = (0x1f - (slot->EG.volume >> (EG_SHIFT + 5))) & 0x1f;
-        c->latched_MSLC_data = (uint16_t)((CA << 7) | (SGC << 5) | EG);
-    }
+    c->latched_MSLC_data = scsp_monitor(c, c->latched_MSLC);
 
     for (t = 0; t < 3; t++)
         if (c->timer_left[t] && --c->timer_left[t] == 0)
@@ -1016,6 +1033,20 @@ scsp_t *scsp_create(uint8_t *ram, size_t ram_size,
     if (!g_stat_chip0) g_stat_chip0 = c;
 #endif
     return c;
+}
+
+uint16_t scsp_monitor(scsp_t *c, int s)
+{
+    slot_t *slot = c->Slots + (s & 31);
+    uint32_t SGC = slot->EG.state & 3, CA = (slot->cur_addr >> (SHIFT + 12)) & 0xf;
+    uint32_t EG = (0x1f - (slot->EG.volume >> (EG_SHIFT + 5))) & 0x1f;
+    return (uint16_t)((CA << 7) | (SGC << 5) | EG);
+}
+
+void scsp_set_voices(scsp_t *c, const scsp_voices_t *v, int only)
+{
+    c->voices = v;
+    c->voices_only = v && only;
 }
 
 void scsp_reset(scsp_t *c)

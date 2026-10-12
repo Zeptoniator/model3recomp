@@ -33,6 +33,24 @@ void     scsp_write16(scsp_t *s, uint32_t offset, uint16_t data, uint16_t mask);
 void     scsp_sample(scsp_t *s, int32_t *l, int32_t *r);
 
 int      scsp_active(scsp_t *s);              /* voices playing */
+
+/* Voices played by something else -- the Dreamcast's AICA, which descends
+ * from this chip. Every write to a slot's registers, to the common ones
+ * and to the DSP goes to it as well, and the slot monitor (register 0x408)
+ * reads back from it. With `only`, scsp_sample() makes no sound of its
+ * own: it counts time (timers, interrupts) and the voices are wholly the
+ * other side's. NULL detaches. */
+typedef struct {
+    void    *ctx;
+    void   (*slot_write)(void *ctx, int slot, int word, uint16_t v);
+    void   (*common_write)(void *ctx, int reg, uint16_t v);     /* 0x400 + reg */
+    void   (*dsp_write)(void *ctx, uint32_t addr, uint16_t v);  /* 0x700-0xBFF */
+    void   (*ram_write)(void *ctx, uint32_t addr, uint32_t len); /* by DMA */
+    uint16_t (*monitor)(void *ctx, int slot);   /* CA << 7 | SGC << 5 | EG */
+} scsp_voices_t;
+void     scsp_set_voices(scsp_t *s, const scsp_voices_t *v, int only);
+/* The monitor word for a slot, now (what 0x408 latches). */
+uint16_t scsp_monitor(scsp_t *s, int slot);
 int      scsp_midi_in(scsp_t *s, uint8_t byte);   /* 0 if its FIFO is full */
 
 /* Save states: the chip as raw bytes, with its pointers fixed up after. */
