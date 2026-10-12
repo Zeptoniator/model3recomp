@@ -275,7 +275,7 @@ int main(void)
         printf("model3recomp_init failed\nSCUD DC FAILED\n");
         return 1;
     }
-#ifdef SCUD_DC_SOUND   /* opt-in while the board costs ~100 ms a field */
+#ifndef SCUD_DC_NO_SOUND   /* the board costs ~20 % of a race */
     sound_board_open();
 #endif
     if (!pvr_r3d_install())
