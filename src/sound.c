@@ -45,6 +45,43 @@
 static const uint8_t *g_prog, *g_samples;
 static size_t g_prog_size, g_samples_size;
 static uint8_t *g_ram1, *g_ram2;
+static uint32_t g_ram_local = SND_RAM;      /* bytes of each RAM kept here */
+static const sound_voices_t *g_voices;
+
+/* ---- ROMs read on demand (sound_init_paged) ----------------------------
+ * The driver reads a few dozen KB of its 512 KB program and copies samples
+ * out of the 8 MB ROM a scene at a time (1.7 MB over a race): a handful of
+ * 16 KB pages, least recently used out first, are all it needs here. */
+#define ROM_PAGE  0x4000u
+#define ROM_SLOTS 8u
+static size_t (*g_rom_read)(void *, uint32_t, void *, size_t);
+static void *g_rom_ctx;
+static uint8_t *g_rom_buf;
+static uint32_t g_rom_tag[ROM_SLOTS], g_rom_age[ROM_SLOTS], g_rom_clock, g_rom_last = ~0u;
+uint64_t g_snd_rom_misses;
+
+static unsigned rom8(uint32_t off)          /* program at 0, samples after */
+{
+    uint32_t page = off / ROM_PAGE, k, old = 0;
+    if (!g_rom_read)
+        return off < g_prog_size ? g_prog[off] : g_samples[off - g_prog_size];
+    if (g_rom_last < ROM_SLOTS && g_rom_tag[g_rom_last] == page)
+        return g_rom_buf[g_rom_last * ROM_PAGE + off % ROM_PAGE];
+    for (k = 0; k < ROM_SLOTS; k++) {
+        if (g_rom_tag[k] == page) break;
+        if (g_rom_age[k] < g_rom_age[old]) old = k;
+    }
+    if (k == ROM_SLOTS) {
+        k = old;
+        g_rom_tag[k] = page;
+        g_snd_rom_misses++;
+        if (g_rom_read(g_rom_ctx, page * ROM_PAGE, g_rom_buf + k * ROM_PAGE, ROM_PAGE) != ROM_PAGE)
+            memset(g_rom_buf + k * ROM_PAGE, 0xFF, ROM_PAGE);
+    }
+    g_rom_age[k] = ++g_rom_clock;
+    g_rom_last = k;
+    return g_rom_buf[k * ROM_PAGE + off % ROM_PAGE];
+}
 static scsp_t *g_scsp1, *g_scsp2;
 
 static struct {
@@ -181,8 +218,17 @@ static void stat_ram_report(void)
 static unsigned rd8(unsigned a)
 {
     a &= 0xFFFFFF;
-    if (a < 0x080000) { STAT_RAM(0, a, 0); return g_ram1[a]; }
-    if (a >= 0x200000 && a < 0x280000) { STAT_RAM(1, a - 0x200000, 0); return g_ram2[a - 0x200000]; }
+    if (a < 0x080000) {
+        STAT_RAM(0, a, 0);
+        if (a < g_ram_local) return g_ram1[a];
+        return g_voices ? g_voices->ram_read8(0, a) : 0;
+    }
+    if (a >= 0x200000 && a < 0x280000) {
+        a -= 0x200000;
+        STAT_RAM(1, a, 0);
+        if (a < g_ram_local) return g_ram2[a];
+        return g_voices ? g_voices->ram_read8(1, a) : 0;
+    }
     if ((a & 0xFFF000) == 0x100000) {
         uint16_t w = scsp_read16(g_scsp1, a & 0xFFF);
         return (a & 1) ? (w & 0xFF) : (w >> 8);
@@ -196,9 +242,9 @@ static unsigned rd8(unsigned a)
 #ifdef M3_SND_STATS
         g_st_prog[(a >> 12) & 127] = 1;
 #endif
-        return a < g_prog_size ? g_prog[a] : 0xFF;
+        return a < g_prog_size ? rom8(a) : 0xFF;
     }
-    if (a >= 0x800000 && g_samples) {
+    if (a >= 0x800000 && g_samples_size) {
         size_t o;
         STAT_ROM();
         o = (g_s.bank + (a - 0x800000)) % g_samples_size;
@@ -206,7 +252,7 @@ static unsigned rd8(unsigned a)
         if (!g_st_srom) g_st_srom = (uint8_t *)calloc(4096, 1);
         if (g_st_srom) g_st_srom[(o >> 12) & 4095] = 1;
 #endif
-        return g_samples[o];
+        return rom8((uint32_t)(g_prog_size + o));
     }
     return 0xFF;
 }
@@ -222,8 +268,19 @@ static unsigned rd16(unsigned a)
 static void wr8(unsigned a, unsigned v)
 {
     a &= 0xFFFFFF;
-    if (a < 0x080000) { STAT_RAM(0, a, 1); g_ram1[a] = (uint8_t)v; return; }
-    if (a >= 0x200000 && a < 0x280000) { STAT_RAM(1, a - 0x200000, 1); g_ram2[a - 0x200000] = (uint8_t)v; return; }
+    if (a < 0x080000) {
+        STAT_RAM(0, a, 1);
+        if (a < g_ram_local) g_ram1[a] = (uint8_t)v;
+        if (g_voices) g_voices->ram_write8(0, a, (uint8_t)v);
+        return;
+    }
+    if (a >= 0x200000 && a < 0x280000) {
+        a -= 0x200000;
+        STAT_RAM(1, a, 1);
+        if (a < g_ram_local) g_ram2[a] = (uint8_t)v;
+        if (g_voices) g_voices->ram_write8(1, a, (uint8_t)v);
+        return;
+    }
     if ((a & 0xFFF000) == 0x100000 || (a & 0xFFF000) == 0x300000) {
         scsp_t *c = (a & 0xFFF000) == 0x100000 ? g_scsp1 : g_scsp2;
         if (a & 1) scsp_write16(c, a & 0xFFE, (uint16_t)(v & 0xFF), 0x00FF);
@@ -344,28 +401,102 @@ void sound_uart_write(unsigned reg, uint8_t v)
 }
 
 /* ---- running ---------------------------------------------------------- */
+void sound_set_voices(const sound_voices_t *v, uint32_t local_ram)
+{
+    g_voices = v;
+    g_ram_local = local_ram && local_ram < SND_RAM ? local_ram : SND_RAM;
+}
+
+static void board_init(void)
+{
+    unsigned i;
+    g_ram1 = (uint8_t *)calloc(1, g_ram_local);
+    g_ram2 = (uint8_t *)calloc(1, g_ram_local);
+    if (!g_ram1 || !g_ram2) return;
+    /* The reset vectors are read from RAM at 0, so the board copies them
+     * there first (MAME does the same). */
+    for (i = 0; i < 16; i++) {
+        g_ram1[i] = (uint8_t)rom8(i);
+        if (g_voices) g_voices->ram_write8(0, i, g_ram1[i]);
+    }
+    g_scsp1 = scsp_create(g_ram1, g_ram_local, scsp1_irq, scsp1_midi_out);
+    g_scsp2 = scsp_create(g_ram2, g_ram_local, NULL, NULL);
+    if (g_voices) {
+        scsp_set_voices(g_scsp1, (const scsp_voices_t *)g_voices->chip[0], 1);
+        scsp_set_voices(g_scsp2, (const scsp_voices_t *)g_voices->chip[1], 1);
+    }
+    m68k_init();
+    m68k_set_cpu_type(M68K_CPU_TYPE_68000);
+    m68k_pulse_reset();
+    g_decoupled = g_voices != NULL || getenv("M3_SND_DECOUPLED") != NULL;
+}
+
+void sound_init_paged(size_t (*read)(void *ctx, uint32_t off, void *dst, size_t len),
+                      void *ctx, size_t prog_size, size_t samples_size)
+{
+    if (!read || prog_size < 16) return;
+    g_rom_buf = (uint8_t *)malloc(ROM_SLOTS * ROM_PAGE);
+    if (!g_rom_buf) return;
+    memset(g_rom_tag, 0xFF, sizeof g_rom_tag);
+    g_rom_read = read; g_rom_ctx = ctx;
+    g_prog_size = prog_size; g_samples_size = samples_size;
+    board_init();
+}
+
+/* M3_SND_PAGED=1: the Dreamcast's arrangement on this machine -- ROMs
+ * through the paged reader, 32 KB of each RAM kept here, and the voices
+ * played by a far pair of chips that hold the full RAMs and get every byte
+ * written to them. If the driver reads back only what is kept, the audio is
+ * the original's. */
+static const uint8_t *g_mem_prog, *g_mem_samples;
+static uint8_t *g_far_ram[2];
+static size_t mem_read(void *ctx, uint32_t off, void *dst, size_t len)
+{
+    size_t i;
+    (void)ctx;
+    for (i = 0; i < len; i++) {
+        size_t o = off + i;
+        ((uint8_t *)dst)[i] = o < g_prog_size ? g_mem_prog[o]
+                            : o - g_prog_size < g_samples_size ? g_mem_samples[o - g_prog_size] : 0xFF;
+    }
+    return len;
+}
+static void far_ram_w8(int chip, uint32_t a, uint8_t v) { g_far_ram[chip][a & (SND_RAM - 1)] = v; }
+static uint8_t far_ram_r8(int chip, uint32_t a) { return g_far_ram[chip][a & (SND_RAM - 1)]; }
+static void far_dma1(void *ctx, uint32_t a, uint16_t v) { (void)ctx; far_ram_w8(0, a, (uint8_t)(v >> 8)); far_ram_w8(0, a + 1, (uint8_t)v); }
+static void far_dma2(void *ctx, uint32_t a, uint16_t v) { (void)ctx; far_ram_w8(1, a, (uint8_t)(v >> 8)); far_ram_w8(1, a + 1, (uint8_t)v); }
+static void far_field(void) { }
+static void paged_selftest(const uint8_t *prog, size_t prog_size,
+                           const uint8_t *samples, size_t samples_size)
+{
+    static sound_voices_t v;
+    g_mem_prog = prog; g_mem_samples = samples;
+    g_far_ram[0] = (uint8_t *)calloc(1, SND_RAM);
+    g_far_ram[1] = (uint8_t *)calloc(1, SND_RAM);
+    g_far1 = scsp_create(g_far_ram[0], SND_RAM, NULL, NULL);
+    g_far2 = scsp_create(g_far_ram[1], SND_RAM, NULL, NULL);
+    g_far_ops1 = (scsp_voices_t){ g_far1, far_slot, far_common, far_dsp, far_dma1, far_monitor };
+    g_far_ops2 = (scsp_voices_t){ g_far2, far_slot, far_common, far_dsp, far_dma2, far_monitor };
+    v.chip[0] = &g_far_ops1; v.chip[1] = &g_far_ops2;
+    v.ram_write8 = far_ram_w8; v.ram_read8 = far_ram_r8; v.field = far_field;
+    sound_set_voices(&v, 0x8000);
+    g_prog_size = prog_size; g_samples_size = samples ? samples_size : 0;
+    sound_init_paged(mem_read, NULL, prog_size, g_samples_size);
+}
+
 void sound_init(const uint8_t *prog, size_t prog_size,
                 const uint8_t *samples, size_t samples_size)
 {
     if (!prog || prog_size < 16 || getenv("M3_NO_SOUND")) return;
+    if (getenv("M3_SND_PAGED")) { paged_selftest(prog, prog_size, samples, samples_size); return; }
     g_prog = prog; g_prog_size = prog_size;
     g_samples = samples; g_samples_size = samples ? samples_size : 0;
-    g_ram1 = (uint8_t *)calloc(1, SND_RAM);
-    g_ram2 = (uint8_t *)calloc(1, SND_RAM);
-    if (!g_ram1 || !g_ram2) return;
-    /* The reset vectors are read from RAM at 0, so the board copies them
-     * there first (MAME does the same). */
-    memcpy(g_ram1, prog, 16);
-    g_scsp1 = scsp_create(g_ram1, SND_RAM, scsp1_irq, scsp1_midi_out);
-    g_scsp2 = scsp_create(g_ram2, SND_RAM, NULL, NULL);
-    m68k_init();
-    m68k_set_cpu_type(M68K_CPU_TYPE_68000);
-    m68k_pulse_reset();
-    g_decoupled = getenv("M3_SND_DECOUPLED") != NULL;
+    board_init();
+    if (!g_scsp1) return;
     if (getenv("M3_SND_LOOPBACK")) {
         static const scsp_voices_t ops = { NULL, far_slot, far_common, far_dsp, NULL, far_monitor };
-        g_far1 = scsp_create(g_ram1, SND_RAM, NULL, NULL);
-        g_far2 = scsp_create(g_ram2, SND_RAM, NULL, NULL);
+        g_far1 = scsp_create(g_ram1, g_ram_local, NULL, NULL);
+        g_far2 = scsp_create(g_ram2, g_ram_local, NULL, NULL);
         g_far_ops1 = ops; g_far_ops1.ctx = g_far1;
         g_far_ops2 = ops; g_far_ops2.ctx = g_far2;
         scsp_set_voices(g_scsp1, &g_far_ops1, 1);
@@ -434,6 +565,7 @@ static void board_field(void)
     }
     platform_audio(buf, (int)n);
     wav_out(buf, n);
+    if (g_voices && g_voices->field) g_voices->field();
 #ifdef M3_SND_STATS
     stat_report();
 #endif
@@ -506,6 +638,9 @@ void sound_run_field(void)
     if (g_threaded < 0) {
         const char *e = getenv("M3_SOUND_THREAD");
         g_threaded = !(e && *e == '0');
+#ifdef M3_DREAMCAST
+        g_threaded = 0;             /* one core: a thread only adds switching */
+#endif
         if (g_threaded) {
 #ifdef _WIN32
             HANDLE h = CreateThread(NULL, 0, board_thread, NULL, 0, NULL);
@@ -552,8 +687,8 @@ void sound_state(m3_state_t *st)
     uint8_t *tmp;
     if (!g_scsp1) return;
     board_sync();                   /* the board must be between fields */
-    m3_state_io(st, g_ram1, SND_RAM);
-    m3_state_io(st, g_ram2, SND_RAM);
+    m3_state_io(st, g_ram1, g_ram_local);
+    m3_state_io(st, g_ram2, g_ram_local);
     M3_STATE_VAR(st, g_s);
     M3_STATE_VAR(st, g_p);
     tmp = (uint8_t *)malloc(n);
