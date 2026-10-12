@@ -2,7 +2,7 @@
 
 ## 2026-10-12 — the race 35 % faster: no idle spin, no per-polygon copies
 
-Profiling build, Flycast, fields 0-5400: **341 s instead of 660 s**, RAM
+Profiling build, Flycast, fields 0-5400: **316 s instead of 660 s**, RAM
 signatures unchanged at every check. In order:
 - `draw_model` read every polygon through `bus_r3d_read`, a `memcpy` into
   an unaligned byte buffer: 14 % of the samples were in `memcpy`, most in
@@ -40,6 +40,18 @@ signatures unchanged at every check. In order:
   lost in between. RAM signatures equal, and the 22 photographed fields
   (1300, 2000-6000) are the same pixels as before. Race samples -29 %;
   415 -> 341 s.
+- **Pure wait loops** (`game_loops.h`, `M3_PURE_LOOP`): a loop that only
+  reads what changes at a loop tick -- the decrementer, the time base, RAM
+  an interrupt handler writes -- goes straight to the iteration that
+  ticks, at the same count spinning would reach. Seven in Scud: the two
+  at 0x30704, 0xAE9C's wait for an interrupt (also an idle loop now), the
+  33-tick delay at 0xAF70 and 0xB420's three. Signatures equal at every
+  field to 2500 against a run that spins everything (`M3_NO_IDLE_SKIP=1
+  M3_NO_PURE_SKIP=1`), and every 200 to 5400. 341 -> 321 s.
+- `fctiw` rounded through newlib's `rint`, software on the SH-4 (1.6 %):
+  below 2^51, adding and taking away 1.5 * 2^52 is the same rounding in
+  two hardware additions (20 M values checked against `nearbyint`).
+  321 -> 316 s.
 
 Left in a race field (~110-150 ms): `draw_model` 15 %, guest 23 %,
 `real3d_render` + `sink_project` ~10 %, disc waits ~8 %. What is left of

@@ -135,6 +135,7 @@ void m3_watch_hit(uint32_t addr, uint32_t val, unsigned size)
 /* See M3_LOOPED in lift.h. Credits the guest with the work its loop did and
  * lets the field clock run, so a wait on an interrupt-set RAM word ends. */
 uint32_t m3_loop_n;
+int m3_pure_skip = 1;
 
 #define IDLE_MAX 8
 static uint32_t g_idle[IDLE_MAX];

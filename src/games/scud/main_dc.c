@@ -245,6 +245,7 @@ int main(void)
     /* The game's two waits at 0x30704 (see main_host.c). */
     m3_idle_loop(0x0003072Cu);
     m3_idle_loop(0x0003074Cu);
+    m3_idle_loop(0x0000AEBCu);
     scud_register_lifted();
 #ifdef SCUD_DC_PROFILE
     g_main = thd_get_current();

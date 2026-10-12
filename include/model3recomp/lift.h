@@ -162,7 +162,16 @@ static M3_INLINE double m3_fabs(double d)  { return fabs(d); }
 static M3_INLINE double m3_sqrt(double d)  { return __builtin_sqrt(d); }  /* fsqrt, see CMakeLists */
 /* fctiw honours FPSCR[RN]; every Model 3 title leaves it at round-to-nearest,
  * which is what nearbyint gives under the default host mode. */
-static M3_INLINE double m3_round(double d) { return nearbyint(d); }
+/* Below 2^51, adding and taking away 1.5 * 2^52 rounds to an integer the
+ * same way, half to even, in two hardware additions: newlib's rint is
+ * software on the SH-4 (1.6 % of a race field). The two can differ only in
+ * the sign of a zero, which fctiw -- the one user -- turns into 0 anyway. */
+static M3_INLINE double m3_round(double d) {
+    const double big = 6755399441055744.0;           /* 1.5 * 2^52 */
+    if (__builtin_fabs(d) < 2251799813685248.0)       /* 2^51 */
+        return (d + big) - big;
+    return nearbyint(d);
+}
 /* fctiw/fctiwz: the PowerPC saturates out-of-range values and gives
  * 0x80000000 for a NaN. A C cast is undefined there, and hosts differ: x86
  * gives 0x80000000 for both signs, SH-4's ftrc saturates as the 603e does. */
@@ -251,7 +260,25 @@ void m3_fn_trace(uint32_t addr);
 #define M3_LOOP_CREDIT (M3_LOOP_PERIOD / 16u)
 extern uint32_t m3_loop_n;
 void m3_loop_tick(uint32_t pc);
-#define M3_LOOPED(a)                                                       do {                                                                       M3_LOOP_NOTE(a); M3_SAFEPOINT(a);                                                       if (!(++m3_loop_n & (M3_LOOP_PERIOD - 1u))) m3_loop_tick((uint32_t)(a));        } while (0)
+
+/* A pure wait loop: its body only reads state that changes at a loop tick
+ * (the decrementer, the time base, RAM an interrupt handler writes) and
+ * writes nothing but registers it reads again. Until the next tick every
+ * iteration is the one before, so it goes straight to the iteration that
+ * ticks -- the same tick, at the same count, as spinning would reach. The
+ * game names its loops in game_loops.h, beside its lifted code, as
+ * M3_PURE_LOOP(a): a test of a constant, folded away everywhere else.
+ * m3_pure_skip = 0 spins them as before, to check the two agree. */
+#if defined(__has_include)
+#if __has_include("game_loops.h")
+#include "game_loops.h"
+#endif
+#endif
+#ifndef M3_PURE_LOOP
+#define M3_PURE_LOOP(a) 0
+#endif
+extern int m3_pure_skip;
+#define M3_LOOPED(a)                                                       do {                                                                       M3_LOOP_NOTE(a); M3_SAFEPOINT(a);                                                       if (M3_PURE_LOOP(a) && m3_pure_skip)                                       m3_loop_n |= M3_LOOP_PERIOD - 1u;                                  if (!(++m3_loop_n & (M3_LOOP_PERIOD - 1u))) m3_loop_tick((uint32_t)(a));        } while (0)
 
 /* Returns that do not go back to the caller.
  *

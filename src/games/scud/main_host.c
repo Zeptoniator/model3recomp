@@ -365,11 +365,16 @@ int main(int argc, char **argv)
         real3d_set_sink(&k_count_sink);
     model3recomp_set_frame_hook(on_field);
     /* The game's two waits at 0x30704: for the decrementer handler, then
-     * for the VBlank handler's counter. M3_NO_IDLE_SKIP=1 spins them. */
+     * for the VBlank handler's counter; and 0xAE9C's, for an interrupt to
+     * clear a busy byte. M3_NO_IDLE_SKIP=1 spins them. M3_NO_PURE_SKIP=1
+     * spins out each tick of the loops in game_loops.h too. */
     if (!getenv("M3_NO_IDLE_SKIP")) {
         m3_idle_loop(0x0003072Cu);
         m3_idle_loop(0x0003074Cu);
+        m3_idle_loop(0x0000AEBCu);
     }
+    if (getenv("M3_NO_PURE_SKIP"))
+        m3_pure_skip = 0;
     scud_register_lifted();
     model3recomp_run();
     model3recomp_shutdown();
