@@ -484,7 +484,7 @@ static int cut(const m3_r3d_vertex *in, int n, m3_r3d_vertex *out,
 {
     int i, m = 0;
     for (i = 0; i < n; i++) {
-        const m3_r3d_vertex *a = &in[i], *b = &in[(i + 1) % n];
+        const m3_r3d_vertex *a = &in[i], *b = &in[i + 1 < n ? i + 1 : 0];   /* no % */
         float da = sgn * ((axis ? a->y : a->x) - lim);
         float db = sgn * ((axis ? b->y : b->x) - lim);
         if (da <= 0.0f) out[m++] = *a;

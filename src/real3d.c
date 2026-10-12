@@ -1911,7 +1911,7 @@ static int cut_xyw(const float in[][3], int n, float out[][3], int axis,
 {
     int i, m = 0;
     for (i = 0; i < n; i++) {
-        const float *a = in[i], *b = in[(i + 1) % n];
+        const float *a = in[i], *b = in[i + 1 < n ? i + 1 : 0];   /* no % */
         int ia = ge ? a[axis] >= lim : a[axis] <= lim;
         int ib = ge ? b[axis] >= lim : b[axis] <= lim;
         if (ia) { out[m][0] = a[0]; out[m][1] = a[1]; out[m][2] = a[2]; m++; }
@@ -1967,14 +1967,17 @@ static void sink_bounds(float *wmin, float *wmax, float x0, float y0,
  * instead of rasterised: the opaque ones first, then the translucent. */
 static void sink_submit(void)
 {
-    unsigned t;
-    for (t = 0; t < 2u * g_ntris; t++) {
-        const sink_tri_t *tr = &g_sink_tris[t % g_ntris];
+    unsigned pass, t;
+    /* Two passes, not one loop over 2n with t % n: the SH-4 divides in
+     * software, a call per triangle per pass. */
+    for (pass = 0; pass < 2u; pass++)
+    for (t = 0; t < g_ntris; t++) {
+        const sink_tri_t *tr = &g_sink_tris[t];
         m3_r3d_texture tex;
         int translucent;
         if (tr->nproj < 3) continue;
         translucent = (tr->argb >> 24) < 255u;
-        if (translucent != (t >= g_ntris)) continue;
+        if (translucent != (int)pass) continue;
         g_drawn++;
         if (tr->textured && g_textures) {
             tex.x = tr->tx; tex.y = tr->ty; tex.page = tr->page;

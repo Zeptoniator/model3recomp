@@ -17,6 +17,11 @@
   signatures equal; heap +32 KB (the read buffer). Blocked time in the
   profile: 8.2 % instead of 14.5 %. On a console, where a GD-ROM seek is
   far dearer than Flycast's, it should matter more.
+- `sink_submit` walked 2n triangles as `t % n`, and both polygon cutters
+  found the next vertex as `(i + 1) % n`: the SH-4 divides in software, a
+  call each time (`__udivsi3`/`__sdivsi3`, 1.8 % of the profile). Two
+  passes and a compare instead, same order: **307.5 s**, 27 signatures
+  equal, desktop sink dumps byte-identical at fields 1300 and 5000.
 
 ## 2026-10-12 (night) — the sound driver's sample copies, a word at a time
 
