@@ -20,7 +20,18 @@
   can judge is fewer instructions. Caching each vertex's transform and
   projection in `draw_model` by copying them along with the vertex took
   the race from 373.4 s to 377.5 s -- fewer multiplies and divides, more
-  loads and stores -- and was set aside.
+  loads and stores.
+- Kept instead: on the sink path `draw_model` holds a model's vertices in
+  four records (`mvert_t`) and names them by index, so a vertex the next
+  polygon reuses costs a byte, not sixteen loads and stores, and is
+  neither transformed nor projected again; a quad's two triangles share
+  their projections; the colour is worked out once a polygon; the sink
+  path no longer decodes vertex normals it does not use; `sx24` is an
+  arithmetic shift. Race **350.4 s instead of 352.6 s** (`draw_model`
+  1,233 samples -> 1,056), 27 signatures equal; desktop sink dumps
+  byte-identical at fields 1300 and 5000, and the software rasteriser's
+  pictures pixel-identical there. On a console, where a double divide is
+  ~24 cycles, it should be worth more than Flycast shows.
 
 ## 2026-10-12 — compact Real3D sink queue
 

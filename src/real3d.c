@@ -182,11 +182,12 @@ static float f32_of(uint32_t w)
     return f;
 }
 
-/* Sign-extend the top 24 bits of a word. */
+/* Sign-extend the top 24 bits of a word: an arithmetic shift, which GCC
+ * and Clang give a signed right shift (two instructions on the SH-4, where
+ * the test and the OR were a branch and four). */
 static int32_t sx24(uint32_t w)
 {
-    uint32_t v = w >> 8;
-    return (v & 0x800000u) ? (int32_t)(v | 0xFF000000u) : (int32_t)v;
+    return (int32_t)w >> 8;
 }
 
 /* ---- matrices ---------------------------------------------------------- */
@@ -641,10 +642,19 @@ typedef struct {
 static sink_tri_t *g_sink_tris;
 static float g_sink_light[3], g_sink_intensity;
 
-static void sink_emit(const float a[3], const float b[3], const float c[3],
-                      const float n[3], uint32_t rgb,
-                      const float ua[2], const float ub[2], const float uc[2],
-                      const texdesc_t *td);
+/* A model's vertex on the sink path: as read (model space, texture
+ * coordinates), then in view space once transformed (wok) and on the screen
+ * once projected (pok). draw_model keeps four and names them by index, so a
+ * vertex the next polygon reuses is neither copied nor transformed nor
+ * projected again: the same model, the same matrix, the same projection. */
+typedef struct {
+    float vs[3], uv[2], wv[3];
+    m3_r3d_vertex pj;
+    uint8_t wok, pok;
+} mvert_t;
+
+static void sink_polygon(mvert_t *pool, const uint8_t cur[4], unsigned nv,
+                         const float n[3], uint32_t rgb, const texdesc_t *td);
 
 static void emit(const float a[3], const float b[3], const float c[3],
                  const float n[3], uint32_t rgb,
@@ -655,10 +665,6 @@ static void emit(const float a[3], const float b[3], const float c[3],
     tri_t *t;
     int k;
     if (g_ntris >= g_max_tris) return;
-    if (g_sink) {
-        sink_emit(a, b, c, n, rgb, ua, ub, uc, td);
-        return;
-    }
     t = &g_tris[g_ntris++];
     /* Element by element: SH-4 GCC calls memcpy for these, and a call per
      * 12 bytes was most of a race's time in memcpy. */
@@ -726,6 +732,8 @@ static void draw_model(uint32_t addr, const mat_t *m)
     uint32_t (*rd)(const uint8_t *);
     size_t i;
     float prev[4][3], prevn[4][3], prevuv[4][2];
+    mvert_t pool[4];                    /* the sink's vertices (mvert_t) */
+    uint8_t pprev[4];                   /* the previous polygon's, in pool */
     unsigned nprev = 0;
     unsigned guard;
 
@@ -807,6 +815,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
     for (guard = 0; guard < 20000u; guard++) {
         uint32_t ph[7];
         float nrm[3], vs[4][3], vn[4][3], uv[4][2];
+        uint8_t cur[4];                 /* this polygon's, in pool (sink) */
         texdesc_t td;
         unsigned nv, nnew, k, j, slot;
         uint32_t rgb;
@@ -829,6 +838,38 @@ static void draw_model(uint32_t addr, const mat_t *m)
 
         nv = (ph[0] & 0x40u) ? 4u : 3u;
         slot = 0;
+        if (g_sink) {
+            unsigned busy = 0;
+            for (k = 0; k < 4; k++)         /* bits 0..3: reuse from previous */
+                if (((ph[0] >> k) & 1u) && k < nprev && slot < 4) {
+                    cur[slot++] = pprev[k];
+                    busy |= 1u << pprev[k];
+                }
+            if (slot > nv) return;
+            nnew = nv - slot;
+            if (nnew && !(vp = r3d_get(region, i + 28u, vbuf, nnew * 16u)))
+                return;
+            for (k = 0; k < nnew && slot < 4; k++, slot++) {
+                const uint8_t *o = vp + 16u * k;
+                unsigned e = 0;
+                mvert_t *v;
+                uint32_t wt;
+                float us;
+                while ((busy >> e) & 1u) e++;   /* fewer than four busy */
+                busy |= 1u << e;
+                cur[slot] = (uint8_t)e;
+                v = &pool[e];
+                v->vs[0] = (float)sx24(poly_word(o, region == 3)) * g_vertex_inv;
+                v->vs[1] = (float)sx24(poly_word(o + 4, region == 3)) * g_vertex_inv;
+                v->vs[2] = (float)sx24(poly_word(o + 8, region == 3)) * g_vertex_inv;
+                wt = poly_word(o + 12, region == 3);
+                us = (ph[1] & 0x40u) ? 1.0f : 0.125f;
+                v->uv[0] = (float)((wt >> 16) & 0xFFFFu) * us;
+                v->uv[1] = (float)(wt & 0xFFFFu) * us;
+                v->wok = v->pok = 0;
+            }
+            goto decoded;
+        }
         for (k = 0; k < 4; k++)             /* bits 0..3: reuse from previous */
             if (((ph[0] >> k) & 1u) && k < nprev && slot < 4) {
                 for (j = 0; j < 3; j++) {
@@ -871,6 +912,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
                 uv[slot][1] = (float)(wt & 0xFFFFu) * us;
             }
         }
+    decoded:
 
         rgb = (((ph[4] >> 24) & 0xFFu) << 16) | (((ph[4] >> 16) & 0xFFu) << 8)
             | ((ph[4] >> 8) & 0xFFu);
@@ -936,21 +978,31 @@ static void draw_model(uint32_t addr, const mat_t *m)
          * Its vertices still count for the next polygon's reuse. */
         if (slot >= 3 && (ph[0] & 0x300u) != 0x300u) {
             float wv[4][3], wn[3], wvn[4][3];
-            /* Vertex normals are for raster()'s Gouraud; the sink shades
-             * flat and is handed the face normal in their place. */
-            int gouraud = g_sink == NULL;
-            for (j = 0; j < slot; j++) {
-                mat_point(m, vs[j], wv[j]);
-                if (gouraud) mat_dir(m, vn[j], wvn[j]);
+            if (g_sink) {
+                /* Flat shaded with the face normal: no vertex normals. */
+                for (j = 0; j < slot; j++) {
+                    mvert_t *v = &pool[cur[j]];
+                    if (!v->wok) { mat_point(m, v->vs, v->wv); v->wok = 1; }
+                }
+                mat_dir(m, nrm, wn);
+                sink_polygon(pool, cur, slot, wn, rgb, &td);
+            } else {
+                for (j = 0; j < slot; j++) {
+                    mat_point(m, vs[j], wv[j]);
+                    mat_dir(m, vn[j], wvn[j]);
+                }
+                mat_dir(m, nrm, wn);
+                for (j = 1; j + 1 < slot; j++)
+                    emit(wv[0], wv[j], wv[j+1], wn, rgb,
+                         wvn[0], wvn[j], wvn[j+1],
+                         uv[0], uv[j], uv[j+1], &td);
             }
-            mat_dir(m, nrm, wn);
-            for (j = 1; j + 1 < slot; j++)
-                emit(wv[0], wv[j], wv[j+1], wn, rgb,
-                     gouraud ? wvn[0] : wn, gouraud ? wvn[j] : wn,
-                     gouraud ? wvn[j+1] : wn,
-                     uv[0], uv[j], uv[j+1], &td);
         }
 
+        if (g_sink) {
+            for (j = 0; j < slot; j++) pprev[j] = cur[j];
+            goto next;
+        }
         for (j = 0; j < slot; j++) {
             for (k = 0; k < 3; k++) {
                 prev[j][k] = vs[j][k];
@@ -958,6 +1010,7 @@ static void draw_model(uint32_t addr, const mat_t *m)
             }
             prevuv[j][0] = uv[j][0]; prevuv[j][1] = uv[j][1];
         }
+    next:
         nprev = slot;
 
         i += (7u + 4u * nnew) * 4u;
@@ -1740,100 +1793,114 @@ void real3d_set_sheet(uint16_t *texels, unsigned shift)
     g_sheet_shift = shift;
 }
 
-/* The same culling, near-plane cut (at ZNEAR_SINK) and projection as
- * raster(): the polygon the sink is handed for one triangle, or fewer than
- * three vertices when there is none. */
-static int sink_project(const float *const v[3], const float *const uv[3],
-                        const float n[3], int two_sided,
-                        m3_r3d_vertex out[4])
+/* One vertex onto the screen, as raster() projects it: x and y in pixels,
+ * w = 1/z. */
+static void sink_project_vertex(const float v[3], const float uv[2],
+                                m3_r3d_vertex *out)
 {
-    float clipped[4][5], src[3][5];
-    int nclip, k;
-    {
-        float cx = (v[0][0] + v[1][0] + v[2][0]) / 3.0f;
-        float cy = (v[0][1] + v[1][1] + v[2][1]) / 3.0f;
-        float cz = (v[0][2] + v[1][2] + v[2][2]) / 3.0f;
-        if (!two_sided && n[0]*cx + n[1]*cy + n[2]*cz > 0.0f)
-            return 0;
-    }
-    if (v[0][2] >= ZNEAR_SINK && v[1][2] >= ZNEAR_SINK &&
-        v[2][2] >= ZNEAR_SINK) {
-        /* Nothing to cut, the usual case: clip_near would hand back the
-         * same three vertices in the same order. */
-        for (k = 0; k < 3; k++) {
-            double iz = 1.0 / v[k][2];
-            out[k].x = (float)(g_proj.ax * (double)v[k][0] * iz + g_proj.bx);
-            out[k].y = (float)(g_proj.ay * (double)v[k][1] * iz + g_proj.by);
-            out[k].w = (float)iz;
-            out[k].u = uv[k][0];
-            out[k].v = uv[k][1];
-        }
-        return 3;
-    }
-    for (k = 0; k < 3; k++) {
-        src[k][0] = v[k][0]; src[k][1] = v[k][1];
-        src[k][2] = v[k][2];
-        src[k][3] = uv[k][0]; src[k][4] = uv[k][1];
-    }
-    nclip = clip_near(src, clipped, ZNEAR_SINK);
-    for (k = 0; k < nclip; k++) {
-        double iz = 1.0 / clipped[k][2];
-        out[k].x = (float)(g_proj.ax * (double)clipped[k][0] * iz + g_proj.bx);
-        out[k].y = (float)(g_proj.ay * (double)clipped[k][1] * iz + g_proj.by);
-        out[k].w = (float)iz;
-        out[k].u = clipped[k][3];
-        out[k].v = clipped[k][4];
-    }
-    return nclip;
+    double iz = 1.0 / v[2];
+    out->x = (float)(g_proj.ax * (double)v[0] * iz + g_proj.bx);
+    out->y = (float)(g_proj.ay * (double)v[1] * iz + g_proj.by);
+    out->w = (float)iz;
+    out->u = uv[0];
+    out->v = uv[1];
 }
 
-/* Project, cull and shade while the transformed vertices are still hot in
- * draw_model. The old sink path first stored view-space vertices and
- * material in tri_t, then sink_bounds projected them and overwrote the same
- * 132-byte entry. This writes one compact, final 100-byte record instead. */
-static void sink_emit(const float a[3], const float b[3], const float c[3],
-                      const float n[3], uint32_t rgb,
-                      const float ua[2], const float ub[2], const float uc[2],
-                      const texdesc_t *td)
+/* A polygon's triangles (a fan from vertex 0) for the sink, with the same
+ * culling, near-plane cut (at ZNEAR_SINK) and projection as raster(), each
+ * written once as its final record while draw_model's transformed vertices
+ * are still hot. A vertex is projected the first time a triangle that needs
+ * no cut uses it (pok) and keeps that for the polygon's other triangle and
+ * for later polygons that reuse it; the colour is the polygon's. The
+ * arithmetic is the triangle-at-a-time path's, so the PVR gets the same
+ * bytes. */
+static void sink_polygon(mvert_t *pool, const uint8_t cur[4], unsigned nv,
+                         const float n[3], uint32_t rgb, const texdesc_t *td)
 {
-    const float *v[3] = { a, b, c };
-    const float *uv[3] = { ua, ub, uc };
-    sink_tri_t *tr = &g_sink_tris[g_ntris++];
-    float lit, sh;
-    int r, g, b8, nproj;
+    uint32_t argb = 0;
+    int shaded = 0;
+    unsigned j;
 
-    /* Keep the same triangle limit and count as the old queue, including
-     * culled entries. sink_bounds and sink_submit skip nproj == 0 before
-     * reading any of their remaining, deliberately unwritten fields. */
-    tr->nproj = 0;
-    tr->textured = (uint8_t)(td->on ? 1 : 0);
-    if (tr->textured) {
-        tr->tx = (uint16_t)td->x; tr->ty = (uint16_t)td->y;
-        tr->tw = (uint16_t)td->w; tr->th = (uint16_t)td->h;
-        tr->page = (uint8_t)td->page;
-        tr->fmt = (uint8_t)td->fmt;
-        tr->alpha_test = (uint8_t)td->alpha_test;
-        tr->tex_alpha = (uint8_t)td->tex_alpha;
-        tr->mirror = (uint8_t)td->mirror;
+    for (j = 1; j + 1 < nv; j++) {
+        mvert_t *t3[3];
+        sink_tri_t *tr;
+        int k, nproj;
+
+        t3[0] = &pool[cur[0]]; t3[1] = &pool[cur[j]]; t3[2] = &pool[cur[j + 1]];
+        if (g_ntris >= g_max_tris) return;
+        tr = &g_sink_tris[g_ntris++];
+        /* Culled triangles keep their place in the queue, as they did in
+         * the software triangle table. sink_bounds and sink_submit skip
+         * nproj == 0 before reading any of the fields left unwritten. */
+        tr->nproj = 0;
+        tr->textured = (uint8_t)(td->on ? 1 : 0);
+        if (tr->textured) {
+            tr->tx = (uint16_t)td->x; tr->ty = (uint16_t)td->y;
+            tr->tw = (uint16_t)td->w; tr->th = (uint16_t)td->h;
+            tr->page = (uint8_t)td->page;
+            tr->fmt = (uint8_t)td->fmt;
+            tr->alpha_test = (uint8_t)td->alpha_test;
+            tr->tex_alpha = (uint8_t)td->tex_alpha;
+            tr->mirror = (uint8_t)td->mirror;
+        }
+        {
+            const float *a = t3[0]->wv, *b = t3[1]->wv, *c = t3[2]->wv;
+            float cx = (a[0] + b[0] + c[0]) / 3.0f;
+            float cy = (a[1] + b[1] + c[1]) / 3.0f;
+            float cz = (a[2] + b[2] + c[2]) / 3.0f;
+            if (!td->two_sided && n[0]*cx + n[1]*cy + n[2]*cz > 0.0f)
+                continue;
+            if (a[2] >= ZNEAR_SINK && b[2] >= ZNEAR_SINK && c[2] >= ZNEAR_SINK) {
+                /* Nothing to cut, the usual case: clip_near would hand
+                 * back the same three vertices in the same order. */
+                for (k = 0; k < 3; k++) {
+                    mvert_t *v = t3[k];
+                    if (!v->pok) {
+                        sink_project_vertex(v->wv, v->uv, &v->pj);
+                        v->pok = 1;
+                    }
+                    tr->proj[k].x = v->pj.x; tr->proj[k].y = v->pj.y;
+                    tr->proj[k].w = v->pj.w;
+                    tr->proj[k].u = v->pj.u; tr->proj[k].v = v->pj.v;
+                }
+                nproj = 3;
+            } else {
+                float src[3][5], clipped[4][5];
+                for (k = 0; k < 3; k++) {
+                    const mvert_t *v = t3[k];
+                    src[k][0] = v->wv[0]; src[k][1] = v->wv[1];
+                    src[k][2] = v->wv[2];
+                    src[k][3] = v->uv[0]; src[k][4] = v->uv[1];
+                }
+                nproj = clip_near(src, clipped, ZNEAR_SINK);
+                for (k = 0; k < nproj; k++)
+                    sink_project_vertex(clipped[k], &clipped[k][3], &tr->proj[k]);
+            }
+        }
+        if (nproj < 3) continue;
+        tr->nproj = (uint8_t)nproj;
+
+        if (!shaded) {
+            float lit, sh;
+            int r, g, b8;
+            lit = n[0]*g_sink_light[0] + n[1]*g_sink_light[1]
+                + n[2]*g_sink_light[2];
+            if (lit < 0) lit = 0;
+            if (lit > 1.0f) lit = 1.0f;
+            sh = td->lum ? g_sink_intensity
+                         : (AMBIENT + (1.0f - AMBIENT) * lit) * g_sink_intensity;
+            r = (int)(((rgb >> 16) & 0xFFu) * sh);
+            g = (int)(((rgb >> 8) & 0xFFu) * sh);
+            b8 = (int)((rgb & 0xFFu) * sh);
+            if (r > 255) r = 255;
+            if (g > 255) g = 255;
+            if (b8 > 255) b8 = 255;
+            argb = ((uint32_t)td->alpha << 24) | ((uint32_t)r << 16)
+                 | ((uint32_t)g << 8) | (uint32_t)b8;
+            shaded = 1;
+        }
+        tr->argb = argb;
     }
-    nproj = sink_project(v, uv, n, td->two_sided, tr->proj);
-    if (nproj < 3) return;
-    tr->nproj = (uint8_t)nproj;
-
-    lit = n[0]*g_sink_light[0] + n[1]*g_sink_light[1]
-        + n[2]*g_sink_light[2];
-    if (lit < 0) lit = 0;
-    if (lit > 1.0f) lit = 1.0f;
-    sh = td->lum ? g_sink_intensity
-                 : (AMBIENT + (1.0f - AMBIENT) * lit) * g_sink_intensity;
-    r = (int)(((rgb >> 16) & 0xFFu) * sh);
-    g = (int)(((rgb >> 8) & 0xFFu) * sh);
-    b8 = (int)((rgb & 0xFFu) * sh);
-    if (r > 255) r = 255;
-    if (g > 255) g = 255;
-    if (b8 > 255) b8 = 255;
-    tr->argb = ((uint32_t)td->alpha << 24) | ((uint32_t)r << 16)
-             | ((uint32_t)g << 8) | (uint32_t)b8;
 }
 
 /* One side of the viewport's rectangle, for sink_bounds: x (axis 0) or y
@@ -1896,7 +1963,7 @@ static void sink_bounds(float *wmin, float *wmax, float x0, float y0,
     *wmin = lo; *wmax = hi;
 }
 
-/* sink_project's polygons, flat shaded, handed to the sink one by one
+/* sink_polygon's triangles, flat shaded, handed to the sink one by one
  * instead of rasterised: the opaque ones first, then the translucent. */
 static void sink_submit(void)
 {
