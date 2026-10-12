@@ -221,6 +221,9 @@ int sound_int_ack(int level);   /* model3recomp: sound.c */
 /* If ON, CPU will call the instruction hook callback before every
  * instruction.
  */
+#ifdef M3_SND_STATS
+void snd_stat_pc(unsigned pc);      /* sound.c's diagnostic build */
+#endif
 #ifndef M68K_INSTRUCTION_HOOK
 #define M68K_INSTRUCTION_HOOK       M68K_OPT_OFF
 #define M68K_INSTRUCTION_CALLBACK(pc) your_instruction_hook_function(pc)

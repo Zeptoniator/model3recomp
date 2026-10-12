@@ -1,5 +1,29 @@
 # Status
 
+## 2026-10-12 — sound: what the board does, and a board that only listens
+
+Sound on the Dreamcast is to be the SCSPs' voices played by the AICA (their
+descendant: same slots, same 8/16-bit PCM, 64 channels against 2 x 32), with
+the 68000 driver run on the SH-4. Measured on the desktop over the scripted
+race (`-DM3_SND_STATS` plus Musashi's instruction hook, see sound.c):
+- The 68000 runs ~18,800 instructions a field -- all it has: most of it is
+  the main loop at 0x601BBC / 0x602028 walking the 2 x 32 voice records
+  and selecting each on its chip's monitor (register 0x408).
+- Every voice keyed on is 8-bit PCM; no FM, no LFO; both chips run a DSP
+  program (364 and 312 words, reverb) and most voices send to it. Voices
+  play from the chips' own 512 KB RAMs (447 KB reached), which the driver
+  fills from the sample ROM: ~5 KB a field at the start of the race, about
+  nothing otherwise. The engine is a looped voice re-pitched, not re-keyed.
+- On SH-4, Musashi is 284 KB of code and 590 KB of tables, and the program
+  512 KB: more than is free. The guest's 4 MB RAM window (Scud uses ~2) and
+  the 68000-only tables are where it would come from.
+
+`M3_SND_DECOUPLED=1`: the board hears the PowerPC's bytes and plays them,
+but the PowerPC sees `sound_null.c`'s board (always ready, no replies), so
+the RAM signatures are those of a run without sound -- equal over the race
+-- and the audio is the same to the ear (loudness per second within a few
+per cent of the coupled board's). The Dreamcast will run this way.
+
 ## 2026-10-12 — the race 35 % faster: no idle spin, no per-polygon copies
 
 Profiling build, Flycast, fields 0-5400: **316 s instead of 660 s**, RAM

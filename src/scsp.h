@@ -40,4 +40,14 @@ size_t   scsp_state_size(void);
 void     scsp_state_save(scsp_t *s, void *buf);
 void     scsp_state_load(scsp_t *s, const void *buf);
 
+#ifdef M3_SND_STATS
+typedef struct {
+    unsigned keyons, pcm8, fm, lfo, dsp_send, noise, looped;
+    uint32_t max_end;               /* highest sample byte a voice reaches */
+    uint8_t  pages[256];            /* 4 KB pages of sample RAM voices play */
+} scsp_stats_t;
+extern scsp_stats_t scsp_stats[2];  /* [0]: the first chip created */
+unsigned scsp_dsp_steps(scsp_t *s);
+#endif
+
 #endif

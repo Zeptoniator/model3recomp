@@ -69,6 +69,64 @@ static struct {
 
 int sound_present(void) { return g_scsp1 != NULL; }
 
+/* Decoupled: the board only listens. The PowerPC sees exactly the board
+ * that is not there (sound_null.c: always ready, never a reply), and the
+ * bytes it sends are still played. Its signatures are then those of a run
+ * without sound, on any host -- which is how a port whose sound is made
+ * some other way (the Dreamcast's AICA) stays comparable with this one.
+ * M3_SND_DECOUPLED=1 here. */
+static int g_decoupled;
+
+#ifdef M3_SND_STATS
+/* A diagnostic build (-DM3_SND_STATS, with Musashi's instruction hook
+ * pointed at snd_stat_pc): what the board does in a field, for sizing a
+ * port of it onto another machine. Every 300 fields: 68000 instructions
+ * run, the addresses most run, sample ROM bytes read, and what the voices
+ * keyed on use (scsp.c). Run with M3_SOUND_THREAD=0. */
+static uint64_t g_st_insns, g_st_rom;
+static uint32_t *g_st_hist;         /* per 68000 word address, 512 KB program */
+void snd_stat_pc(unsigned pc)
+{
+    g_st_insns++;
+    pc &= 0xFFFFFF;
+    if (!g_st_hist) g_st_hist = (uint32_t *)calloc(0x100000, sizeof *g_st_hist);
+    if (g_st_hist && pc >= 0x600000 && pc < 0x680000) g_st_hist[(pc - 0x600000) >> 1]++;
+    else if (g_st_hist && pc < 0x80000) g_st_hist[0x40000 + (pc >> 1)]++;
+}
+static void stat_report(void)
+{
+    static uint64_t fields;
+    unsigned i, k, c;
+    if (++fields % 300) return;
+    fprintf(stderr, "[sndstat] fields %llu: 68000 %.0f insns/field, ROM %.0f bytes/field\n",
+            (unsigned long long)model3recomp_frame_count(), g_st_insns / 300.0, g_st_rom / 300.0);
+    for (k = 0; k < 8 && g_st_hist; k++) {
+        unsigned best = 0;
+        for (i = 1; i < 0x80000; i++) if (g_st_hist[i] > g_st_hist[best]) best = i;
+        if (!g_st_hist[best]) break;
+        fprintf(stderr, "[sndstat]   pc %06X %.0f/field\n",
+                best < 0x40000 ? 0x600000 + best * 2 : (best - 0x40000) * 2,
+                g_st_hist[best] / 300.0);
+        g_st_hist[best] = 0;
+    }
+    for (c = 0; c < 2; c++) {
+        const scsp_stats_t *t = &scsp_stats[c];
+        unsigned pages = 0;
+        for (i = 0; i < 256; i++) pages += t->pages[i];
+        fprintf(stderr, "[sndstat]   scsp%u: %u key-ons since boot (pcm8 %u, fm %u, lfo %u, to dsp %u,"
+                        " noise %u, looped %u); voices reach %u KB, play %u KB of it;"
+                        " dsp program %u words\n", c + 1, t->keyons, t->pcm8, t->fm,
+                t->lfo, t->dsp_send, t->noise, t->looped, t->max_end >> 10, pages * 4,
+                scsp_dsp_steps(c ? g_scsp2 : g_scsp1));
+    }
+    g_st_insns = g_st_rom = 0;
+    if (g_st_hist) memset(g_st_hist, 0, 0x100000 * sizeof *g_st_hist);
+}
+#define STAT_ROM() (g_st_rom++)
+#else
+#define STAT_ROM() ((void)0)
+#endif
+
 /* ---- 68000 memory ----------------------------------------------------- */
 static unsigned rd8(unsigned a)
 {
@@ -88,7 +146,9 @@ static unsigned rd8(unsigned a)
         return a < g_prog_size ? g_prog[a] : 0xFF;
     }
     if (a >= 0x800000 && g_samples) {
-        size_t o = (g_s.bank + (a - 0x800000)) % g_samples_size;
+        size_t o;
+        STAT_ROM();
+        o = (g_s.bank + (a - 0x800000)) % g_samples_size;
         return g_samples[o];
     }
     return 0xFF;
@@ -177,7 +237,7 @@ static void scsp1_midi_out(uint8_t b)
 /* ---- the PowerPC's side ----------------------------------------------- */
 uint8_t sound_uart_read(unsigned reg)
 {
-    if (!g_scsp1) return reg ? 0x05 : 0;      /* no board: always ready */
+    if (!g_scsp1 || g_decoupled) return reg ? 0x05 : 0;   /* no board: always ready */
     if (reg == 0) {
         uint8_t b = 0;
         if (g_p.rx_r != g_p.rx_w) {
@@ -197,12 +257,17 @@ void sound_uart_write(unsigned reg, uint8_t v)
     if (getenv("M3_SND_TRACE"))
         fprintf(stderr, "[snd] field %llu ppc writes %s %02X\n",
                 (unsigned long long)model3recomp_frame_count(), reg ? "ctl" : "data", v);
-    if (!g_scsp1) {
+    if (!g_scsp1 || g_decoupled) {
         /* No board: as sound_null.c (DC-BUG-015). */
         if (reg == 0)
             irq_ack(M3_IRQ_SOUND);
         else
             irq_set_level(M3_IRQ_SOUND, (v & 0x20) != 0);
+        /* A decoupled board still hears it; a byte with no room is lost. */
+        if (g_scsp1 && reg == 0 && ((g_p.tx_w + 1) % QSIZE) != g_p.tx_r) {
+            g_p.tx[g_p.tx_w] = v;
+            g_p.tx_w = (g_p.tx_w + 1) % QSIZE;
+        }
         return;
     }
     if (reg == 0) {
@@ -239,6 +304,7 @@ void sound_init(const uint8_t *prog, size_t prog_size,
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
     m68k_pulse_reset();
+    g_decoupled = getenv("M3_SND_DECOUPLED") != NULL;
 }
 
 /* M3_WAV=<file>: also write the audio to a WAV file, for listening to a
@@ -301,6 +367,9 @@ static void board_field(void)
     }
     platform_audio(buf, (int)n);
     wav_out(buf, n);
+#ifdef M3_SND_STATS
+    stat_report();
+#endif
 }
 
 /* ---- the board's thread ------------------------------------------------
@@ -392,12 +461,13 @@ void sound_run_field(void)
         g_s.tx_w = (g_s.tx_w + 1) % QSIZE;
         g_p.tx_r = (g_p.tx_r + 1) % QSIZE;
     }
+    if (g_decoupled) g_s.rx_r = g_s.rx_w;      /* nobody reads its replies */
     while (g_s.rx_r != g_s.rx_w && ((g_p.rx_w + 1) % QSIZE) != g_p.rx_r) {
         g_p.rx[g_p.rx_w] = g_s.rx[g_s.rx_r];
         g_p.rx_w = (g_p.rx_w + 1) % QSIZE;
         g_s.rx_r = (g_s.rx_r + 1) % QSIZE;
     }
-    if (g_p.ppc_irq) irq_raise(M3_IRQ_SOUND);
+    if (g_p.ppc_irq && !g_decoupled) irq_raise(M3_IRQ_SOUND);
 
     if (g_threaded) {
         LOCK();

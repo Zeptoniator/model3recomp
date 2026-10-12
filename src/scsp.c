@@ -579,6 +579,37 @@ static void dsp_step(scsp_t *c)
 }
 
 /* ---- registers -------------------------------------------------------- */
+#ifdef M3_SND_STATS
+/* What the driver asks of the chips, for planning a port onto another
+ * sound chip: see sound.c's report. */
+scsp_stats_t scsp_stats[2];
+static scsp_t *g_stat_chip0;
+static void stat_keyon(scsp_t *c, slot_t *s)
+{
+    scsp_stats_t *t = &scsp_stats[c == g_stat_chip0 ? 0 : 1];
+    uint32_t bytes = (uint32_t)LEA(s) << (PCM8B(s) ? 0 : 1), a, end;
+    t->keyons++;
+    if (PCM8B(s)) t->pcm8++;
+    if (MDL(s)) t->fm++;
+    if (PLFOS(s) || ALFOS(s)) t->lfo++;
+    if (IMXL(s)) t->dsp_send++;
+    if (SSCTL(s)) t->noise++;
+    if (LPCTL(s)) t->looped++;
+    end = SA(s) + bytes;
+    if (end > t->max_end) t->max_end = end;
+    for (a = SA(s) >> 12; a <= (end >> 12) && a < 256u; a++) t->pages[a] = 1;
+}
+unsigned scsp_dsp_steps(scsp_t *c)
+{
+    unsigned i, n = 0;
+    for (i = 0; i < 128 * 4; i++) n += c->DSP.MPRO[i] != 0;
+    return n;
+}
+#define STAT_KEYON(c, s) stat_keyon((c), (s))
+#else
+#define STAT_KEYON(c, s) ((void)0)
+#endif
+
 static void UpdateSlotReg(scsp_t *c, int s, int r)
 {
     slot_t *slot = c->Slots + s;
@@ -588,7 +619,7 @@ static void UpdateSlotReg(scsp_t *c, int s, int r)
             int sl;
             for (sl = 0; sl < 32; ++sl) {
                 slot_t *s2 = c->Slots + sl;
-                if (KEYONB(s2) && s2->EG.state == RELEASE) StartSlot(s2);
+                if (KEYONB(s2) && s2->EG.state == RELEASE) { STAT_KEYON(c, s2); StartSlot(s2); }
                 if (!KEYONB(s2)) StopSlot(s2, 1);
             }
             slot->data[0] &= ~0x1000;
@@ -981,6 +1012,9 @@ scsp_t *scsp_create(uint8_t *ram, size_t ram_size,
     c->irq = irq;
     c->midi_out = midi_out;
     scsp_reset(c);
+#ifdef M3_SND_STATS
+    if (!g_stat_chip0) g_stat_chip0 = c;
+#endif
     return c;
 }
 
