@@ -253,9 +253,10 @@ static void on_field(void)
                 g_sink_last[0], g_sink_last[1]);
     scud_operator_settings();
     if (getenv("M3_ROM_PAGED") && model3recomp_frame_count() % 500 == 0)
-        fprintf(stderr, "[rom] field %llu: %llu pages fetched\n",
+        fprintf(stderr, "[rom] field %llu: %llu pages fetched in %llu reads\n",
                 (unsigned long long)model3recomp_frame_count(),
-                (unsigned long long)bus_rom_cache_misses());
+                (unsigned long long)bus_rom_cache_misses(),
+                (unsigned long long)bus_rom_reads());
     shots();
     if (!g_stop_after || model3recomp_frame_count() < g_stop_after)
         return;

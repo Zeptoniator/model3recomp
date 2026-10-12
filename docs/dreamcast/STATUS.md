@@ -1,5 +1,23 @@
 # Status
 
+## 2026-10-12 (night) — a ROM miss reads the rest of its 32 KB page
+
+- A miss in the ROM piece caches read one 4 KB piece: 2,195 disc reads
+  and 62.9 s of the 337.5 s race. Traced on the desktop
+  (`M3_PIECE_TRACE`), the guest streams banked CROM: 82 % of its misses
+  were followed by the next piece's, mostly pieces never seen before
+  (3,400 distinct in 4,438 misses); VROM 59 %.
+- Now a miss also brings in the uncached pieces after it in its SCUD.DAT
+  page (32 KB), in the same read, up to `M3_PIECE_RA` (8; the desktop
+  takes it from the environment). Desktop race with the Dreamcast's cache
+  sizes: 1/2/4/8 pieces a read gave 5,499/2,938/1,655/1,058 reads for
+  5,499/5,665/5,910/6,442 pieces fetched, and the same RAM signatures.
+- Profiled race 0-5400: **312.4 s instead of 337.5 s** (-7.4 %), disc
+  reads 768 instead of 2,195 (37.5 s instead of 62.9 s), all 27 RAM
+  signatures equal; heap +32 KB (the read buffer). Blocked time in the
+  profile: 8.2 % instead of 14.5 %. On a console, where a GD-ROM seek is
+  far dearer than Flycast's, it should matter more.
+
 ## 2026-10-12 (night) — the sound driver's sample copies, a word at a time
 
 - In a race the 68000 runs ~3,500 instructions a field and copies ~5 KB of

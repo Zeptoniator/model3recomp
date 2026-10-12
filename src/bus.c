@@ -612,23 +612,25 @@ static void piece_cache_init(piece_cache_t *c, unsigned kb, int first, int last)
     }
 }
 
-/* The byte at off of ROM which, with at least 8 contiguous bytes after it
- * (fewer at the very end of the ROM). */
-static uint8_t *piece_at(piece_cache_t *c, int which, uint32_t off)
-{
-    size_t size = rom_size(which);
-    uint32_t piece = off / M3_PIECE, in = off % M3_PIECE;
-    unsigned i, victim = 0;
-    uint16_t s;
-    uint8_t *p;
+/* A miss also brings in the pieces after it in its 32 KB page that are not
+ * cached, in the same read. The guest streams banked CROM a piece after
+ * the other -- in the desktop race, 82 % of its misses were followed by
+ * the next piece's -- and a disc read costs its seek far more than its
+ * bytes. M3_PIECE_RA pieces at most (1: none); on the desktop the
+ * environment variable of that name overrides it. */
+#ifndef M3_PIECE_RA
+#define M3_PIECE_RA 8u
+#endif
+#define M3_PIECES_PER_PAGE 8u                  /* SCUD.DAT's 32 KB pages */
+static unsigned g_piece_ra = M3_PIECE_RA;
+static uint8_t *g_ra_buf;                      /* M3_PIECE_RA pieces */
+static uint64_t g_piece_reads;                 /* reads of the ROM image */
 
-    c->tick++;
-    s = c->slot_of[which][piece];
-    if (s) {
-        c->used[s - 1] = c->tick;
-        c->hits++;
-        return c->buf + (size_t)(s - 1) * M3_PIECE_SLOT + in;
-    }
+/* Slot for a piece about to be cached: an empty one, or the least
+ * recently used, whose piece leaves the cache (and the TLB). */
+static unsigned piece_victim(piece_cache_t *c)
+{
+    unsigned i, victim = 0;
     for (i = 0; i < c->slots; i++) {
         if (!c->key[i]) { victim = i; break; }
         if (c->used[i] < c->used[victim]) victim = i;
@@ -640,11 +642,79 @@ static uint8_t *piece_at(piece_cache_t *c, int which, uint32_t off)
             for (i = 0; i < ROM_TLB_N; i++)
                 if (g_rom_tlb[i].slot == victim) g_rom_tlb[i].tag = 0;
     }
-    c->misses++;
-    p = c->buf + (size_t)victim * M3_PIECE_SLOT;
+    return victim;
+}
+
+static void piece_install(piece_cache_t *c, int which, uint32_t piece,
+                          unsigned slot)
+{
+    c->key[slot] = (((uint32_t)which << 28) | piece) + 1u;
+    c->slot_of[which][piece] = (uint16_t)(slot + 1u);
+    c->used[slot] = c->tick;
+}
+
+/* The byte at off of ROM which, with at least 8 contiguous bytes after it
+ * (fewer at the very end of the ROM). */
+static uint8_t *piece_at(piece_cache_t *c, int which, uint32_t off)
+{
+    size_t size = rom_size(which);
+    uint32_t piece = off / M3_PIECE, in = off % M3_PIECE;
+    uint32_t run = 1, k;
+    unsigned victim;
+    uint16_t s;
+    uint8_t *p;
+
+    c->tick++;
+    s = c->slot_of[which][piece];
+    if (s) {
+        c->used[s - 1] = c->tick;
+        c->hits++;
+        return c->buf + (size_t)(s - 1) * M3_PIECE_SLOT + in;
+    }
+#ifndef M3_DREAMCAST
     {
+        static int probed;
+        if (!probed) {
+            const char *e = getenv("M3_PIECE_RA");
+            probed = 1;
+            if (e) g_piece_ra = (unsigned)strtoul(e, NULL, 0);
+        }
+    }
+#endif
+    if (g_piece_ra > M3_PIECES_PER_PAGE) g_piece_ra = M3_PIECES_PER_PAGE;
+    {
+        uint32_t last = (uint32_t)((size - 1u) / M3_PIECE);
+        uint32_t page_end = piece | (M3_PIECES_PER_PAGE - 1u);
+        while (run < g_piece_ra && piece + run <= page_end
+               && piece + run <= last && !c->slot_of[which][piece + run])
+            run++;
+    }
+    if (run > 1u && !g_ra_buf) {
+#ifdef M3_DREAMCAST
+        g_ra_buf = memalign(32, (size_t)M3_PIECES_PER_PAGE * M3_PIECE);
+#else
+        g_ra_buf = malloc((size_t)M3_PIECES_PER_PAGE * M3_PIECE);
+#endif
+        if (!g_ra_buf) run = 1;
+    }
+    g_piece_reads++;
+#ifndef M3_DREAMCAST
+    {   /* M3_PIECE_TRACE=<file>: every read of pieces, with the field */
+        static FILE *tf; static int probed;
+        if (!probed) { const char *e = getenv("M3_PIECE_TRACE"); probed = 1;
+                       if (e) tf = fopen(e, "w"); }
+        if (tf) fprintf(tf, "%llu %d %u %u\n",
+                        (unsigned long long)model3recomp_frame_count(), which,
+                        piece, run);
+    }
+#endif
+
+    if (run == 1u) {
         size_t at = (size_t)piece * M3_PIECE;
         size_t n = at + M3_PIECE <= size ? M3_PIECE : size - at;
+        victim = piece_victim(c);
+        c->misses++;
+        p = c->buf + (size_t)victim * M3_PIECE_SLOT;
         g_roms.read(g_roms.read_ctx, which, (uint32_t)at, p, n);
         memset(p + n, 0, 8u);
         /* The 8 bytes past the end, only for an access that needs them: a
@@ -652,11 +722,34 @@ static uint8_t *piece_at(piece_cache_t *c, int which, uint32_t off)
         if (in > M3_PIECE - 8u && at + M3_PIECE + 8u <= size)
             g_roms.read(g_roms.read_ctx, which, (uint32_t)(at + M3_PIECE),
                         p + M3_PIECE, 8u);
+        piece_install(c, which, piece, victim);
+        return p + in;
     }
-    c->key[victim] = (((uint32_t)which << 28) | piece) + 1u;
-    c->slot_of[which][piece] = (uint16_t)(victim + 1u);
-    c->used[victim] = c->tick;
-    return p + in;
+
+    {
+        size_t at0 = (size_t)piece * M3_PIECE;
+        size_t bytes = (size_t)run * M3_PIECE;
+        uint8_t *first = NULL;
+        if (bytes > size - at0) bytes = size - at0;
+        g_roms.read(g_roms.read_ctx, which, (uint32_t)at0, g_ra_buf, bytes);
+        for (k = 0; k < run; k++) {
+            size_t o = (size_t)k * M3_PIECE;
+            size_t n = bytes - o < M3_PIECE ? bytes - o : M3_PIECE;
+            victim = piece_victim(c);
+            c->misses++;
+            p = c->buf + (size_t)victim * M3_PIECE_SLOT;
+            memcpy(p, g_ra_buf + o, n);
+            /* The 8 bytes past the end: the next piece's first ones when
+             * they are in the buffer (every piece but the last read). */
+            if (k + 1u < run && n == M3_PIECE)
+                memcpy(p + M3_PIECE, g_ra_buf + o + M3_PIECE, 8u);
+            else
+                memset(p + n, 0, 8u);
+            if (k == 0) first = p;
+            piece_install(c, which, piece + k, victim);
+        }
+        return first + in;
+    }
 }
 
 /* which: 0 program CROM, 1 banked CROM, 2 VROM. */
@@ -698,6 +791,7 @@ static uint8_t *rom_guest(uint32_t a, int which, uint32_t off)
 }
 
 uint64_t bus_rom_cache_misses(void) { return g_cc.misses + g_vc.misses; }
+uint64_t bus_rom_reads(void) { return g_piece_reads; }
 uint64_t bus_vrom_cache_misses(void) { return g_vc.misses; }
 
 /* Copies len bytes of a Real3D memory starting at byte off: 0 culling RAM
