@@ -87,6 +87,26 @@ static void ram_w8(int chip, uint32_t a, uint8_t v)
     if (g_pend_mask == 0xFu) ram_flush();
 }
 
+/* A long word written at once, as the driver copies samples (movem.l):
+ * what ram_w8 does for its four bytes in a row, without the gathering --
+ * the word is all new, so whatever was pending for it goes, and anything
+ * pending elsewhere is sent first, as ram_w8's first byte would. */
+static void ram_w32(int chip, uint32_t a, uint32_t v)
+{
+    uint32_t at = k_base[chip & 1] + (a & 0x7FFFFu);
+    if ((at & 3u) || (a & 0x7FFFFu) > 0x7FFFCu) {
+        ram_w8(chip, a, (uint8_t)(v >> 24));
+        ram_w8(chip, a + 1u, (uint8_t)(v >> 16));
+        ram_w8(chip, a + 2u, (uint8_t)(v >> 8));
+        ram_w8(chip, a + 3u, (uint8_t)v);
+        return;
+    }
+    if (at == g_pend_addr) g_pend_addr = ~0u;
+    else ram_flush();
+    g2w(AICA_RAM(at), __builtin_bswap32(v));    /* byte at `at` lowest */
+    g_aica_ram_words++;
+}
+
 static uint8_t ram_r8(int chip, uint32_t a)
 {
     uint32_t at = k_base[chip & 1] + (a & 0x7FFFFu);
@@ -221,7 +241,7 @@ static const scsp_voices_t k_chip[2] = {
     { &g_chip_id[0], slot_write, common_write, NULL, dma_write, monitor },
     { &g_chip_id[1], slot_write, common_write, NULL, dma_write, monitor },
 };
-static const sound_voices_t k_voices = { { &k_chip[0], &k_chip[1] }, ram_w8, ram_r8, field };
+static const sound_voices_t k_voices = { { &k_chip[0], &k_chip[1] }, ram_w8, ram_r8, field, ram_w32 };
 
 const sound_voices_t *aica_voices(void)
 {

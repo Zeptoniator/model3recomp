@@ -1,5 +1,34 @@
 # Status
 
+## 2026-10-12 (night) — the sound driver's sample copies, a word at a time
+
+- In a race the 68000 runs ~3,500 instructions a field and copies ~5 KB of
+  samples a field from the sample ROM into its chips' RAMs, a long word at
+  a time (`movem.l`; `M3_SND_STATS` build). Every byte went through
+  `rd16`, `rd8` and `rom8` one way and `wr16`, `wr8` and the AICA's byte
+  gatherer the other: together ~5 % of the race profile.
+- Musashi's callbacks now read 1, 2 or 4 bytes of the sample ROM in place
+  (`smp_at`: through the bank, unless they wrap round the ROM or cross a
+  cache page), and write a long word above the RAM kept on the SH-4 to the
+  voices at once: `sound_voices_t.ram_write32`, which on the AICA is one
+  G2 write of the swapped word -- what four `ram_w8` calls did, the pending
+  word sent first, or dropped when this one replaces all of it.
+- Profiled race 0-5400: **337.5 s instead of 350.4 s** (-3.7 %), all 27
+  RAM signatures equal. On the desktop the 5400-field WAV is bit for bit
+  the reference (SHA-256 `73063d1a...`, 16,557,232 bytes) both through the
+  paged/AICA-shaped path (`M3_SND_PAGED=1`, which exercises
+  `ram_write32`) and with the resident board. Recorded through Flycast
+  (`DC_AUDIO_WAV`), the console's sound has the earlier recording's
+  spectrogram -- attract music, selection screens, the engine's harmonics
+  -- at the same level (RMS -40.5 dB against -40.8, peak -13.7 against
+  -14.2), shorter because the race is.
+- Tried and dropped, measured on `0x44D94` (6 % of the race): keeping the
+  guest's registers in C locals instead of `m3_ctx` compiles to 1,585 to
+  1,712 SH-4 instructions against 1,340 -- the SH-4 has eight double
+  registers, so twenty-odd live guest registers spill to the stack, which
+  costs what `m3_ctx` does. And this toolchain has no `-m4` (double by
+  default) to drop the FPSCR switches: `-m4-single` only.
+
 ## 2026-10-12 (evening) — a TLB for the guest's CROM reads
 
 - Every guest read of the CROMs went through `direct()`'s chain of range

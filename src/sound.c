@@ -383,6 +383,36 @@ static void wr16(unsigned a, unsigned v)
     wr8(a + 1, v & 0xFF);
 }
 
+#ifndef M3_SND_STATS
+/* n contiguous bytes of the sample ROM at 68000 address a (0x800000 up,
+ * through the bank), or NULL when they wrap round the ROM or cross a page
+ * of the cache -- then rd8 takes them a byte at a time. In a race the
+ * driver copies ~5 KB a field from here into its chips' RAMs, a long word
+ * at a time (movem.l), and each byte went through rd16, rd8 and rom8. */
+static const uint8_t *smp_at(uint32_t a, uint32_t n)
+{
+    size_t o = g_s.bank + (a - 0x800000u);
+    uint32_t off;
+    while (o >= g_samples_size) o -= g_samples_size;    /* as rd8 */
+    if (g_samples_size - o < n) return NULL;
+    if (!g_rom_read) return g_samples + o;
+    off = (uint32_t)(g_prog_size + o);
+    if ((off & (g_rc_smp.page - 1u)) > g_rc_smp.page - n) return NULL;
+    return cache_at(&g_rc_smp, off);
+}
+
+/* A long word into a chip's RAM above what is kept here: samples, which
+ * only the voices hold. In wr8's byte order. */
+static void voices_w32(int chip, uint32_t a, uint32_t v)
+{
+    if (g_voices->ram_write32) { g_voices->ram_write32(chip, a, v); return; }
+    g_voices->ram_write8(chip, a, (uint8_t)(v >> 24));
+    g_voices->ram_write8(chip, a + 1u, (uint8_t)(v >> 16));
+    g_voices->ram_write8(chip, a + 2u, (uint8_t)(v >> 8));
+    g_voices->ram_write8(chip, a + 3u, (uint8_t)v);
+}
+#endif
+
 /* Musashi's callbacks. The interpreter calls these for every operand and
  * instruction fetch. Keep its RAM and program -- overwhelmingly the common
  * cases -- out of the complete board decoder above. M3_SND_STATS deliberately
@@ -394,6 +424,7 @@ unsigned int m68k_read_memory_8(unsigned int a)
     if (a < g_ram_local) return g_ram1[a];
     if (a - 0x200000u < g_ram_local) return g_ram2[a - 0x200000u];
     if (a - 0x600000u < g_prog_size) return rom8(a - 0x600000u);
+    if (a >= 0x800000u && g_samples_size) return *smp_at(a, 1);
 #endif
     return rd8(a);
 }
@@ -409,6 +440,10 @@ unsigned int m68k_read_memory_16(unsigned int a)
             return ((unsigned)g_ram2[o] << 8) | g_ram2[o + 1];
     }
     if (a - 0x600000u < g_prog_size) return prog16(a - 0x600000u);
+    if (a >= 0x800000u && g_samples_size) {
+        const uint8_t *p = smp_at(a, 2);
+        if (p) return ((unsigned)p[0] << 8) | p[1];
+    }
 #endif
     return rd16(a);
 }
@@ -426,6 +461,11 @@ unsigned int m68k_read_memory_32(unsigned int a)
              | ((unsigned)g_ram2[o + 2] << 8) | g_ram2[o + 3];
     o = a - 0x600000u;
     if (o < g_prog_size && g_prog_size - o >= 4u) return prog32(o);
+    if (a >= 0x800000u && a <= 0xFFFFFCu && g_samples_size) {
+        const uint8_t *p = smp_at(a, 4);
+        if (p) return ((unsigned)p[0] << 24) | ((unsigned)p[1] << 16)
+                    | ((unsigned)p[2] << 8) | p[3];
+    }
 #endif
     return (m68k_read_memory_16(a) << 16) | m68k_read_memory_16(a + 2);
 }
@@ -441,6 +481,14 @@ void m68k_write_memory_8(unsigned int a, unsigned int v)
         && (!g_voices || a - 0x200000u < g_mirror_from)) {
         g_ram2[a - 0x200000u] = (uint8_t)v;
         return;
+    }
+    if (g_voices) {                     /* above what is kept: samples */
+        if (a >= g_ram_local && a < 0x080000u) {
+            g_voices->ram_write8(0, a, (uint8_t)v); return;
+        }
+        if (a - 0x200000u >= g_ram_local && a - 0x200000u < 0x080000u) {
+            g_voices->ram_write8(1, a - 0x200000u, (uint8_t)v); return;
+        }
     }
 #endif
     wr8(a, v);
@@ -459,6 +507,16 @@ void m68k_write_memory_16(unsigned int a, unsigned int v)
         && (!g_voices || (o < g_mirror_from && g_mirror_from - o >= 2u))) {
         g_ram2[o] = (uint8_t)(v >> 8); g_ram2[o + 1] = (uint8_t)v;
         return;
+    }
+    if (g_voices) {
+        int chip = -1;
+        if (a >= g_ram_local && a + 1u < 0x080000u) { chip = 0; o = a; }
+        else if (o >= g_ram_local && o + 1u < 0x080000u) chip = 1;
+        if (chip >= 0) {
+            g_voices->ram_write8(chip, o, (uint8_t)(v >> 8));
+            g_voices->ram_write8(chip, o + 1u, (uint8_t)v);
+            return;
+        }
     }
 #endif
     wr16(a, v);
@@ -479,6 +537,10 @@ void m68k_write_memory_32(unsigned int a, unsigned int v)
         g_ram2[o] = (uint8_t)(v >> 24); g_ram2[o + 1] = (uint8_t)(v >> 16);
         g_ram2[o + 2] = (uint8_t)(v >> 8); g_ram2[o + 3] = (uint8_t)v;
         return;
+    }
+    if (g_voices) {
+        if (a >= g_ram_local && a + 3u < 0x080000u) { voices_w32(0, a, v); return; }
+        if (o >= g_ram_local && o + 3u < 0x080000u) { voices_w32(1, o, v); return; }
     }
 #endif
     wr16(a, v >> 16); wr16(a + 2, v & 0xFFFF);
@@ -652,6 +714,11 @@ static uint8_t far_ram_r8(int chip, uint32_t a) { return g_far_ram[chip][a & (SN
 static void far_dma1(void *ctx, uint32_t a, uint16_t v) { (void)ctx; far_ram_w8(0, a, (uint8_t)(v >> 8)); far_ram_w8(0, a + 1, (uint8_t)v); }
 static void far_dma2(void *ctx, uint32_t a, uint16_t v) { (void)ctx; far_ram_w8(1, a, (uint8_t)(v >> 8)); far_ram_w8(1, a + 1, (uint8_t)v); }
 static void far_field(void) { }
+static void far_ram_w32(int chip, uint32_t a, uint32_t v)
+{
+    far_ram_w8(chip, a, (uint8_t)(v >> 24)); far_ram_w8(chip, a + 1, (uint8_t)(v >> 16));
+    far_ram_w8(chip, a + 2, (uint8_t)(v >> 8)); far_ram_w8(chip, a + 3, (uint8_t)v);
+}
 static void paged_selftest(const uint8_t *prog, size_t prog_size,
                            const uint8_t *samples, size_t samples_size)
 {
@@ -665,6 +732,7 @@ static void paged_selftest(const uint8_t *prog, size_t prog_size,
     g_far_ops2 = (scsp_voices_t){ g_far2, far_slot, far_common, far_dsp, far_dma2, far_monitor };
     v.chip[0] = &g_far_ops1; v.chip[1] = &g_far_ops2;
     v.ram_write8 = far_ram_w8; v.ram_read8 = far_ram_r8; v.field = far_field;
+    v.ram_write32 = far_ram_w32;
     sound_set_voices(&v, 0x8000, 0x4000);
     g_prog_size = prog_size; g_samples_size = samples ? samples_size : 0;
     sound_init_paged(mem_read, NULL, prog_size, g_samples_size);

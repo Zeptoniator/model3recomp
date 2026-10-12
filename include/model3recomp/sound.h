@@ -38,12 +38,16 @@ void     sound_run_field(void);
  * is samples, which it writes and the voices read, so its bytes go to
  * ram_write8 and live only over there (ram_read8 for the rare read back).
  * field() is called after each field, to flush what the far side buffers.
- * A board with voices elsewhere is always decoupled (M3_SND_DECOUPLED). */
+ * ram_write32, if set, takes a long word the 68000 wrote at once (v as it
+ * sees it, big-endian; addr + 3 inside the chip's RAM): what four
+ * ram_write8 calls in address order would do. A board with voices
+ * elsewhere is always decoupled (M3_SND_DECOUPLED). */
 typedef struct {
     const void *chip[2];
     void    (*ram_write8)(int chip, uint32_t addr, uint8_t v);
     uint8_t (*ram_read8)(int chip, uint32_t addr);
     void    (*field)(void);
+    void    (*ram_write32)(int chip, uint32_t addr, uint32_t v);
 } sound_voices_t;
 /* Writes below mirror_from (inside local_ram) are the driver's own
  * variables and stay here: no voice plays from there, and the driver
