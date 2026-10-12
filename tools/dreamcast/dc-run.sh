@@ -7,6 +7,9 @@
 # DC_SHOTS=<dir> photographs every "SCUD SHOT field N" line as <dir>/fN.png.
 # DC_RUN_VISIBLE=1 opens the window on the current $DISPLAY instead of a
 # private Xvfb, to watch a run (keep it uncovered: see below).
+# DC_AUDIO_WAV=<file.wav> records the console's sound: Flycast plays into a
+# PulseAudio null sink made for the run (and removed after), and parec
+# records its monitor. Without it the sound goes nowhere (backend null).
 # Exits 0 when the done-token appears on the console, 1 on timeout, 2 when
 # Flycast cannot be found. FLYCAST=<binary> picks the emulator.
 #
@@ -48,24 +51,45 @@ fi
 
 LOG=$(mktemp)
 FLY=""
+AUDIO=null
+LIMIT=no
+SINK_MOD=""
+REC=""
+if [ -n "${DC_AUDIO_WAV:-}" ]; then
+    SINK=dcrun$$
+    SINK_MOD=$(pactl load-module module-null-sink sink_name=$SINK \
+               sink_properties=device.description=dc-run-$$ 2>/dev/null) || SINK_MOD=""
+    if [ -n "$SINK_MOD" ]; then
+        AUDIO=pulse
+        LIMIT=yes       # in real time, or the sound is cut to fit
+        parec -d "$SINK.monitor" --file-format=wav --rate=44100 --channels=2 \
+              --format=s16le "$DC_AUDIO_WAV" &
+        REC=$!
+    else
+        echo "[dc-run] no PulseAudio null sink: not recording" >&2
+    fi
+fi
 cleanup() {
     [ -n "$FLY" ] && kill -TERM "$FLY" 2>/dev/null
     sleep 0.5
     [ -n "$FLY" ] && kill -KILL "$FLY" 2>/dev/null
+    [ -n "$REC" ] && kill -INT "$REC" 2>/dev/null
+    [ -n "$SINK_MOD" ] && pactl unload-module "$SINK_MOD" 2>/dev/null
     [ -n "$XVFB" ] && kill -TERM "$XVFB" 2>/dev/null
     rm -rf "$HOME_DIR" "$LOG"
 }
 trap cleanup EXIT
 
 DISPLAY=":$DISP" XDG_CONFIG_HOME="$HOME_DIR" XDG_DATA_HOME="$HOME_DIR/data" \
+    PULSE_SINK="${SINK:-}" \
     "$FLYCAST" \
     -config config:Debug.SerialConsoleEnabled=yes \
     -config config:Debug.SerialPTY=no \
     -config config:Debug.GDBEnabled=no \
     -config config:RendererType=0 \
-    -config config:LimitFPS=no \
+    -config config:LimitFPS=$LIMIT \
     -config window:fullscreen=no \
-    -config audio:backend=null \
+    -config audio:backend=$AUDIO \
     "$ELF" >"$LOG" 2>&1 &
 FLY=$!
 

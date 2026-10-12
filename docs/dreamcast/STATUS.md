@@ -32,6 +32,33 @@ pair of chips on the far side: the race's audio is bit for bit the
 original's, and silent when the far pair is muted -- the split is whole.
 The AICA goes where that second pair is.
 
+**On the Dreamcast (opt-in, `-DSCUD_DC_SOUND`), it plays.** The 68000
+(Musashi, one cycle table) runs on the SH-4 against chips built with
+`SCSP_NO_SYNTH` (5 KB, no tables); `aica_voices.c` re-encodes each slot
+write into AICA channel registers (chip 1 -> 0-31, chip 2 -> 32-63), the
+driver's sample writes go into AICA RAM gathered into 32-bit words, and the
+slot monitor reads back from the AICA. Only 32 KB of each chip's RAM is
+kept on the SH-4 -- the driver reads back pages 0-4 and nothing else -- and
+the 68000 program and sample ROM are read on demand from /cd/SCUDSND.DAT
+(`scud_snd.bin` + `scud_samples.bin`) through eight 16 KB pages; the desktop
+proves that arrangement bit for bit (`M3_SND_PAGED=1`). Guest RAM is now a
+3 MB window (the race never goes above 2 MB). `DC_AUDIO_WAV=f.wav` in
+dc-run.sh records Flycast through a PulseAudio null sink: the first run was
+audible from ~140 s.
+
+Open:
+- The first run's sound did not stop: AICA KEYONEX acts on all 64 channels
+  and, unlike the SCSP, a one-shot that ran out keeps KEYONB, so every later
+  KEYONEX restarted it. `reap_ended()` now unkeys such voices before each
+  KEYONEX -- built, not yet heard.
+- Cost: guest 140-180 ms a field in the race instead of ~50. Part of it was
+  the sound ROM read through stdio's 1 KB buffer (disc time 30 -> 380 s by
+  field 2000); it is now unbuffered and aligned like SCUD.DAT, not yet
+  measured. The 68000 itself (~18,800 instructions a field, mostly its
+  polling loop) is the rest; no profile yet (the run was stopped by the
+  host running out of memory).
+- No DSP (reverb), so chip 2's voices, all of which send to it, are dry.
+
 ## 2026-10-12 — the race 35 % faster: no idle spin, no per-polygon copies
 
 Profiling build, Flycast, fields 0-5400: **316 s instead of 660 s**, RAM

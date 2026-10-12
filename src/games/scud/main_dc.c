@@ -9,6 +9,8 @@
 #include "model3recomp/bus.h"
 #include "scudpack.h"
 #include "../../renderer/pvr/pvr_r3d.h"
+#include "../../platform/dreamcast/aica_voices.h"
+#include "model3recomp/sound.h"
 
 #include <kos.h>
 #include <malloc.h>
@@ -109,6 +111,41 @@ static void profile_report(void)
 }
 #endif
 
+/* The sound board's ROMs: /cd/SCUDSND.DAT is the 68000 program (512 KB)
+ * followed by the sample ROM, read on demand (sound.c caches pages). */
+#define SND_PROG_BYTES 0x80000u
+static FILE *g_snd;
+static size_t read_snd(void *ctx, uint32_t off, void *dst, size_t len)
+{
+    uint64_t t = timer_us_gettime64();
+    size_t got = 0;
+    (void)ctx;
+    if (fseek(g_snd, (long)off, SEEK_SET) == 0)
+        got = fread(dst, 1, len, g_snd);
+    t = timer_us_gettime64() - t;
+    g_rom_us += t;
+    m3_t_disc_us += t;
+    return got;
+}
+
+static void sound_board_open(void)
+{
+    long size;
+    g_snd = fopen("/cd/SCUDSND.DAT", "rb");
+    if (!g_snd) { printf("sound: no /cd/SCUDSND.DAT, no sound\n"); return; }
+    /* As SCUD.DAT: no stdio buffer, so a page goes to the file system in
+     * one read instead of a kilobyte at a time (sound.c's pages are
+     * 32-byte aligned). */
+    setvbuf(g_snd, NULL, _IONBF, 0);
+    fseek(g_snd, 0, SEEK_END);
+    size = ftell(g_snd);
+    if (size <= (long)SND_PROG_BYTES) { printf("sound: SCUDSND.DAT too short\n"); return; }
+    sound_set_voices(aica_voices(), 0x8000u);
+    sound_init_paged(read_snd, NULL, SND_PROG_BYTES, (size_t)size - SND_PROG_BYTES);
+    printf("sound: board on the AICA, %ld KB of samples on the disc\n",
+           (size - (long)SND_PROG_BYTES) >> 10);
+}
+
 static void report(const char *when)
 {
     struct mallinfo mi = mallinfo();
@@ -159,6 +196,9 @@ static void on_field(void)
     }
     if (f > SCUD_DC_FIELDS) {          /* after field N's signature */
         report("end");
+        aica_voices_report();
+        { extern uint64_t g_snd_rom_misses;
+          printf("[sound] ROM pages missed %llu\n", (unsigned long long)g_snd_rom_misses); }
 #ifdef SCUD_DC_PROFILE
         profile_report();
 #endif
@@ -176,7 +216,6 @@ int main(void)
     printf(" SCUD RACE -- DREAMCAST (headless)\n");
     printf("================================\n");
     printf("model3recomp %s, built %s %s\n", M3_GIT_REV, __DATE__, __TIME__);
-    setenv("M3_NO_SOUND", "1", 1);
     setenv("M3_SIG_EVERY", SCUD_DC_SIG_EVERY, 1);
 #ifdef SCUD_DC_SIGMAP
     setenv("M3_SIGMAP", SCUD_DC_SIGMAP, 1);
@@ -236,6 +275,9 @@ int main(void)
         printf("model3recomp_init failed\nSCUD DC FAILED\n");
         return 1;
     }
+#ifdef SCUD_DC_SOUND   /* opt-in while the board costs ~100 ms a field */
+    sound_board_open();
+#endif
     if (!pvr_r3d_install())
         printf("PVR: init failed, running headless\n");
     else

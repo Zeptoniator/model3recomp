@@ -63,7 +63,9 @@ typedef struct {
     unsigned keyons, pcm8, fm, lfo, dsp_send, noise, looped;
     uint32_t max_end;               /* highest sample byte a voice reaches */
     uint8_t  pages[256];            /* 4 KB pages of sample RAM voices play */
+    unsigned disdl[8], keyonex;
 } scsp_stats_t;
+extern unsigned scsp_stats_ends;    /* one-shots that ran out with KEYONB set */
 extern scsp_stats_t scsp_stats[2];  /* [0]: the first chip created */
 unsigned scsp_dsp_steps(scsp_t *s);
 #endif

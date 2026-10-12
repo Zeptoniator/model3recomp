@@ -351,6 +351,9 @@ static int Get_DR(int base, int R) { return DRTABLE[clamp63(base + (R << 1))]; }
 
 static void StopSlot(slot_t *slot, int keyoff)
 {
+#ifdef M3_SND_STATS
+    if (!keyoff && KEYONB(slot)) scsp_stats_ends++;
+#endif
     if (keyoff) slot->EG.state = RELEASE;
     else        slot->active = 0;
     slot->data[0] &= ~0x800;
@@ -601,6 +604,7 @@ static void dsp_start(dsp_t *d) { (void)d; }
 /* What the driver asks of the chips, for planning a port onto another
  * sound chip: see sound.c's report. */
 scsp_stats_t scsp_stats[2];
+unsigned scsp_stats_ends;
 static scsp_t *g_stat_chip0;
 static void stat_keyon(scsp_t *c, slot_t *s)
 {
@@ -613,6 +617,8 @@ static void stat_keyon(scsp_t *c, slot_t *s)
     if (IMXL(s)) t->dsp_send++;
     if (SSCTL(s)) t->noise++;
     if (LPCTL(s)) t->looped++;
+    t->disdl[DISDL(s)]++;
+    t->keyonex++;
     end = SA(s) + bytes;
     if (end > t->max_end) t->max_end = end;
     for (a = SA(s) >> 12; a <= (end >> 12) && a < 256u; a++) t->pages[a] = 1;

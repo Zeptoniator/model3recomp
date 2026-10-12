@@ -28,6 +28,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef M3_DREAMCAST
+#include <malloc.h>
+#endif
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -178,7 +181,11 @@ static void stat_report(void)
                         " dsp program %u words\n", c + 1, t->keyons, t->pcm8, t->fm,
                 t->lfo, t->dsp_send, t->noise, t->looped, t->max_end >> 10, pages * 4,
                 scsp_dsp_steps(c ? g_scsp2 : g_scsp1));
+        fprintf(stderr, "[sndstat]   scsp%u DISDL at key-on: %u %u %u %u %u %u %u %u\n", c + 1,
+                t->disdl[0], t->disdl[1], t->disdl[2], t->disdl[3], t->disdl[4], t->disdl[5],
+                t->disdl[6], t->disdl[7]);
     }
+    fprintf(stderr, "[sndstat]   one-shots that ran out keyed on: %u\n", scsp_stats_ends);
     stat_ram_report();
     g_st_insns = g_st_rom = 0;
     if (g_st_hist) memset(g_st_hist, 0, 0x100000 * sizeof *g_st_hist);
@@ -435,7 +442,11 @@ void sound_init_paged(size_t (*read)(void *ctx, uint32_t off, void *dst, size_t 
                       void *ctx, size_t prog_size, size_t samples_size)
 {
     if (!read || prog_size < 16) return;
+#ifdef M3_DREAMCAST
+    g_rom_buf = (uint8_t *)memalign(32, ROM_SLOTS * ROM_PAGE);   /* for the disc's DMA */
+#else
     g_rom_buf = (uint8_t *)malloc(ROM_SLOTS * ROM_PAGE);
+#endif
     if (!g_rom_buf) return;
     memset(g_rom_tag, 0xFF, sizeof g_rom_tag);
     g_rom_read = read; g_rom_ctx = ctx;

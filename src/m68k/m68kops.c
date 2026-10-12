@@ -34378,7 +34378,14 @@ static void m68k_op_unpk_16_mm(void)
 #define NUM_CPU_TYPES 5
 
 void  (*m68ki_instruction_jump_table[0x10000])(void); /* opcode handler jump table */
-unsigned char m68ki_cycles[NUM_CPU_TYPES][0x10000]; /* Cycles used by CPU type */
+/* M68K_ONLY_68000 (model3recomp's Dreamcast build): the 68000's table and
+ * no other -- 256 KB a 16 MB machine does not have to spare. */
+#ifdef M68K_ONLY_68000
+#define NUM_CYCLE_TABLES 1
+#else
+#define NUM_CYCLE_TABLES NUM_CPU_TYPES
+#endif
+unsigned char m68ki_cycles[NUM_CYCLE_TABLES][0x10000]; /* Cycles used by CPU type */
 
 /* This is used to generate the opcode handler jump table */
 typedef struct
@@ -36381,7 +36388,7 @@ void m68ki_build_opcode_table(void)
 	{
 		/* default to illegal */
 		m68ki_instruction_jump_table[i] = m68k_op_illegal;
-		for(k=0;k<NUM_CPU_TYPES;k++)
+		for(k=0;k<NUM_CYCLE_TABLES;k++)
 			m68ki_cycles[k][i] = 0;
 	}
 
@@ -36393,7 +36400,7 @@ void m68ki_build_opcode_table(void)
 			if((i & ostruct->mask) == ostruct->match)
 			{
 				m68ki_instruction_jump_table[i] = ostruct->opcode_handler;
-				for(k=0;k<NUM_CPU_TYPES;k++)
+				for(k=0;k<NUM_CYCLE_TABLES;k++)
 					m68ki_cycles[k][i] = ostruct->cycles[k];
 			}
 		}
@@ -36404,7 +36411,7 @@ void m68ki_build_opcode_table(void)
 		for(i = 0;i <= 0xff;i++)
 		{
 			m68ki_instruction_jump_table[ostruct->match | i] = ostruct->opcode_handler;
-			for(k=0;k<NUM_CPU_TYPES;k++)
+			for(k=0;k<NUM_CYCLE_TABLES;k++)
 				m68ki_cycles[k][ostruct->match | i] = ostruct->cycles[k];
 		}
 		ostruct++;
@@ -36417,7 +36424,7 @@ void m68ki_build_opcode_table(void)
 			{
 				instr = ostruct->match | (i << 9) | j;
 				m68ki_instruction_jump_table[instr] = ostruct->opcode_handler;
-				for(k=0;k<NUM_CPU_TYPES;k++)
+				for(k=0;k<NUM_CYCLE_TABLES;k++)
 					m68ki_cycles[k][instr] = ostruct->cycles[k];
 /* SBF: don't add it here or the costs are added twice!
 				// For all shift operations with known shift distance (encoded in instruction word)
@@ -36441,7 +36448,7 @@ void m68ki_build_opcode_table(void)
 		for(i = 0;i <= 0x0f;i++)
 		{
 			m68ki_instruction_jump_table[ostruct->match | i] = ostruct->opcode_handler;
-			for(k=0;k<NUM_CPU_TYPES;k++)
+			for(k=0;k<NUM_CYCLE_TABLES;k++)
 				m68ki_cycles[k][ostruct->match | i] = ostruct->cycles[k];
 		}
 		ostruct++;
@@ -36451,7 +36458,7 @@ void m68ki_build_opcode_table(void)
 		for(i = 0;i <= 0x07;i++)
 		{
 			m68ki_instruction_jump_table[ostruct->match | (i << 9)] = ostruct->opcode_handler;
-			for(k=0;k<NUM_CPU_TYPES;k++)
+			for(k=0;k<NUM_CYCLE_TABLES;k++)
 				m68ki_cycles[k][ostruct->match | (i << 9)] = ostruct->cycles[k];
 		}
 		ostruct++;
@@ -36461,7 +36468,7 @@ void m68ki_build_opcode_table(void)
 		for(i = 0;i <= 0x07;i++)
 		{
 			m68ki_instruction_jump_table[ostruct->match | i] = ostruct->opcode_handler;
-			for(k=0;k<NUM_CPU_TYPES;k++)
+			for(k=0;k<NUM_CYCLE_TABLES;k++)
 				m68ki_cycles[k][ostruct->match | i] = ostruct->cycles[k];
 		}
 		ostruct++;
@@ -36469,7 +36476,7 @@ void m68ki_build_opcode_table(void)
 	while(ostruct->mask == 0xffff)
 	{
 		m68ki_instruction_jump_table[ostruct->match] = ostruct->opcode_handler;
-		for(k=0;k<NUM_CPU_TYPES;k++)
+		for(k=0;k<NUM_CYCLE_TABLES;k++)
 			m68ki_cycles[k][ostruct->match] = ostruct->cycles[k];
 		ostruct++;
 	}
