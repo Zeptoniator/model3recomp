@@ -1,5 +1,27 @@
 # Status
 
+## 2026-10-12 (evening) — a TLB for the guest's CROM reads
+
+- Every guest read of the CROMs went through `direct()`'s chain of range
+  checks, then `rom_at()` and `piece_at()`'s index lookup: `rom_at` alone
+  was 4.1 % of the race profile, `bus_read32` 2.5 %. A 64-entry TLB from
+  4 KB guest page to cached piece now answers first in `bus_read8/16/32`
+  (an aligned word is one load and a swap). A hit stamps the piece exactly
+  as `piece_at` does, so the cache evicts what it did and the disc is read
+  as before; an entry goes when its piece is evicted, when the bank
+  register moves the window and on a save state.
+- Profiled race 0-5400: **352.6 s instead of 373.4 s** (-5.6 %), all 27
+  RAM signatures equal, the same 5,859 pieces fetched in the same 2,195
+  disc reads. On the desktop, the race read through SCUD.DAT
+  (`M3_SCUD_PACK`) gives the same signatures every 200 fields and the same
+  pieces-fetched counts every 500, with and without the TLB.
+- Measured in Flycast, which bills instructions by number and not by
+  latency (a double-precision divide costs what a `mov` does): what it
+  can judge is fewer instructions. Caching each vertex's transform and
+  projection in `draw_model` by copying them along with the vertex took
+  the race from 373.4 s to 377.5 s -- fewer multiplies and divides, more
+  loads and stores -- and was set aside.
+
 ## 2026-10-12 — compact Real3D sink queue
 
 - The PVR path now has its own 100-byte triangle record instead of using the

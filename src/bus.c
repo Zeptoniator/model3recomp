@@ -35,6 +35,7 @@ static m3_roms_t g_roms;
 static uint8_t  *g_backup;          /* 128 KB battery-backed SRAM */
 static uint32_t  g_crom_bank;       /* byte offset of the window into the image */
 static uint32_t  g_crom_bank_reg;   /* what was written, which reads back verbatim */
+static void rom_tlb_flush(void);   /* the CROM read TLB, below */
 
 /* I/O board control register at 0xF0040000. It is a latch: the boot strobes a
  * bit, reads the register back, and waits for the bit to mirror -- first for
@@ -368,6 +369,7 @@ void bus_init(const m3_roms_t *roms)
     m3_ram_base = g_ram;
     g_crom_bank = 0;
     g_crom_bank_reg = 0;
+    rom_tlb_flush();
     g_io_ctrl = 0;
     g_io_ready = 0;
     eeprom_reset();
@@ -558,6 +560,30 @@ typedef struct {
 } piece_cache_t;
 static piece_cache_t g_cc, g_vc;          /* CROMs, VROM */
 
+/* The guest's reads of the CROMs, by 4 KB guest page: which cached piece
+ * holds the page, so that bus_read* skip direct()'s range checks and
+ * piece_at()'s lookup (on the Dreamcast those were ~7 % of a race). A hit
+ * stamps the piece exactly as piece_at does, so the cache evicts what it
+ * would have and the disc is read as before. An entry goes when its piece
+ * is evicted and when the bank register moves the window. Filled only for
+ * a page that maps whole onto one piece (guest and ROM offsets agree in
+ * their low 12 bits). */
+#define ROM_TLB_N 64u
+typedef struct { uint32_t tag; uint32_t slot; uint8_t *base; } rom_tlb_t;
+static rom_tlb_t g_rom_tlb[ROM_TLB_N];       /* tag: guest page + 1, 0 empty */
+
+static void rom_tlb_flush(void) { memset(g_rom_tlb, 0, sizeof g_rom_tlb); }
+
+static inline uint8_t *rom_tlb_hit(uint32_t a)
+{
+    rom_tlb_t *e = &g_rom_tlb[(a >> 12) & (ROM_TLB_N - 1u)];
+    if (e->tag != (a >> 12) + 1u) return NULL;
+    g_cc.tick++;                              /* as piece_at's hit */
+    g_cc.used[e->slot] = g_cc.tick;
+    g_cc.hits++;
+    return e->base + (a & 0xFFFu);
+}
+
 static size_t rom_size(int which)
 {
     return which == 2 ? g_roms.vrom_size
@@ -610,6 +636,9 @@ static uint8_t *piece_at(piece_cache_t *c, int which, uint32_t off)
     if (c->key[victim]) {
         uint32_t k = c->key[victim] - 1u;
         c->slot_of[k >> 28][k & 0x0FFFFFFFu] = 0;
+        if (c == &g_cc)
+            for (i = 0; i < ROM_TLB_N; i++)
+                if (g_rom_tlb[i].slot == victim) g_rom_tlb[i].tag = 0;
     }
     c->misses++;
     p = c->buf + (size_t)victim * M3_PIECE_SLOT;
@@ -647,6 +676,25 @@ static uint8_t *rom_at(int which, uint32_t off)
         else            piece_cache_init(c, M3_CROM_CACHE_KB, 0, 1);
     }
     return piece_at(c, which, off);
+}
+
+/* rom_at for a guest read at a, remembered in the TLB when it came from
+ * the CROM cache. */
+static uint8_t *rom_guest(uint32_t a, int which, uint32_t off)
+{
+    uint8_t *p = rom_at(which, off);
+#ifndef M3_LOOP_GUARD                  /* whose bank trace sees every read */
+    if (p && g_cc.buf && p >= g_cc.buf
+        && p < g_cc.buf + (size_t)g_cc.slots * M3_PIECE_SLOT
+        && !g_ws_on[0] && !((a ^ off) & 0xFFFu)) {
+        uint32_t slot = (uint32_t)((size_t)(p - g_cc.buf) / M3_PIECE_SLOT);
+        rom_tlb_t *e = &g_rom_tlb[(a >> 12) & (ROM_TLB_N - 1u)];
+        e->tag = (a >> 12) + 1u;
+        e->slot = slot;
+        e->base = g_cc.buf + (size_t)slot * M3_PIECE_SLOT;
+    }
+#endif
+    return p;
 }
 
 uint64_t bus_rom_cache_misses(void) { return g_cc.misses + g_vc.misses; }
@@ -778,7 +826,7 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
         if (a >= M3_CROM_FIXED && g_roms.crom_size) {
             uint32_t top = 0xFFFFFFFFu - (uint32_t)g_roms.crom_size + 1u;
             if (a >= top)
-                return rom_at(0, a - top);
+                return rom_guest(a, 0, a - top);
             /* Below the program and above 0xFF800000 is the data ROM, and it
              * is not banked: the whole span is the front of the image, which
              * is where a game's tables and models actually live.
@@ -790,7 +838,7 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
              * is 0x400000 and so on, one for one to 0xFFDFFFFF, and driving
              * the bank register through all 256 values moves none of it. */
             if (g_roms.crom_bank_size)
-                return rom_at(1, a - M3_CROM_FIXED);
+                return rom_guest(a, 1, a - M3_CROM_FIXED);
             return NULL;
         }
         /* Banked CROM window. */
@@ -817,7 +865,7 @@ static uint8_t *direct(uint32_t a, uint32_t size, int write)
                 }
             }
 #endif
-            return rom_at(1, (a - M3_CROM_BANKED) + g_crom_bank);
+            return rom_guest(a, 1, (a - M3_CROM_BANKED) + g_crom_bank);
         }
     }
     return NULL;
@@ -1239,6 +1287,7 @@ static void dev_write_word(uint32_t w, uint32_t v)
             case 99: g_crom_bank = b << 20; break;   /* the old, broken one */
             default: g_crom_bank = ((~b) & 0x7u) * 0x800000u; break;
             }
+            rom_tlb_flush();
             return;
         }
         default: return;
@@ -1510,23 +1559,40 @@ extern uint32_t m3_watch_addr;
 #define BUS_WATCH(a, v, n) ((void)0)
 #endif
 
+typedef uint32_t __attribute__((may_alias)) bus_u32_alias;
+typedef uint16_t __attribute__((may_alias)) bus_u16_alias;
+
 uint8_t bus_read8(uint32_t a)
 {
-    uint8_t *p = direct(a, 1, 0);
+    uint8_t *p;
+    if (a >= M3_CROM_BANKED && (p = rom_tlb_hit(a))) return *p;
+    p = direct(a, 1, 0);
     if (p) return *p;
     return (uint8_t)dev_read(a, 1);
 }
 
 uint16_t bus_read16(uint32_t a)
 {
-    uint8_t *p = direct(a, 2, 0);
+    uint8_t *p;
+    if (a >= M3_CROM_BANKED && (p = rom_tlb_hit(a))) {
+        /* A piece starts 32-byte aligned, so p is as aligned as a. Both
+         * hosts are little-endian. */
+        if (!(a & 1u)) return __builtin_bswap16(*(const bus_u16_alias *)(const void *)p);
+        return be16(p);
+    }
+    p = direct(a, 2, 0);
     if (p) return be16(p);
     return (uint16_t)dev_read(a, 2);
 }
 
 uint32_t bus_read32(uint32_t a)
 {
-    uint8_t *p = direct(a, 4, 0);
+    uint8_t *p;
+    if (a >= M3_CROM_BANKED && (p = rom_tlb_hit(a))) {
+        if (!(a & 3u)) return __builtin_bswap32(*(const bus_u32_alias *)(const void *)p);
+        return be32(p);
+    }
+    p = direct(a, 4, 0);
     if (p) return be32(p);
     return dev_read(a, 4);
 }
@@ -1620,6 +1686,7 @@ void bus_state(m3_state_t *st)
         m3_state_io(st, g_texfifo, g_texfifo_used);
     M3_STATE_VAR(st, g_crom_bank);
     M3_STATE_VAR(st, g_crom_bank_reg);
+    rom_tlb_flush();                    /* the window may have moved */
     M3_STATE_VAR(st, g_io_ctrl);
     M3_STATE_VAR(st, g_io_ready);
     M3_STATE_VAR(st, g_ee);
