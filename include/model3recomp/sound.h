@@ -45,7 +45,11 @@ typedef struct {
     uint8_t (*ram_read8)(int chip, uint32_t addr);
     void    (*field)(void);
 } sound_voices_t;
-void     sound_set_voices(const sound_voices_t *v, uint32_t local_ram);
+/* Writes below mirror_from (inside local_ram) are the driver's own
+ * variables and stay here: no voice plays from there, and the driver
+ * writes them all the time. Scud Race: 0x4000 (its second chip plays from
+ * 0x4000 up). */
+void     sound_set_voices(const sound_voices_t *v, uint32_t local_ram, uint32_t mirror_from);
 
 /* The 68000 program and the sample ROM read on demand: `read` fills dst
  * from offset off of a file that is the program (prog_size bytes) followed

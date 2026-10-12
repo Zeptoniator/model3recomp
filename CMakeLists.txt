@@ -54,6 +54,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "dreamcast")
     list(APPEND M3_SOURCES src/netplay_null.c
          src/platform/dreamcast/platform_dreamcast.c)
     set_source_files_properties(src/scsp.c PROPERTIES COMPILE_DEFINITIONS SCSP_NO_SYNTH)
+    # A quarter of the 68000's clock: over the desktop race its audio is as
+    # close to the full clock's as two full-clock runs are to each other
+    # down to 40 cycles a sample, and breaks at 32 (sound.c, SND_CYCLES).
+    set_source_files_properties(src/sound.c PROPERTIES COMPILE_DEFINITIONS SND_CYCLES=64)
     set_source_files_properties(src/m68k/m68kops.c src/m68k/m68kcpu.c
         PROPERTIES COMPILE_DEFINITIONS M68K_ONLY_68000)
 elseif(SDL2_FOUND)

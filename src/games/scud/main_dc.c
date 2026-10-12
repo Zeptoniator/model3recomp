@@ -140,7 +140,7 @@ static void sound_board_open(void)
     fseek(g_snd, 0, SEEK_END);
     size = ftell(g_snd);
     if (size <= (long)SND_PROG_BYTES) { printf("sound: SCUDSND.DAT too short\n"); return; }
-    sound_set_voices(aica_voices(), 0x8000u);
+    sound_set_voices(aica_voices(), 0x8000u, 0x4000u);
     sound_init_paged(read_snd, NULL, SND_PROG_BYTES, (size_t)size - SND_PROG_BYTES);
     printf("sound: board on the AICA, %ld KB of samples on the disc\n",
            (size - (long)SND_PROG_BYTES) >> 10);

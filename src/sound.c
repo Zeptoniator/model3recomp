@@ -42,6 +42,14 @@
 #define SND_RAM      0x80000u
 #define RATE         44100
 #define CYCLES       256            /* 11 289 600 Hz / 44 100 */
+/* The 68000's cycles per sample, as run: CYCLES on a desktop; fewer on a
+ * host that cannot afford it (M3_SND_CYCLES, or SND_CYCLES at build time).
+ * The driver spends most of its time polling its voices, so a slower
+ * 68000 does the same work with fewer turns of that loop. */
+#ifndef SND_CYCLES
+#define SND_CYCLES CYCLES
+#endif
+static unsigned g_cycles = SND_CYCLES;
 #define BYTE_SAMPLES 14             /* 31250 baud, 10 bits a byte */
 #define QSIZE        256
 
@@ -49,41 +57,63 @@ static const uint8_t *g_prog, *g_samples;
 static size_t g_prog_size, g_samples_size;
 static uint8_t *g_ram1, *g_ram2;
 static uint32_t g_ram_local = SND_RAM;      /* bytes of each RAM kept here */
+static uint32_t g_mirror_from;              /* writes below this stay here only */
 static const sound_voices_t *g_voices;
 
 /* ---- ROMs read on demand (sound_init_paged) ----------------------------
- * The driver reads a few dozen KB of its 512 KB program and copies samples
- * out of the 8 MB ROM a scene at a time (1.7 MB over a race): a handful of
- * 16 KB pages, least recently used out first, are all it needs here. */
-#define ROM_PAGE  0x4000u
-#define ROM_SLOTS 8u
+ * Two caches, least recently used out first. The driver's code and tables
+ * are a few dozen KB scattered over its 512 KB program: 4 KB pages, enough
+ * of them to hold it all, so the samples it streams can never push it out
+ * (sharing one cache, they did: 57,000 misses in a race). The samples are
+ * read in runs as the driver copies them, ~5 KB a field, several looping
+ * streams at once: sixteen 16 KB pages (eight missed 1,834 times in a race,
+ * sixteen 298 -- a replay of the race's reads, M3_SND_PAGETRACE). */
+typedef struct {
+    uint32_t page, shift, slots, last, clock;
+    uint8_t *buf;
+    uint32_t tag[32], age[32];
+    uint64_t misses;
+} rom_cache_t;
 static size_t (*g_rom_read)(void *, uint32_t, void *, size_t);
 static void *g_rom_ctx;
-static uint8_t *g_rom_buf;
-static uint32_t g_rom_tag[ROM_SLOTS], g_rom_age[ROM_SLOTS], g_rom_clock, g_rom_last = ~0u;
+static rom_cache_t g_rc_prog = { 0x1000u, 12u, 24u, ~0u }, g_rc_smp = { 0x4000u, 14u, 16u, ~0u };
 uint64_t g_snd_rom_misses;
+
+/* The byte at off, in its page (a page never splits an aligned word). */
+static const uint8_t *cache_at(rom_cache_t *c, uint32_t off)
+{
+    uint32_t page = off >> c->shift, k, old = 0;
+    if (c->last < c->slots && c->tag[c->last] == page)
+        return c->buf + (c->last << c->shift) + (off & (c->page - 1u));
+    for (k = 0; k < c->slots; k++) {
+        if (c->tag[k] == page) break;
+        if (c->age[k] < c->age[old]) old = k;
+    }
+    if (k == c->slots) {
+        k = old;
+        c->tag[k] = page;
+        g_snd_rom_misses++;
+        c->misses++;
+        if (g_rom_read(g_rom_ctx, page << c->shift, c->buf + (k << c->shift), c->page) != c->page)
+            memset(c->buf + (k << c->shift), 0xFF, c->page);
+    }
+    c->age[k] = ++c->clock;
+    c->last = k;
+    return c->buf + (k << c->shift) + (off & (c->page - 1u));
+}
 
 static unsigned rom8(uint32_t off)          /* program at 0, samples after */
 {
-    uint32_t page = off / ROM_PAGE, k, old = 0;
     if (!g_rom_read)
         return off < g_prog_size ? g_prog[off] : g_samples[off - g_prog_size];
-    if (g_rom_last < ROM_SLOTS && g_rom_tag[g_rom_last] == page)
-        return g_rom_buf[g_rom_last * ROM_PAGE + off % ROM_PAGE];
-    for (k = 0; k < ROM_SLOTS; k++) {
-        if (g_rom_tag[k] == page) break;
-        if (g_rom_age[k] < g_rom_age[old]) old = k;
-    }
-    if (k == ROM_SLOTS) {
-        k = old;
-        g_rom_tag[k] = page;
-        g_snd_rom_misses++;
-        if (g_rom_read(g_rom_ctx, page * ROM_PAGE, g_rom_buf + k * ROM_PAGE, ROM_PAGE) != ROM_PAGE)
-            memset(g_rom_buf + k * ROM_PAGE, 0xFF, ROM_PAGE);
-    }
-    g_rom_age[k] = ++g_rom_clock;
-    g_rom_last = k;
-    return g_rom_buf[k * ROM_PAGE + off % ROM_PAGE];
+    return *(off < g_prog_size ? cache_at(&g_rc_prog, off) : cache_at(&g_rc_smp, off));
+}
+
+/* A program word (off even): what the 68000 fetches its instructions as. */
+static unsigned prog16(uint32_t off)
+{
+    const uint8_t *p = g_rom_read ? cache_at(&g_rc_prog, off) : g_prog + off;
+    return ((unsigned)p[0] << 8) | p[1];
 }
 static scsp_t *g_scsp1, *g_scsp2;
 
@@ -181,11 +211,17 @@ static void stat_report(void)
                         " dsp program %u words\n", c + 1, t->keyons, t->pcm8, t->fm,
                 t->lfo, t->dsp_send, t->noise, t->looped, t->max_end >> 10, pages * 4,
                 scsp_dsp_steps(c ? g_scsp2 : g_scsp1));
+        fprintf(stderr, "[sndstat]   scsp%u low pages played:", c + 1);
+        for (i = 0; i < 16; i++) if (t->pages[i]) fprintf(stderr, " %u", i);
+        fprintf(stderr, "\n");
         fprintf(stderr, "[sndstat]   scsp%u DISDL at key-on: %u %u %u %u %u %u %u %u\n", c + 1,
                 t->disdl[0], t->disdl[1], t->disdl[2], t->disdl[3], t->disdl[4], t->disdl[5],
                 t->disdl[6], t->disdl[7]);
     }
-    fprintf(stderr, "[sndstat]   one-shots that ran out keyed on: %u\n", scsp_stats_ends);
+    fprintf(stderr, "[sndstat]   one-shots that ran out keyed on: %u; paged ROM misses %llu\n",
+            scsp_stats_ends, (unsigned long long)g_snd_rom_misses);
+    fprintf(stderr, "[sndstat]   misses: program %llu, samples %llu\n",
+            (unsigned long long)g_rc_prog.misses, (unsigned long long)g_rc_smp.misses);
     stat_ram_report();
     g_st_insns = g_st_rom = 0;
     if (g_st_hist) memset(g_st_hist, 0, 0x100000 * sizeof *g_st_hist);
@@ -254,8 +290,17 @@ static unsigned rd8(unsigned a)
     if (a >= 0x800000 && g_samples_size) {
         size_t o;
         STAT_ROM();
-        o = (g_s.bank + (a - 0x800000)) % g_samples_size;
+        o = g_s.bank + (a - 0x800000);
+        while (o >= g_samples_size) o -= g_samples_size;    /* no division */
 #ifdef M3_SND_STATS
+        {   /* M3_SND_PAGETRACE=<file>: each change of 1 KB sample block, with the field */
+            static FILE *tf; static int probed; static uint32_t lastb = ~0u;
+            if (!probed) { const char *e = getenv("M3_SND_PAGETRACE"); probed = 1; if (e) tf = fopen(e, "w"); }
+            if (tf && (o >> 10) != lastb) {
+                lastb = (uint32_t)(o >> 10);
+                fprintf(tf, "%llu %u\n", (unsigned long long)model3recomp_frame_count(), lastb);
+            }
+        }
         if (!g_st_srom) g_st_srom = (uint8_t *)calloc(4096, 1);
         if (g_st_srom) g_st_srom[(o >> 12) & 4095] = 1;
 #endif
@@ -278,14 +323,14 @@ static void wr8(unsigned a, unsigned v)
     if (a < 0x080000) {
         STAT_RAM(0, a, 1);
         if (a < g_ram_local) g_ram1[a] = (uint8_t)v;
-        if (g_voices) g_voices->ram_write8(0, a, (uint8_t)v);
+        if (g_voices && a >= g_mirror_from) g_voices->ram_write8(0, a, (uint8_t)v);
         return;
     }
     if (a >= 0x200000 && a < 0x280000) {
         a -= 0x200000;
         STAT_RAM(1, a, 1);
         if (a < g_ram_local) g_ram2[a] = (uint8_t)v;
-        if (g_voices) g_voices->ram_write8(1, a, (uint8_t)v);
+        if (g_voices && a >= g_mirror_from) g_voices->ram_write8(1, a, (uint8_t)v);
         return;
     }
     if ((a & 0xFFF000) == 0x100000 || (a & 0xFFF000) == 0x300000) {
@@ -312,8 +357,20 @@ static void wr16(unsigned a, unsigned v)
 
 /* Musashi's callbacks. */
 unsigned int m68k_read_memory_8(unsigned int a)  { return rd8(a); }
-unsigned int m68k_read_memory_16(unsigned int a) { return rd16(a); }
-unsigned int m68k_read_memory_32(unsigned int a) { return (rd16(a) << 16) | rd16(a + 2); }
+/* The common cases first: the driver's own RAM and its program. */
+unsigned int m68k_read_memory_16(unsigned int a)
+{
+    a &= 0xFFFFFE;
+#ifndef M3_SND_STATS                        /* which counts every access */
+    if (a + 1u < g_ram_local) return ((unsigned)g_ram1[a] << 8) | g_ram1[a + 1];
+    if (a - 0x600000u < g_prog_size) return prog16(a - 0x600000u);
+#endif
+    return rd16(a);
+}
+unsigned int m68k_read_memory_32(unsigned int a)
+{
+    return (m68k_read_memory_16(a) << 16) | m68k_read_memory_16(a + 2);
+}
 void m68k_write_memory_8(unsigned int a, unsigned int v)  { wr8(a, v); }
 void m68k_write_memory_16(unsigned int a, unsigned int v) { wr16(a, v); }
 void m68k_write_memory_32(unsigned int a, unsigned int v) { wr16(a, v >> 16); wr16(a + 2, v & 0xFFFF); }
@@ -408,15 +465,20 @@ void sound_uart_write(unsigned reg, uint8_t v)
 }
 
 /* ---- running ---------------------------------------------------------- */
-void sound_set_voices(const sound_voices_t *v, uint32_t local_ram)
+void sound_set_voices(const sound_voices_t *v, uint32_t local_ram, uint32_t mirror_from)
 {
     g_voices = v;
     g_ram_local = local_ram && local_ram < SND_RAM ? local_ram : SND_RAM;
+    g_mirror_from = mirror_from < g_ram_local ? mirror_from : g_ram_local;
 }
 
 static void board_init(void)
 {
     unsigned i;
+    {
+        const char *e = getenv("M3_SND_CYCLES");
+        if (e && atoi(e) > 0) g_cycles = (unsigned)atoi(e);
+    }
     g_ram1 = (uint8_t *)calloc(1, g_ram_local);
     g_ram2 = (uint8_t *)calloc(1, g_ram_local);
     if (!g_ram1 || !g_ram2) return;
@@ -441,14 +503,18 @@ static void board_init(void)
 void sound_init_paged(size_t (*read)(void *ctx, uint32_t off, void *dst, size_t len),
                       void *ctx, size_t prog_size, size_t samples_size)
 {
+    rom_cache_t *cs[2] = { &g_rc_prog, &g_rc_smp };
+    unsigned i;
     if (!read || prog_size < 16) return;
+    for (i = 0; i < 2; i++) {
 #ifdef M3_DREAMCAST
-    g_rom_buf = (uint8_t *)memalign(32, ROM_SLOTS * ROM_PAGE);   /* for the disc's DMA */
+        cs[i]->buf = (uint8_t *)memalign(32, cs[i]->slots * cs[i]->page);   /* for the disc's DMA */
 #else
-    g_rom_buf = (uint8_t *)malloc(ROM_SLOTS * ROM_PAGE);
+        cs[i]->buf = (uint8_t *)malloc(cs[i]->slots * cs[i]->page);
 #endif
-    if (!g_rom_buf) return;
-    memset(g_rom_tag, 0xFF, sizeof g_rom_tag);
+        if (!cs[i]->buf) return;
+        memset(cs[i]->tag, 0xFF, sizeof cs[i]->tag);
+    }
     g_rom_read = read; g_rom_ctx = ctx;
     g_prog_size = prog_size; g_samples_size = samples_size;
     board_init();
@@ -490,7 +556,7 @@ static void paged_selftest(const uint8_t *prog, size_t prog_size,
     g_far_ops2 = (scsp_voices_t){ g_far2, far_slot, far_common, far_dsp, far_dma2, far_monitor };
     v.chip[0] = &g_far_ops1; v.chip[1] = &g_far_ops2;
     v.ram_write8 = far_ram_w8; v.ram_read8 = far_ram_r8; v.field = far_field;
-    sound_set_voices(&v, 0x8000);
+    sound_set_voices(&v, 0x8000, 0x4000);
     g_prog_size = prog_size; g_samples_size = samples ? samples_size : 0;
     sound_init_paged(mem_read, NULL, prog_size, g_samples_size);
 }
@@ -567,7 +633,7 @@ static void board_field(void)
             if (g_s.tx_r != g_s.tx_w && scsp_midi_in(g_scsp1, g_s.tx[g_s.tx_r]))
                 g_s.tx_r = (g_s.tx_r + 1) % QSIZE;
         }
-        m68k_execute(CYCLES);
+        m68k_execute((int)g_cycles);
         scsp_sample(g_scsp1, &l, &r);
         scsp_sample(g_scsp2, &l, &r);
         if (g_far1) { scsp_sample(g_far1, &l, &r); scsp_sample(g_far2, &l, &r); }
