@@ -20,12 +20,30 @@
  * common case, and the byte order matches what bus.c stores (big-endian, as
  * the guest sees it).
  */
+/* An aligned word is one host load and a byte swap. Built from bytes, as the
+ * unaligned case must be, a 32-bit read was 17 SH-4 instructions; the guest
+ * nearly always aligns, and the SH-4 faults on a misaligned mov.l, so the
+ * test is on the address. A misaligned access goes to the bus: built from
+ * bytes here instead, it is the same value as the swapped load, and GCC
+ * merges the two branches into the byte-by-byte one. */
+#if defined(__GNUC__) && defined(__BYTE_ORDER__) && \
+    __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define M3_RAM_SWAP 1
+typedef uint32_t m3_ram_u32 __attribute__((may_alias));
+typedef uint16_t m3_ram_u16 __attribute__((may_alias));
+#endif
+
 static M3_INLINE uint32_t m3_ld32(uint32_t a)
 {
     if (a < M3_RAM_SIZE - 3u) {
         const uint8_t *p = m3_ram_base + a;
+#ifdef M3_RAM_SWAP
+        if (!(a & 3u)) return __builtin_bswap32(*(const m3_ram_u32 *)p);
+        return bus_read32(a);
+#else
         return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
                ((uint32_t)p[2] << 8) | p[3];
+#endif
     }
     return bus_read32(a);
 }
@@ -34,7 +52,12 @@ static M3_INLINE uint32_t m3_ld16(uint32_t a)
 {
     if (a < M3_RAM_SIZE - 1u) {
         const uint8_t *p = m3_ram_base + a;
+#ifdef M3_RAM_SWAP
+        if (!(a & 1u)) return __builtin_bswap16(*(const m3_ram_u16 *)p);
+        return bus_read16(a);
+#else
         return ((uint32_t)p[0] << 8) | p[1];
+#endif
     }
     return bus_read16(a);
 }
@@ -72,8 +95,13 @@ static M3_INLINE void m3_st32(uint32_t a, uint32_t v)
     M3_WATCH_NOTE(a, v, 4);
     if (a < M3_RAM_SIZE - 3u) {
         uint8_t *p = m3_ram_base + a;
+#ifdef M3_RAM_SWAP
+        if (!(a & 3u)) { *(m3_ram_u32 *)p = __builtin_bswap32(v); return; }
+        bus_write32(a, v);
+#else
         p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
         p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+#endif
         return;
     }
     bus_write32(a, v);
@@ -84,7 +112,12 @@ static M3_INLINE void m3_st16(uint32_t a, uint32_t v)
     M3_WATCH_NOTE(a, v, 2);
     if (a < M3_RAM_SIZE - 1u) {
         uint8_t *p = m3_ram_base + a;
+#ifdef M3_RAM_SWAP
+        if (!(a & 1u)) { *(m3_ram_u16 *)p = __builtin_bswap16((uint16_t)v); return; }
+        bus_write16(a, (uint16_t)v);
+#else
         p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v;
+#endif
         return;
     }
     bus_write16(a, (uint16_t)v);

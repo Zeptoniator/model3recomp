@@ -2,7 +2,7 @@
 
 ## 2026-10-12 — the race 35 % faster: no idle spin, no per-polygon copies
 
-Profiling build, Flycast, fields 0-5400: **423 s instead of 660 s**, RAM
+Profiling build, Flycast, fields 0-5400: **415 s instead of 660 s**, RAM
 signatures unchanged at every check. In order:
 - `draw_model` read every polygon through `bus_r3d_read`, a `memcpy` into
   an unaligned byte buffer: 14 % of the samples were in `memcpy`, most in
@@ -27,6 +27,12 @@ signatures unchanged at every check. In order:
   rasteriser's Gouraud; the sink shades flat. Each triangle is projected
   once: `sink_bounds` keeps the polygon in the triangle's own `proj`,
   over the view-space fields it no longer reads. 429 -> 423 s.
+- Guest RAM words were read and written a byte at a time (17 SH-4
+  instructions a load). An aligned access is now one `mov.l` and a swap;
+  a misaligned one goes to the bus, because built from bytes inline it is
+  the same value and GCC merged both branches into the byte loop. Guest
+  code -5.6 % of samples; 423 -> 415 s. (Times are the console's own
+  clock, emulated; Flycast's wall clock follows the load on the machine.)
 
 Left in a race field (~110-150 ms): `draw_model` 15 %, guest 23 %,
 `real3d_render` + `sink_project` ~10 %, disc waits ~8 %. What is left of
