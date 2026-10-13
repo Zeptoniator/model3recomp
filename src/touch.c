@@ -34,26 +34,34 @@ static void update(m3_touch *t)
     }
 }
 
-void m3_touch_layout(m3_touch *t, float x, float y, float w, float h, float dp, float range_dp)
+void m3_touch_layout(m3_touch *t, float x, float y, float w, float h, float dp, float range_dp,
+                     float side)
 {
-    /* The clusters need about 420 x 350 dp; smaller areas scale them down. */
+    /* The columns need about 420 x 360 dp; smaller areas scale them down. */
     const float auto_dp = minf(w / 800.f, h / 360.f) * 2.f;
-    float u, m, g, right, bottom, gas_w, brake_w, pedal, gear_h, gas_x, brake_x, pedal_y;
+    float u, m, g, cw, half, right, bottom, gas_w, brake_w, pedal, gear_h, cells, gas_x, brake_x, pedal_y, gear_y;
     m3_touch_clear(t);
-    u = minf(minf(dp > 0 ? dp : auto_dp, w / 420.f), h / 350.f);
+    u = minf(minf(dp > 0 ? dp : auto_dp, w / 420.f), h / 360.f);
     t->unit = u;
     t->range = clampf(range_dp, 30.f, 200.f);
     m = 12 * u; g = 8 * u; right = x + w; bottom = y + h;
-    t->box[M3_TOUCH_COIN]  = (m3_touch_box){ x + m, y + m, 64 * u, 44 * u };
-    t->box[M3_TOUCH_START] = (m3_touch_box){ x + m + 64 * u + g, y + m, 64 * u, 44 * u };
-    t->box[M3_TOUCH_VIEW]  = (m3_touch_box){ right - m - 76 * u, y + m, 76 * u, 44 * u };
-    gas_w = 76 * u; brake_w = 68 * u; pedal = 120 * u; gear_h = 46 * u;
-    gas_x = right - m - gas_w; brake_x = gas_x - g - brake_w; pedal_y = bottom - m - pedal;
+    /* A column fills its bar: 12 dp from the screen's edge, 6 from the picture. */
+    cw = side >= 0 ? clampf(side - 18 * u, 136 * u, 176 * u) : 164 * u;
+    half = (cw - g) / 2;
+    t->box[M3_TOUCH_COIN]  = (m3_touch_box){ x + m, y + m, half, 44 * u };
+    t->box[M3_TOUCH_START] = (m3_touch_box){ x + m + half + g, y + m, half, 44 * u };
+    t->box[M3_TOUCH_VIEW]  = (m3_touch_box){ right - m - half, y + m, half, 44 * u };
+    brake_w = (cw - g) * .47f; gas_w = cw - g - brake_w; pedal = 120 * u; gear_h = 46 * u; cells = 24 * u;
+    gas_x = right - m - gas_w; brake_x = gas_x - g - brake_w;
+    pedal_y = bottom - m - pedal; gear_y = pedal_y - g - gear_h;
     t->box[M3_TOUCH_BRAKE]     = (m3_touch_box){ brake_x, pedal_y, brake_w, pedal };
     t->box[M3_TOUCH_GAS]       = (m3_touch_box){ gas_x, pedal_y, gas_w, pedal };
-    t->box[M3_TOUCH_GEAR_DOWN] = (m3_touch_box){ brake_x, pedal_y - g - gear_h, brake_w, gear_h };
-    t->box[M3_TOUCH_GEAR_UP]   = (m3_touch_box){ gas_x, pedal_y - g - gear_h, gas_w, gear_h };
+    t->box[M3_TOUCH_GEAR_DOWN] = (m3_touch_box){ brake_x, gear_y, brake_w, gear_h };
+    t->box[M3_TOUCH_GEAR_UP]   = (m3_touch_box){ gas_x, gear_y, gas_w, gear_h };
     t->box[M3_TOUCH_STEER]     = (m3_touch_box){ x, y, w * .5f, h };
+    t->gears = (m3_touch_box){ brake_x, gear_y - g - cells, cw, cells };
+    t->rest_x = x + m + cw / 2;      /* the wheel at rest: in the left column, near the bottom */
+    t->rest_y = bottom - m - 22 * u;
 }
 
 void m3_touch_clear(m3_touch *t)
@@ -74,13 +82,13 @@ void m3_touch_up(m3_touch *t, int64_t id)
     update(t);
 }
 
-void m3_touch_down(m3_touch *t, int64_t id, float x, float y)
+int m3_touch_down(m3_touch *t, int64_t id, float x, float y)
 {
     int b;
     m3_touch_up(t, id);
     for (b = 0; b < M3_TOUCH_COUNT; b++) {
         if (!inside(&t->box[b], x, y)) continue;
-        if (b == M3_TOUCH_STEER && t->steering) return; /* one steering finger */
+        if (b == M3_TOUCH_STEER && t->steering) return -1; /* one steering finger */
         if (t->fingers < (int)(sizeof t->finger / sizeof t->finger[0])) {
             t->finger[t->fingers].id = id;
             t->finger[t->fingers].box = b;
@@ -91,8 +99,9 @@ void m3_touch_down(m3_touch *t, int64_t id, float x, float y)
             t->tapped[b] = 1;
         }
         update(t);
-        return;
+        return b;
     }
+    return -1;
 }
 
 void m3_touch_move(m3_touch *t, int64_t id, float x, float y)
@@ -105,13 +114,11 @@ void m3_touch_move(m3_touch *t, int64_t id, float x, float y)
 
 void m3_touch_pad(m3_touch *t, m3_pad_t *p)
 {
-    int on[M3_TOUCH_COUNT], b, any = t->steering;
+    int on[M3_TOUCH_COUNT], b;
     for (b = 0; b < M3_TOUCH_COUNT; b++) {
         on[b] = t->held[b] || t->tapped[b];
-        any |= on[b];
         t->tapped[b] = 0;
     }
-    if (!any) return;
     p->present = 1;
     if (t->steering) p->sx = (int8_t)lrintf(clampf(t->steer, -1.f, 1.f) * 127.f);
     if (on[M3_TOUCH_GAS])       p->buttons |= M3_PAD_A;
@@ -121,4 +128,15 @@ void m3_touch_pad(m3_touch *t, m3_pad_t *p)
     if (on[M3_TOUCH_VIEW])      p->buttons |= M3_PAD_X;
     if (on[M3_TOUCH_COIN])      p->buttons |= M3_PAD_Y;
     if (on[M3_TOUCH_START])     p->buttons |= M3_PAD_START;
+}
+
+int m3_touch_gear(uint8_t in08)
+{
+    switch (in08 & 0x70u) {
+    case 0x50: return 1;
+    case 0x60: return 2;
+    case 0x10: return 3;
+    case 0x20: return 4;
+    default:   return 0;
+    }
 }

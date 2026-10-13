@@ -1,6 +1,8 @@
 /* m3_touch: floating steering, one steering finger, pedals with steering, a
- * tap that lasts until the pad is read, gear taps as edges, the pad left
- * alone when nothing is touched, and layouts that fit and do not overlap. */
+ * tap that lasts until the pad is read, gear taps as edges, a pad present
+ * with no finger down (the gear lever stays put), columns that fit the bars
+ * beside the picture, layouts that fit and do not overlap, and the gear
+ * lever read back from register 0x08. */
 #include "../src/touch.h"
 
 #include <stdio.h>
@@ -26,13 +28,16 @@ int main(void)
     int i, j, k;
 
     memset(&t, 0, sizeof t);
-    m3_touch_layout(&t, 0, 0, 2400, 1080, 2.75f, 70);
+    m3_touch_layout(&t, 0, 0, 2400, 1080, 2.75f, 70, -1);
     sx = steer->x + 400; sy = steer->y + 900; travel = t.range * t.unit;
 
     p = read_pad(&t);
-    CHECK(!p.present && !p.buttons); /* nothing touched: a real pad is left alone */
+    CHECK(p.present && !p.buttons && p.sx == 0); /* nothing touched: present, idle */
+    p.buttons = M3_PAD_B; p.sx = -40;      /* a real pad's buttons and stick are kept */
+    m3_touch_pad(&t, &p);
+    CHECK(p.buttons == M3_PAD_B && p.sx == -40);
 
-    m3_touch_down(&t, 1, sx, sy);
+    CHECK(m3_touch_down(&t, 1, sx, sy) == M3_TOUCH_STEER);
     p = read_pad(&t);
     CHECK(p.present && p.sx == 0); /* where the thumb lands is straight ahead */
     m3_touch_down(&t, 2, gas->x + 5, gas->y + 5);
@@ -44,7 +49,7 @@ int main(void)
     CHECK(read_pad(&t).sx == 0);
     m3_touch_move(&t, 1, sx, sy);
     CHECK(read_pad(&t).sx == -127);
-    m3_touch_down(&t, 3, steer->x + 30, sy); /* a second thumb on the left does not steer */
+    CHECK(m3_touch_down(&t, 3, steer->x + 30, sy) == -1); /* a second thumb on the left does not steer */
     CHECK(read_pad(&t).sx == -127);
     m3_touch_up(&t, 1);
     m3_touch_up(&t, 2);
@@ -72,7 +77,12 @@ int main(void)
                                          {1024, 768, 1}, {2048, 1536, 2} };
         for (k = 0; k < 5; k++) {
             const float w = dims[k][0], h = dims[k][1];
-            m3_touch_layout(&t, 20, 10, w, h, dims[k][2], 200);
+            m3_touch_layout(&t, 20, 10, w, h, dims[k][2], 200, k == 2 ? 470 : -1);
+            {   /* the gear lever's positions: inside, over the gear buttons, clear of VIEW */
+                const m3_touch_box *gv = &t.gears, *up = &t.box[M3_TOUCH_GEAR_UP], *view = &t.box[M3_TOUCH_VIEW];
+                CHECK(gv->x >= 20 && gv->x + gv->w <= 20 + w + 0.01f);
+                CHECK(gv->y + gv->h <= up->y && gv->y >= view->y + view->h);
+            }
             for (i = 0; i < M3_TOUCH_COUNT; i++) {
                 const m3_touch_box *a = &t.box[i];
                 CHECK(a->x >= 20 && a->y >= 10 && a->x + a->w <= 20 + w + 0.01f && a->y + a->h <= 10 + h + 0.01f);
@@ -88,6 +98,18 @@ int main(void)
             }
         }
     }
+    {   /* a 20:9 phone's bars (470 px at 2.8 px a dp): each column stays in its bar */
+        const float side = 470, w = 2340;
+        m3_touch_layout(&t, 0, 0, w, 1080, 2.8125f, 70, side);
+        for (i = 0; i < M3_TOUCH_STEER; i++) {
+            const m3_touch_box *a = &t.box[i];
+            CHECK(a->x + a->w <= side || a->x >= w - side);
+        }
+        CHECK(t.rest_x - t.range * t.unit >= 0 && t.rest_x + t.range * t.unit <= side);
+    }
+    CHECK(m3_touch_gear(0x50) == 1 && m3_touch_gear(0x60 | 0x02) == 2 && m3_touch_gear(0x10) == 3);
+    CHECK(m3_touch_gear(0x20 | 0x0F) == 4 && m3_touch_gear(0x01) == 0);
+
     if (failures) return 1;
     printf("test_touch: ok\n");
     return 0;

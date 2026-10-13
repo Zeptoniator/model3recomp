@@ -5,8 +5,12 @@ layer and software renderer, packaged with SDL2's `SDLActivity`.
 
 Neither the game's code nor SDL2 is in this repository:
 
-- the lifted Scud Race C, from your own ROM set (`tools/scud/lift.py`, as for
-  the desktop build);
+- the lifted Scud Race C, from your own ROM set, as for the desktop build:
+  `python tools/scud/lift.py roms/ lifted/ --entries src/games/scud/entries.txt`.
+  Without the entries list, or from a lifter older than the race fixes
+  (`docs/dreamcast/BUGS.md`, DC-BUG-016), the game stops at the first
+  function only a race reaches (`no function lifted at 00035740` in logcat,
+  a frozen picture);
 - an SDL2 source tree: `git clone -b release-2.32.10 https://github.com/libsdl-org/SDL.git SDL2`.
 
 Requirements: JDK 17, Android SDK 37, NDK 28.2.13676358, CMake 3.31.6, and
@@ -35,12 +39,15 @@ program ROM").
 
 ## Controls
 
-Touch controls are drawn over the bars beside the picture: COIN and START at
-the top left, VIEW (the next view) at the top right, gear - and + over BRAKE
-and GAS at the bottom right. Steering floats: put a thumb anywhere on the
-left half, where it lands is straight ahead, and 70 dp to a side is full
-lock. A gamepad works as on the desktop. The back button does nothing, so an
-edge swipe cannot end a race; leave with Home.
+Touch controls fill the bars beside the picture, a column in each: COIN and
+START at the top left, VIEW (the next view) at the top right; at the bottom
+right the gear lever's four positions (the engaged one lit) over gear - and
++ over the BRAKE and GAS pedals, which light red and green. Steering floats:
+put a thumb anywhere on the left half, where it lands is straight ahead, and
+70 dp to a side is full lock; a wheel above the thumb turns with it. Labels
+are in the system's font, and a button clicks under the finger if the
+phone's touch feedback is on. A gamepad works as on the desktop. The back
+button does nothing, so an edge swipe cannot end a race; leave with Home.
 
 ## Measured
 

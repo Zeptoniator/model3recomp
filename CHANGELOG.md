@@ -14,7 +14,10 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   gear -/+, BRAKE and GAS in the bars beside the picture, floating steering
   on the left half. Measured on a Galaxy SM-S948B (Adreno 840): 17.4 ms a
   field, the board's 57.52 Hz, through attract mode and a race, the software
-  3D 8.5-10.9 ms of it.
+  3D 8.5-10.9 ms of it. The controls are drawn with soft-edged shapes and the
+  system's font (through `MainActivity`), each column as wide as its bar; the
+  pedals light red and green, the gear lever's position is shown, a wheel
+  turns with the steering thumb, and buttons click under the finger.
 - **Sound.** The sound board: a 68000 (Musashi, interpreted), two SCSPs
   (a C port of MAME's, timers counting samples so it is deterministic) and
   the i8251 UART between the PowerPC and SCSP 1's MIDI port. It runs a field
@@ -91,6 +94,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   TxRDY, a level up while the guest has it on and the line (31250 baud,
   55 bytes a field) has room. RAM signatures of a race with sound now equal
   those without, every 500 fields from 500 to 7500. Save states are version 4.
+- **The frame limiter could sleep for hours.** `platform_ticks_us` scaled a
+  nanosecond counter by 1e6 in 64 bits, which overflows every 5.1 hours of
+  uptime; the clock jumped back and `throttle()` slept until it caught up.
+- **Android: battery RAM was never saved** (an app is killed, never quit):
+  it is written whenever it changes, looked at every 5 s.
 - A guest word read at a region's last bytes read past the host buffer:
   Scud Race reads 32 bits at 0xFFFFFFFF, the program ROM's last byte. A
   desktop's allocator left slack there; Android's ends a large block at a
