@@ -83,6 +83,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   wrapping and an opaque fast path.
 
 ### Fixed
+- **The race start crawled with sound on.** The PowerPC's sound interrupt
+  was raised once a field, and Scud Race's handler sends one byte of its
+  command ring an interrupt: the start-of-race burst filled the ring and the
+  game waited on it a byte a field (2,500 fields of rolling start on the
+  desktop, a frozen picture on a phone). The interrupt is now the UART's
+  TxRDY, a level up while the guest has it on and the line (31250 baud,
+  55 bytes a field) has room. RAM signatures of a race with sound now equal
+  those without, every 500 fields from 500 to 7500. Save states are version 4.
 - A guest word read at a region's last bytes read past the host buffer:
   Scud Race reads 32 bits at 0xFFFFFFFF, the program ROM's last byte. A
   desktop's allocator left slack there; Android's ends a large block at a

@@ -9,7 +9,7 @@
 #include <string.h>
 
 #define STATE_MAGIC   0x5333334Du       /* "M33S" */
-#define STATE_VERSION 3u          /* 2: the sound board; 3: level interrupts */
+#define STATE_VERSION 4u          /* 2: the sound board; 3: level interrupts; 4: the UART line */
 
 uint32_t m3_safepoint_pc = 0xFFFFFFFFu;
 

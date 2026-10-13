@@ -51,6 +51,7 @@
 #endif
 static unsigned g_cycles = SND_CYCLES;
 #define BYTE_SAMPLES 14             /* 31250 baud, 10 bits a byte */
+#define LINE_BYTES   55             /* bytes the line carries a field: 766.7 / 14 */
 #define QSIZE        256
 
 static const uint8_t *g_prog, *g_samples;
@@ -164,6 +165,23 @@ static struct {
     uint8_t  rx[QSIZE]; unsigned rx_r, rx_w;   /* arrived from the board */
     int      ppc_irq;
 } g_p;
+
+/* The PowerPC's sound interrupt is the UART's TxRDY: up while the guest has
+ * it on (command bit 5) and the line has room this field. The guest's
+ * handler sends one byte an interrupt (its ring of commands drains by
+ * 0x2798, Scud Race), and a byte sent drops it until the handler has
+ * returned -- irq_tick re-raises a level only outside a dispatch. So the
+ * guest sends at the line's pace, about 55 bytes a field. Raised once a
+ * field instead, as it was, the start of a race (a burst of commands into a
+ * ring of 32) drained a byte a field and the game crawled: 2500 fields of
+ * rolling start, frozen on a phone. */
+static unsigned g_line;             /* bytes the line can still take this field */
+
+static void tx_level(void)
+{
+    irq_set_level(M3_IRQ_SOUND, g_p.ppc_irq && g_line > 0
+                                && ((g_p.tx_w + 1) % QSIZE) != g_p.tx_r);
+}
 
 int sound_present(void) { return g_scsp1 != NULL; }
 
@@ -626,13 +644,15 @@ void sound_uart_write(unsigned reg, uint8_t v)
             g_p.tx[g_p.tx_w] = v;
             g_p.tx_w = (g_p.tx_w + 1) % QSIZE;
         }
+        if (g_line) g_line--;
+        tx_level();
         return;
     }
-    /* A UART command with bit 5 set turns on the PowerPC's sound interrupt,
-     * which MAME raises every millisecond; here it is raised once a field.
-     * That is how the guest paces its command stream. */
+    /* A UART command with bit 5 set turns on the PowerPC's sound interrupt
+     * (MAME raises it every millisecond): see tx_level(). That is how the
+     * guest paces its command stream. */
     g_p.ppc_irq = (v & 0x20) != 0;
-    if (!g_p.ppc_irq) irq_ack(M3_IRQ_SOUND);
+    tx_level();
 }
 
 /* ---- running ---------------------------------------------------------- */
@@ -923,7 +943,10 @@ void sound_run_field(void)
         g_p.rx_w = (g_p.rx_w + 1) % QSIZE;
         g_s.rx_r = (g_s.rx_r + 1) % QSIZE;
     }
-    if (g_p.ppc_irq && !g_decoupled) irq_raise(M3_IRQ_SOUND);
+    if (!g_decoupled) {
+        g_line = LINE_BYTES;
+        tx_level();
+    }
 
     if (g_threaded) {
         LOCK();
@@ -945,6 +968,7 @@ void sound_state(m3_state_t *st)
     m3_state_io(st, g_ram2, g_ram_local);
     M3_STATE_VAR(st, g_s);
     M3_STATE_VAR(st, g_p);
+    M3_STATE_VAR(st, g_line);
     tmp = (uint8_t *)malloc(n);
     if (tmp) {
         scsp_state_save(g_scsp1, tmp); m3_state_io(st, tmp, n); scsp_state_load(g_scsp1, tmp);
