@@ -18,7 +18,25 @@ add_compile_options(-fno-math-errno)
 
 # SDL2 is needed for the platform layer and the example, but not for the
 # semantic tests -- so a machine without it can still run the harness.
-find_package(SDL2 QUIET)
+if(ANDROID)
+    # Android: SDL2 built from its source tree (release-2.32.x) as libSDL2.so,
+    # with its Java side (SDLActivity) taken from the same tree by Gradle.
+    set(M3_SDL2_SOURCE "" CACHE PATH "SDL2 source tree, for Android")
+    if(NOT EXISTS "${M3_SDL2_SOURCE}/CMakeLists.txt")
+        message(FATAL_ERROR "Android: set M3_SDL2_SOURCE to an SDL2 source tree (platform/android/README.md)")
+    endif()
+    enable_language(CXX) # SDL2's Android HIDAPI is C++
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${M3_SDL2_SOURCE} ${CMAKE_BINARY_DIR}/sdl2)
+    set(SDL2_FOUND ON)
+    # char is unsigned on ARM and signed on x86 and the SH-4, which the
+    # desktop and Dreamcast builds were checked on.
+    add_compile_options(-fsigned-char)
+else()
+    find_package(SDL2 QUIET)
+endif()
 
 set(M3_SOURCES
     src/model3recomp.c
@@ -33,6 +51,7 @@ set(M3_SOURCES
     src/real3d.c
     src/tilegen.c
     src/input.c
+    src/touch.c
     src/netplay.c
     src/savestate.c
     src/scsp.c
@@ -131,6 +150,10 @@ if(MODEL3RECOMP_BUILD_TESTS)
     add_executable(model3recomp_test_ppc tests/test_ppc.c)
     target_link_libraries(model3recomp_test_ppc PRIVATE model3recomp)
     add_test(NAME ppc_semantics COMMAND model3recomp_test_ppc)
+    add_executable(model3recomp_test_touch tests/test_touch.c src/touch.c)
+    target_include_directories(model3recomp_test_touch PRIVATE include)
+    target_link_libraries(model3recomp_test_touch PRIVATE m)
+    add_test(NAME touch_controls COMMAND model3recomp_test_touch)
 
     # Lifted PowerPC end to end: assemble, lift at build time, run, check.
     find_package(Python3 COMPONENTS Interpreter)
@@ -173,8 +196,16 @@ if(SCUD_LIFTED_DIR)
     else()
         set(SCUD_MAIN src/games/scud/main_host.c)
     endif()
-    add_executable(scudrace ${SCUD_MAIN} src/games/scud/scud.c
-                   src/games/scud/scudpack.c ${SCUD_LIFTED})
+    if(ANDROID)
+        # SDLActivity loads the game as libmain.so and calls its SDL_main.
+        add_library(scudrace SHARED ${SCUD_MAIN} src/games/scud/scud.c
+                    src/games/scud/scudpack.c ${SCUD_LIFTED})
+        set_target_properties(scudrace PROPERTIES OUTPUT_NAME main)
+        target_link_libraries(scudrace PRIVATE log)
+    else()
+        add_executable(scudrace ${SCUD_MAIN} src/games/scud/scud.c
+                       src/games/scud/scudpack.c ${SCUD_LIFTED})
+    endif()
     target_include_directories(scudrace PRIVATE ${SCUD_LIFTED_DIR} src/games/scud)
     target_link_libraries(scudrace PRIVATE model3recomp)
     if(NOT MSVC)

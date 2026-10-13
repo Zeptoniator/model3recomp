@@ -14,6 +14,14 @@
 
 #include <SDL.h>
 #include <SDL_syswm.h>
+#ifdef __ANDROID__
+#include "touch.h"
+#include <math.h>
+
+static m3_touch g_touch;               /* the touch controls (bottom of the controls section) */
+static void touch_event(const SDL_Event *e);
+static void touch_draw(void);
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -479,11 +487,19 @@ static int on_command(unsigned id)
 /* ---- lifecycle -------------------------------------------------------- */
 int platform_init(int w, int h, const char *title)
 {
+#ifdef __ANDROID__
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");       /* fingers are the touch controls, not a gun */
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1"); /* an edge swipe must not end the race */
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "[model3recomp] SDL_Init: %s\n", SDL_GetError());
         return 0;
     }
     settings_load();
+#ifdef __ANDROID__
+    opt.fullscreen = 1; /* a phone shows nothing else */
+#endif
     g_w = w; g_h = h;
     snprintf(g_title, sizeof g_title, "%s", title);
     g_win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -559,6 +575,16 @@ int platform_poll(void)
         case SDL_CONTROLLERDEVICEADDED:
             if (!g_pad) { g_pad = SDL_GameControllerOpen(e.cdevice.which); changed = 1; }
             break;
+#ifdef __ANDROID__
+        case SDL_FINGERDOWN:
+        case SDL_FINGERMOTION:
+        case SDL_FINGERUP:
+            touch_event(&e);
+            break;
+        case SDL_APP_WILLENTERBACKGROUND:
+            m3_touch_clear(&g_touch); /* nothing stays held while away */
+            break;
+#endif
         case SDL_CONTROLLERDEVICEREMOVED:
             if (g_pad && e.cdevice.which ==
                 SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_pad))) {
@@ -615,6 +641,140 @@ static float axis(SDL_GameControllerAxis a)
     return v;
 }
 
+#ifdef __ANDROID__
+/* ---- touch controls (Android) -------------------------------------------
+ *
+ * touch.c lays them out and turns fingers into a pad; here they are fed SDL's
+ * finger events and drawn over the picture, translucent, lit while held. The
+ * labels use a 5x7 font of our own: SDL2 has none. */
+static int g_touch_w, g_touch_h;
+
+static void touch_layout(void)
+{
+    int w = 0, h = 0;
+    float ddpi = 0;
+    SDL_GetRendererOutputSize(g_ren, &w, &h);
+    if (w == g_touch_w && h == g_touch_h) return;
+    g_touch_w = w; g_touch_h = h;
+    if (SDL_GetDisplayDPI(SDL_GetWindowDisplayIndex(g_win), &ddpi, NULL, NULL) != 0) ddpi = 0;
+    m3_touch_layout(&g_touch, 0, 0, (float)w, (float)h, ddpi / 160.f, 70.f);
+}
+
+static void touch_event(const SDL_Event *e)
+{
+    float x, y;
+    touch_layout();
+    x = e->tfinger.x * g_touch_w;
+    y = e->tfinger.y * g_touch_h;
+    if (e->type == SDL_FINGERDOWN)        m3_touch_down(&g_touch, (int64_t)e->tfinger.fingerId, x, y);
+    else if (e->type == SDL_FINGERMOTION) m3_touch_move(&g_touch, (int64_t)e->tfinger.fingerId, x, y);
+    else                                  m3_touch_up(&g_touch, (int64_t)e->tfinger.fingerId);
+}
+
+static const struct { char c; uint8_t row[7]; } k_font[] = {
+    { 'A', { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 } }, { 'B', { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E } },
+    { 'C', { 0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F } }, { 'E', { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F } },
+    { 'G', { 0x0F, 0x10, 0x10, 0x13, 0x11, 0x11, 0x0F } }, { 'I', { 0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E } },
+    { 'K', { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 } }, { 'N', { 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 } },
+    { 'O', { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } }, { 'R', { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 } },
+    { 'S', { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E } }, { 'T', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } },
+    { 'V', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04 } }, { 'W', { 0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A } },
+    { '+', { 0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00 } }, { '-', { 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00 } },
+    { '<', { 0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02 } }, { '>', { 0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08 } },
+};
+
+/* Text centred on (cx, cy), each font pixel px square. */
+static void touch_text(float cx, float cy, float px, const char *s)
+{
+    const float w = (6.f * (float)strlen(s) - 1.f) * px;
+    float x = cx - w / 2;
+    for (; *s; s++, x += 6 * px) {
+        size_t g;
+        int r, c;
+        for (g = 0; g < sizeof k_font / sizeof k_font[0] && k_font[g].c != *s; g++) {}
+        if (g == sizeof k_font / sizeof k_font[0]) continue;
+        for (r = 0; r < 7; r++)
+            for (c = 0; c < 5; c++)
+                if (k_font[g].row[r] & (0x10 >> c)) {
+                    SDL_FRect p = { x + c * px, cy - 3.5f * px + r * px, px, px };
+                    SDL_RenderFillRectF(g_ren, &p);
+                }
+    }
+}
+
+static void touch_frame(float x, float y, float w, float h, float t)
+{
+    SDL_FRect s[4] = { { x, y, w, t }, { x, y + h - t, w, t }, { x, y + t, t, h - 2 * t }, { x + w - t, y + t, t, h - 2 * t } };
+    SDL_RenderFillRectsF(g_ren, s, 4);
+}
+
+static void touch_disc(float cx, float cy, float r, SDL_Color col)
+{
+    SDL_Vertex v[26];
+    int idx[72], k;
+    v[0].position.x = cx; v[0].position.y = cy; v[0].color = col;
+    for (k = 0; k <= 24; k++) {
+        const float a = (float)k * 6.2831853f / 24.f;
+        v[k + 1].position.x = cx + r * cosf(a);
+        v[k + 1].position.y = cy + r * sinf(a);
+        v[k + 1].color = col;
+        if (k < 24) { idx[3 * k] = 0; idx[3 * k + 1] = k + 1; idx[3 * k + 2] = k + 2; }
+    }
+    SDL_RenderGeometry(g_ren, NULL, v, 26, idx, 72);
+}
+
+static void touch_draw(void)
+{
+    static const char *const labels[M3_TOUCH_STEER] = { "COIN", "START", "VIEW", "-", "+", "BRAKE", "GAS" };
+    const float u = g_touch.unit, op = 0.6f;
+    int b;
+    touch_layout();
+    SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
+    for (b = 0; b < M3_TOUCH_STEER; b++) {
+        const m3_touch_box *x = &g_touch.box[b];
+        const int lit = g_touch.held[b];
+        const SDL_FRect r = { x->x, x->y, x->w, x->h };
+        const int sign = b == M3_TOUCH_GEAR_DOWN || b == M3_TOUCH_GEAR_UP;
+        SDL_SetRenderDrawColor(g_ren, lit ? 255 : 12, lit ? 196 : 16, lit ? 0 : 24, (Uint8)((lit ? 200 : 120) * op));
+        SDL_RenderFillRectF(g_ren, &r);
+        SDL_SetRenderDrawColor(g_ren, 255, 255, 255, (Uint8)((lit ? 235 : 120) * op));
+        touch_frame(x->x, x->y, x->w, x->h, 2 * u);
+        if (lit) SDL_SetRenderDrawColor(g_ren, 20, 20, 20, 255);
+        else     SDL_SetRenderDrawColor(g_ren, 255, 255, 255, (Uint8)(235 * op));
+        {   /* the label: as large as fits, with 6 dp either side */
+            const float fit = (x->w - 12 * u) / (6.f * (float)strlen(labels[b]) - 1.f);
+            const float px = sign ? 4.f * u : fit < 2.2f * u ? fit : 2.2f * u;
+            touch_text(x->x + x->w / 2, x->y + (b >= M3_TOUCH_BRAKE ? x->h - 22 * u : x->h / 2), px, labels[b]);
+        }
+    }
+    {   /* steering: a track centred where the thumb landed (at rest, bottom left) */
+        const m3_touch_box *z = &g_touch.box[M3_TOUCH_STEER];
+        const float travel = g_touch.range * u, knob = 22 * u;
+        const float cx = g_touch.steering ? g_touch.origin_x : z->x + 12 * u + knob + travel;
+        const float cy = g_touch.steering ? g_touch.origin_y : z->y + z->h - 12 * u - knob - 8 * u;
+        float kx = g_touch.steering ? g_touch.finger_x : cx;
+        const SDL_FRect track = { cx - travel, cy - 5 * u, 2 * travel, 10 * u };
+        const SDL_FRect tick = { cx - u, cy - 12 * u, 2 * u, 24 * u };
+        SDL_Color knob_col = { 12, 16, 24, (Uint8)(120 * op) };
+        if (kx < cx - travel) kx = cx - travel;
+        if (kx > cx + travel) kx = cx + travel;
+        if (g_touch.steering) knob_col.r = 255, knob_col.g = 196, knob_col.b = 0, knob_col.a = (Uint8)(200 * op);
+        SDL_SetRenderDrawColor(g_ren, 12, 16, 24, (Uint8)(120 * op));
+        SDL_RenderFillRectF(g_ren, &track);
+        SDL_SetRenderDrawColor(g_ren, 255, 255, 255, (Uint8)(120 * op));
+        touch_frame(track.x, track.y, track.w, track.h, 1.5f * u);
+        SDL_RenderFillRectF(g_ren, &tick);
+        touch_disc(kx, cy, knob, knob_col);
+        if (!g_touch.steering) {
+            SDL_SetRenderDrawColor(g_ren, 255, 255, 255, (Uint8)(235 * op));
+            touch_text(cx, cy - knob - 14 * u, 2.f * u, "STEER");
+            touch_text(cx - travel * .6f, cy, 2.f * u, "<");
+            touch_text(cx + travel * .6f, cy, 2.f * u, ">");
+        }
+    }
+}
+#endif /* __ANDROID__ */
+
 void platform_sample(m3_input_t *in)
 {
     const Uint8 *k = SDL_GetKeyboardState(NULL);
@@ -657,6 +817,9 @@ void platform_sample(m3_input_t *in)
         if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_X))         p->buttons |= M3_PAD_X;
         if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_START))     p->buttons |= M3_PAD_START;
     }
+#ifdef __ANDROID__
+    m3_touch_pad(&g_touch, &in->pad[0]);
+#endif
 
     if (opt.mouse) {
         SDL_Rect r = view_rect();
@@ -793,6 +956,9 @@ void platform_present(void)
     if ((g_pad && opt.pad == 2) || netplay_active())
         crosshair(&r, in->gun_x[1], in->gun_y[1], 64, 160, 255);
 
+#ifdef __ANDROID__
+    touch_draw();
+#endif
     SDL_RenderPresent(g_ren);
     throttle();
 }

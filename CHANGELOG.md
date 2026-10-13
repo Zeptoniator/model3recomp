@@ -7,6 +7,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Android** (`platform/android`): Scud Race on an arm64 phone, the desktop
+  build's SDL2 platform layer and software renderer packaged with SDL2's
+  `SDLActivity` (SDL2 built from its source, the game as `libmain.so`).
+  Touch controls (`src/touch.c`, tested by `test_touch`): COIN, START, VIEW,
+  gear -/+, BRAKE and GAS in the bars beside the picture, floating steering
+  on the left half. Measured on a Galaxy SM-S948B (Adreno 840): 17.4 ms a
+  field, the board's 57.52 Hz, through attract mode and a race, the software
+  3D 8.5-10.9 ms of it.
 - **Sound.** The sound board: a 68000 (Musashi, interpreted), two SCSPs
   (a C port of MAME's, timers counting samples so it is deterministic) and
   the i8251 UART between the PowerPC and SCSP 1's MIDI port. It runs a field
@@ -75,6 +83,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   wrapping and an opaque fast path.
 
 ### Fixed
+- A guest word read at a region's last bytes read past the host buffer:
+  Scud Race reads 32 bits at 0xFFFFFFFF, the program ROM's last byte. A
+  desktop's allocator left slack there; Android's ends a large block at a
+  guard page, and the game crashed after 17 s. The bus's buffers and the
+  ROM images now have 8 zero bytes after them; desktop RAM signatures to
+  field 3000 are unchanged.
 - **The PowerPC's sound interrupt was the wrong bit.** `M3_IRQ_SOUND` was
   0x08 (a video line); MAME and the board say 0x40.
 - **Scripted runs read whoever was at the machine.** With `M3_COIN_AT`,

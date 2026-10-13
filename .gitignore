@@ -49,3 +49,8 @@ rom/
 *.cdi
 *.elf
 *.map
+
+# --- Android build output ---
+platform/android/.gradle/
+platform/android/app/.cxx/
+platform/android/local.properties

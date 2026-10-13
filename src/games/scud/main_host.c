@@ -22,6 +22,69 @@
 static const char *g_roms_dir = "roms";
 static uint64_t g_stop_after;
 
+#ifdef __ANDROID__
+/* Android: SDLActivity calls SDL_main (SDL.h renames main below). stdout and
+ * stderr go to logcat (tag scudrace). The ROM images are read from the app's
+ * folder on shared storage, Android/data/<package>/files/roms, where adb push
+ * can put them; settings, NVRAM and shots go to its private storage. env.txt
+ * beside roms/ sets M3_ diagnostics, one NAME=value a line, as a desktop's
+ * environment would (M3_PROFILE=1, M3_NOTHROTTLE=1, ...). */
+#include <SDL.h>
+#include <android/log.h>
+#include <pthread.h>
+#include <unistd.h>
+
+static int g_log_fd[2];
+
+static void *log_to_logcat(void *arg)
+{
+    char buf[1024];
+    ssize_t n;
+    (void)arg;
+    while ((n = read(g_log_fd[0], buf, sizeof buf - 1)) > 0) {
+        buf[n] = 0;
+        __android_log_write(ANDROID_LOG_INFO, "scudrace", buf);
+    }
+    return NULL;
+}
+
+static void android_setup(void)
+{
+    static char roms[512];
+    const char *ext = SDL_AndroidGetExternalStoragePath();
+    const char *own = SDL_AndroidGetInternalStoragePath();
+    pthread_t t;
+
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+    if (pipe(g_log_fd) == 0) {
+        dup2(g_log_fd[1], 1);
+        dup2(g_log_fd[1], 2);
+        if (pthread_create(&t, NULL, log_to_logcat, NULL) == 0) pthread_detach(t);
+    }
+    if (ext) {
+        char path[512], line[256];
+        FILE *f;
+        snprintf(roms, sizeof roms, "%s/roms", ext);
+        g_roms_dir = roms;
+        snprintf(path, sizeof path, "%s/env.txt", ext);
+        if ((f = fopen(path, "r")) != NULL) {
+            while (fgets(line, sizeof line, f)) {
+                char *eq = strchr(line, '=');
+                line[strcspn(line, "\r\n")] = 0;
+                if (!eq || line[0] == '#') continue;
+                *eq = 0;
+                setenv(line, eq + 1, 1);
+                printf("env: %s=%s\n", line, eq + 1);
+            }
+            fclose(f);
+        }
+    }
+    if (own && chdir(own) != 0) perror(own);
+    printf("roms: %s\n", g_roms_dir);
+}
+#endif
+
 static uint8_t *slurp(const char *name, size_t *len, int required)
 {
     char path[512];
@@ -38,7 +101,9 @@ static uint8_t *slurp(const char *name, size_t *len, int required)
     fseek(f, 0, SEEK_END);
     n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    p = malloc((size_t)n);
+    /* Eight zero bytes past the image: the bus reads words in place, and the
+     * game reads one at 0xFFFFFFFF, the program ROM's last byte (bus.c, M3_TAIL). */
+    p = calloc(1, (size_t)n + 8);
     if (!p || fread(p, 1, (size_t)n, f) != (size_t)n) {
         fprintf(stderr, "%s: short read\n", path);
         fclose(f);
@@ -297,6 +362,9 @@ int main(int argc, char **argv)
         _mm_setcsr(_mm_getcsr() | 0x8040u);
 #endif
 
+#ifdef __ANDROID__
+    android_setup();
+#endif
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--roms") && i + 1 < argc)
             g_roms_dir = argv[++i];

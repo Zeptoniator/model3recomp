@@ -299,10 +299,16 @@ static uint8_t *g_cull_lo, *g_cull_hi, *g_poly;
 #  define M3_LAZY_REGIONS 0
 #endif
 
+/* A guest word read at a region's last bytes (Scud Race reads 32 bits at
+ * 0xFFFFFFFF) reads up to 3 bytes past it: every buffer the bus reads in
+ * place has M3_TAIL zero bytes after it. glibc's slack hid this on a desktop;
+ * Android's allocator ends a large block at a guard page, and it crashed. */
+#define M3_TAIL 8u
+
 static uint8_t *region(uint8_t **p, size_t size, const char *name)
 {
     if (!*p) {
-        *p = calloc(1, size);
+        *p = calloc(1, size + M3_TAIL);
         if (!*p) {
             fprintf(stderr, "[model3recomp] out of memory for %s (%u KB)\n",
                     name, (unsigned)(size >> 10));
@@ -359,8 +365,8 @@ size_t bus_real3d_bytes(void)
 void bus_init(const m3_roms_t *roms)
 {
     g_roms = *roms;
-    g_ram     = calloc(1, M3_RAM_SIZE);
-    g_backup  = calloc(1, 0x20000);
+    g_ram     = calloc(1, M3_RAM_SIZE + M3_TAIL);
+    g_backup  = calloc(1, 0x20000 + M3_TAIL);
     /* Battery-backed settings. A machine that has been switched on before has
      * these; a freshly allocated block of zeros is a machine that never has,
      * and a game that checks them for its own signature behaves accordingly.
@@ -377,7 +383,7 @@ void bus_init(const m3_roms_t *roms)
             }
         }
     }
-    g_vram    = calloc(1, TILEGEN_VRAM_SIZE);
+    g_vram    = calloc(1, TILEGEN_VRAM_SIZE + M3_TAIL);
     if (!M3_LAZY_REGIONS) {
         TEXFIFO(); CULL_LO(); CULL_HI(); POLY();
     }

@@ -1,0 +1,58 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Neither is in this repository: the lifted Scud Race C (tools/scud/lift.py,
+// from your own ROM set) and an SDL2 source tree (release-2.32.x).
+//   gradle :app:assembleDebug -PscudLiftedDir=/path/to/lifted -Psdl2Dir=/path/to/SDL2
+def liftedDir = providers.gradleProperty('scudLiftedDir').getOrElse('')
+def sdl2Dir = providers.gradleProperty('sdl2Dir').getOrElse('')
+if (!liftedDir || !sdl2Dir)
+    throw new GradleException('Pass -PscudLiftedDir=<lifted C> and -Psdl2Dir=<SDL2 source> (platform/android/README.md)')
+
+android {
+    namespace 'org.model3recomp.scudrace'
+    compileSdk 37
+    ndkVersion '28.2.13676358'
+
+    defaultConfig {
+        applicationId 'org.model3recomp.scudrace'
+        minSdk 26
+        targetSdk 37
+        versionCode 1
+        versionName '0.1'
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DCMAKE_BUILD_TYPE=Release',
+                          "-DSCUD_LIFTED_DIR=${liftedDir}",
+                          "-DM3_SDL2_SOURCE=${sdl2Dir}",
+                          '-DMODEL3RECOMP_BUILD_TESTS=OFF'
+                targets 'scudrace'
+            }
+        }
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    sourceSets {
+        main {
+            // SDLActivity and its helpers, from the same SDL2 tree.
+            java.srcDirs = ['src/main/java', "${sdl2Dir}/android-project/app/src/main/java"]
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('../../../CMakeLists.txt')
+            version '3.31.6'
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+}
